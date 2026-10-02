@@ -1300,8 +1300,20 @@ class TestNearbyChatE2E:
         # device that pinned it would read a reissued certificate as a change.
         b.pairing.set_device_name("书房的本子")
         a.transport.disconnect_peer(DEV_B)
+        # Both sides let go before the next dial.  A stops reading the moment it
+        # disconnects, so B's own view of the connection is still up unless the
+        # test waits for it -- and B is the side that then has to accept the new
+        # handshake.  Waiting only for A left B holding the old connection while
+        # its listener was already being asked for a new one, which is the
+        # transition that produces `DECRYPTION_FAILED_OR_BAD_RECORD_MAC` on the
+        # accepting side and `WRONG_VERSION_NUMBER` on the dialing side on CI's
+        # Linux leg.  This is the test being explicit about a state transition it
+        # was relying on a race to resolve.
         assert _deadline(lambda: DEV_B not in a.transport.get_connected_peers()), (
             "A never let go of B"
+        )
+        assert _deadline(lambda: DEV_A not in b.transport.get_connected_peers()), (
+            "B never let go of A after A disconnected"
         )
         a.transport.connect_to_peer(DEV_B, NAME_B, "127.0.0.1", b.port)
         assert _deadline(
@@ -1313,14 +1325,14 @@ class TestNearbyChatE2E:
         """Reconnects in quick succession must all establish.
 
         This is the same disconnect-then-dial the test above does once, run in a
-        loop with no pause, because that test fails on CI's Linux leg roughly one
-        run in three with `DECRYPTION_FAILED_OR_BAD_RECORD_MAC` on the *accepting*
-        side -- a MAC failure during the handshake, which is not a timeout and not
-        a name that arrived late.  It has never reproduced here (measured: 15
-        consecutive runs, Windows), so this exists to reproduce it from the other
-        direction: if the race is "a new connection arriving while the previous
-        one is still being torn down", more of those transitions per second is
-        what makes it show.
+        loop, because that test fails on CI's Linux leg with
+        `DECRYPTION_FAILED_OR_BAD_RECORD_MAC` on the *accepting* side -- a MAC
+        failure during the handshake, which is not a timeout and not a name that
+        arrived late.  It has never reproduced here (measured: 15 consecutive runs
+        of that test on Windows, and 60 rounds of this loop), and the value it has
+        now is as the stress case for the transition: both sides must have let go
+        before the next dial, and twelve of those in a row is where a test that
+        only waited for one side will show it.
         """
         a, b = rig.a, rig.b
         for round_number in range(12):
@@ -1328,6 +1340,11 @@ class TestNearbyChatE2E:
             assert _deadline(
                 lambda: DEV_B not in a.transport.get_connected_peers(), timeout=5
             ), f"A never let go of B on round {round_number}"
+            # B is the side that has to accept the next handshake, so B is the
+            # side whose view of the old connection has to be gone first.
+            assert _deadline(
+                lambda: DEV_A not in b.transport.get_connected_peers(), timeout=5
+            ), f"B never let go of A on round {round_number}"
             a.transport.connect_to_peer(DEV_B, NAME_B, "127.0.0.1", b.port)
             assert _deadline(
                 lambda: DEV_B in a.transport.get_connected_peers(), timeout=10
