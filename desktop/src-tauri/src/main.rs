@@ -659,6 +659,16 @@ async fn set_chat_muted(window: WebviewWindow, host: State<'_, Host>, peer_id: S
     validate_id(&peer_id)?;
     chat_call(window, host, "chat.mute", json!({"peer_id": peer_id, "muted": muted})).await
 }
+/// Whether this machine sends what it copies to that device.
+///
+/// Named `set_device_sync` rather than `set_sync_enabled`, which already exists
+/// on the host and means the machine-wide switch: one device's share of the
+/// clipboard is a different question from whether sync runs at all.
+#[tauri::command]
+async fn set_device_sync(window: WebviewWindow, host: State<'_, Host>, peer_id: String, enabled: bool) -> Result<Value, BridgeError> {
+    validate_id(&peer_id)?;
+    chat_call(window, host, "devices.set_sync", json!({"peer_id": peer_id, "enabled": enabled})).await
+}
 #[tauri::command]
 async fn list_chat_messages(window: WebviewWindow, host: State<'_, Host>, session_id: String) -> Result<Value, BridgeError> {
     validate_id(&session_id)?;
@@ -2538,6 +2548,7 @@ fn main() {
             list_chat_devices,
             list_chat_sessions,
             set_chat_muted,
+            set_device_sync,
             list_chat_messages,
             open_chat_file,
             reveal_chat_file,

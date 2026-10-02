@@ -172,6 +172,15 @@ export interface Device {
   note?: string;
   paired: boolean;
   connection_state: string;
+  /**
+   * Whether this machine sends what it copies to this device.
+   *
+   * Off means the clipboard does not leave for it on *either* route — the local
+   * link and the relay both consult the same switch.  Absent from the config
+   * means on, so this is true for anything paired before the setting existed and
+   * for a device just paired.
+   */
+  syncs_to?: boolean;
   /** Whether a click can place a call to this device — the answer the row's
    *  配对 and 连接 buttons are drawn on.  Not `connection_state`: that field
    *  describes the connection that exists, and a device that went quiet but

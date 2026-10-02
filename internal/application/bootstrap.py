@@ -690,6 +690,11 @@ class SidecarApplication:
                 "pairing.start", "pairing.confirm", "pairing.reject", "pairing.unpair",
                 "devices.note", "devices.connect", "devices.disconnect", "devices.forget",
                 "devices.restore", "devices.purge", "devices.test", "devices.certs",
+                # One device's share of the clipboard.  It needs the engine
+                # because the switch is read and written through the config the
+                # runtime owns, and it is answered from the same list the devices
+                # page draws.
+                "devices.set_sync",
                 "devices.scan",
                 "devices.retrust", "devices.offer_update", "devices.fetch_update",
                 # Collecting logs from the network: the requests go out over the

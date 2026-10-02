@@ -194,6 +194,18 @@ export const bridge = {
   chatSessions: () => command<ChatSessionsPage>("list_chat_sessions"),
   setChatMuted: (peerId: string, muted: boolean) =>
     command<{ ok: boolean; muted: string[] }>("set_chat_muted", { peerId, muted }),
+  /**
+   * Whether this machine sends what it copies to one device.
+   *
+   * The window draws the switch from `Device.syncs_to`, which the devices
+   * payload carries, so this only has to write it -- and the sidecar answers
+   * with what it stored rather than what was asked for.
+   */
+  setDeviceSync: (peerId: string, enabled: boolean) =>
+    command<{ ok: boolean; peer_id: string; enabled: boolean }>("set_device_sync", {
+      peerId,
+      enabled,
+    }),
   chatMessages: (sessionId: string) => command<ChatMessagesPage>("list_chat_messages", { sessionId }),
   openChatFile: (sessionId: string, transferId: string) =>
     command<{ ok: boolean }>("open_chat_file", { sessionId, transferId }),

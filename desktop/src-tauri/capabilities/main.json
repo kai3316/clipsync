@@ -81,6 +81,7 @@
     "allow-list-chat-devices",
     "allow-list-chat-sessions",
     "allow-set-chat-muted",
+    "allow-set-device-sync",
     "allow-list-chat-messages",
     "allow-open-chat-file",
     "allow-reveal-chat-file",

@@ -142,6 +142,14 @@ export const EN: Record<string, string> = {
   "设备名称": "Device name",
   "设备备注": "Device note",
   "保存设备备注失败": "Could not save the device note",
+  // One device's share of the clipboard.  "Sync clipboard" rather than "send
+  // clipboard", because the switch is read by a user deciding whether this
+  // machine's copies belong on that machine at all.
+  "同步剪贴板": "Clipboard",
+  "向此设备同步剪贴板": "Sync the clipboard to this device",
+  "关闭后，本机复制的内容不会发送到这台设备（局域网与中继都不发）。":
+    "When off, what you copy here is not sent to this device — over the local network or the relay.",
+  "设置剪贴板同步失败": "Could not change the clipboard setting",
   "刷新设备": "Refresh devices",
   "正在读取设备": "Reading devices",
   "暂无设备": "No devices",

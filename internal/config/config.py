@@ -222,6 +222,23 @@ class Config:
     # Global hotkeys are off by default; the user can enable them in settings.
     hotkeys_enabled: bool = False
 
+    # Paired devices this machine does *not* send clipboard content to.
+    #
+    # A list of the exceptions rather than a flag per device, and that is a
+    # deliberate choice between two silent failures: a device with no entry is in
+    # scope, so every pairing that existed before this setting keeps working
+    # exactly as it did and "just paired" means "syncing".  Defaulting to off
+    # would stop every existing pair at the upgrade with no visible cause, which
+    # is worse than a third machine the user has to switch off by hand.
+    #
+    # A copy used to go to every paired peer, over the LAN or the relay, whichever
+    # could carry it.  That is right for two machines on one desk and wrong the
+    # moment a third is added: a laptop, a work desktop and a machine at a
+    # relative's house are all "paired", so a password copied on the laptop lands
+    # in the history of all three.  The user cannot see that happen -- the clip
+    # simply arrives -- which is why the switch has to be somewhere they can find.
+    sync_paused_peers: list[str] = field(default_factory=list)
+
     # Internet (cross-network) sync over public MQTT-over-WebSocket relays
     # (see internal/transport/relay.py).  Zero-cost design: the editable
     # broker list defaults to free public services, payloads stay E2E-
@@ -432,6 +449,7 @@ FIELD_RULES: dict[str, tuple] = {
     "device_name": ("str",),
     "service_type": ("str",),
     "sync_enabled": ("bool",),
+    "sync_paused_peers": ("strlist_nonnull",),
     "timed_pause_until": ("float",),
     "auto_start": ("bool",),
     "filter_enabled_categories": ("strlist",),
@@ -710,6 +728,7 @@ def load() -> Config:
                 "notify_pairing",
                 "notify_sync",
                 "chat_muted_peers",
+                "sync_paused_peers",
                 "chat_open_to_all",
                 "file_open_to_all",
                 "log_sharing",
@@ -889,6 +908,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "notify_pairing": cfg.notify_pairing,
             "notify_sync": cfg.notify_sync,
             "chat_muted_peers": cfg.chat_muted_peers,
+            "sync_paused_peers": cfg.sync_paused_peers,
             "chat_open_to_all": cfg.chat_open_to_all,
             "file_open_to_all": cfg.file_open_to_all,
             "log_sharing": cfg.log_sharing,

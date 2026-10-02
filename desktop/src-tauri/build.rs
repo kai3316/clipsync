@@ -79,6 +79,7 @@ fn main() {
             "list_chat_devices",
             "list_chat_sessions",
             "set_chat_muted",
+            "set_device_sync",
             "list_chat_messages",
             "open_chat_file",
             "reveal_chat_file",

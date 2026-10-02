@@ -617,7 +617,41 @@ class LanRuntime:
 
     def devices(self):
         with self._lock:
-            return deepcopy(self._snapshot)
+            snapshot = deepcopy(self._snapshot)
+        # Each row says whether this machine sends clipboard content to it, so the
+        # list that already renders one control per device can render this one
+        # without a second call per row -- and so the switch is visible on the page
+        # where a user counts their devices, which is the moment the question
+        # ("which of these gets what I copy?") actually occurs to them.
+        for row in snapshot.get("items", []):
+            row["syncs_to"] = self.syncs_to(row.get("device_id") or row.get("id") or "")
+        return snapshot
+
+    def set_device_sync(self, peer_id: str, enabled: bool) -> dict:
+        """Include or exclude one device from what this machine copies.
+
+        Writes the *exception* list, so a device that is enabled simply stops
+        appearing: the setting stays the size of the user's exclusions rather
+        than the size of their device list, and a device paired later is in scope
+        without anything having to add it.
+        """
+
+        def run():
+            paused = {p for p in (getattr(self.config, "sync_paused_peers", None) or ()) if p}
+            # Both names for one device, so the switch is not undone by the id
+            # resolving: the user may be looking at the hashed row.
+            forms = {peer_id, self._resolve(peer_id), peer_id_hash(self._resolve(peer_id))}
+            if enabled:
+                paused -= forms
+            else:
+                paused |= forms
+            with config_lock:
+                self.config.sync_paused_peers = sorted(paused)
+            self._save_config()
+            self._publish("devices.changed", {})
+            return {"ok": True, "peer_id": peer_id, "enabled": enabled}
+
+        return self._command(run)
 
     def transfers(self):
         def map_item(item):
@@ -5290,7 +5324,10 @@ class LanRuntime:
         reports what it can; the rest is the price of the content staying local.
 
         The pairing filter is ``broadcast``'s own: clipboard content never
-        reaches an unpaired peer on either channel.
+        reaches an unpaired peer on either channel.  The second filter is the
+        user's: a device on ``config.sync_paused_peers`` is skipped here *and* in
+        ``_publish_relay``, so turning a device off means off on both routes and
+        not "off on the local link, still on the broker".
         """
         lan_delivered = set()
         try:
@@ -5302,11 +5339,32 @@ class LanRuntime:
             try:
                 if not self.pairing.is_peer_paired(pid):
                     continue
+                if not self.syncs_to(pid):
+                    continue
                 if self.transport.send_to_peer(pid, data):
                     lan_delivered.add(pid)
             except Exception:
                 logger.debug("Local sync: LAN send to %s failed", str(pid)[:12], exc_info=True)
         self._publish_relay(data, lan_delivered=lan_delivered)
+
+    def syncs_to(self, peer_id) -> bool:
+        """Whether the user lets this machine send clipboard content to *peer_id*.
+
+        Absent from ``sync_paused_peers`` means yes, which is what keeps a pairing
+        made before the setting existed working, and what makes a newly paired
+        device sync without a second step.
+
+        Matching is by the id as given *and* by its hashed mDNS form, because the
+        two are the same device under different names and the caller may hold
+        either: a device paused while it was seen as a hash must stay paused when
+        a session resolves it to its real id, or the switch silently comes back on.
+        """
+        paused = getattr(self.config, "sync_paused_peers", None) or ()
+        if not paused:
+            return True
+        peers = set(paused)
+        real = self._resolve(peer_id)
+        return peer_id not in peers and real not in peers and peer_id_hash(real) not in peers
 
     def _publish_relay(self, data: bytes, lan_delivered=()) -> None:
         """Mirror a clipboard frame to every internet-reachable peer.
@@ -5354,6 +5412,8 @@ class LanRuntime:
                 continue
             if peer_id in lan_delivered:
                 continue
+            if not self.syncs_to(peer_id):
+                continue
             peer = self.config.peers.get(peer_id)
             if peer is None or not getattr(peer, "paired", False):
                 continue
@@ -5366,6 +5426,8 @@ class LanRuntime:
             if not peer_secret or peer_id == self.config.device_id or peer_id in removed:
                 continue  # a stray self-entry must never mirror to ourselves
             if peer_id in lan_delivered:
+                continue
+            if not self.syncs_to(peer_id):
                 continue
             # Same key the peer's own channel will be read under: the session
             # key when the handshake has happened, the code-derived one until

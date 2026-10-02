@@ -1260,6 +1260,10 @@ def test_forget_archives_and_restore_returns_unpaired(rig):
             "sas": "",
             "archived": True,
             "removed_at": runtime.config.removed_peers["remote"].removed_at,
+            # Every row carries the user's per-device clipboard switch, and an
+            # archived one answers it like any other: a device with no entry is
+            # in scope, and removal is a separate fact the row already states.
+            "syncs_to": True,
         }
     ]
 

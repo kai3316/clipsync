@@ -646,6 +646,17 @@ class Dispatcher:
         if method == "chat.sessions":
             validate_params(params, {})
             return self.app.require_runtime().chat_sessions()
+        if method == "devices.set_sync":
+            # Whether this machine sends what it copies to that device.  The
+            # devices payload carries the current answer on each row, so the
+            # window draws the switch from the list it already has.
+            validate_params(params, {
+                "peer_id": (str, lambda v: 0 < len(v) <= 128),
+                "enabled": (bool, lambda _: True),
+            }, ("peer_id", "enabled"))
+            return self.app.require_runtime().set_device_sync(
+                params["peer_id"], params["enabled"]
+            )
         if method == "chat.mute":
             validate_params(params, {
                 "peer_id": (str, lambda v: 0 < len(v) <= 128),

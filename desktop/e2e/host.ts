@@ -84,6 +84,7 @@ export const fixtures: Record<string, unknown> = {
       "pairing.start", "pairing.confirm", "pairing.reject", "pairing.unpair",
       "devices.note", "devices.connect", "devices.disconnect", "devices.forget",
       "devices.restore", "devices.purge", "devices.test", "devices.certs",
+      "devices.set_sync",
       "devices.scan",
       "devices.retrust", "devices.offer_update", "devices.fetch_update",
       "logs.collect", "logs.collect_all",

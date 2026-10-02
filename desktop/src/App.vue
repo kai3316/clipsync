@@ -2504,6 +2504,27 @@ async function saveDeviceNote(device: Device, event: Event) {
   try { await bridge.setDeviceNote(device.id, note); await store.refresh(); }
   catch (reason: any) { store.fail(reason?.message || t("保存设备备注失败")); }
 }
+/**
+ * Turn this device's share of the clipboard on or off.
+ *
+ * The refresh is not decoration: the row's checkbox is drawn from
+ * `device.syncs_to`, which the *sidecar* answers, and it stores the exceptions
+ * rather than the answers.  Writing the box's own state optimistically would
+ * leave the UI showing a setting the config does not hold whenever the two
+ * disagree -- and they can, because the id the row carries may be the hashed
+ * mDNS form while the switch is written under the real one.
+ *
+ * The checkbox is put back from the refreshed list rather than left where the
+ * click put it, so a failure does not leave a switch that looks on and is not.
+ */
+async function toggleDeviceSync(device: Device, event: Event) {
+  const enabled = (event.target as HTMLInputElement).checked;
+  try { await bridge.setDeviceSync(device.id, enabled); await store.refresh(); }
+  catch (reason: any) {
+    (event.target as HTMLInputElement).checked = device.syncs_to !== false;
+    store.fail(reason?.message || t("设置剪贴板同步失败"));
+  }
+}
 /** Rename *this* machine, from the overview's own card.
  *
  * One field rather than the settings form's save: that form is only hydrated
@@ -5552,6 +5573,20 @@ async function translateText() {
                    pairing card writes, so the field would be a box that saves
                    nothing.  It gets the same dialog instead, from 重命名. -->
               <input v-if="device.paired && !device.relay" class="device-note" :value="device.note || ''" maxlength="512" :placeholder="t('设备备注')" :aria-label="t('设备备注')" @change="saveDeviceNote(device, $event)" />
+              <!-- Whether this machine's clipboard goes to this device.
+                   On the row rather than in settings, because the question
+                   ("which of these gets what I copy?") occurs to a user while
+                   they are looking at the list of their devices, and a switch
+                   they cannot find is a switch that does not exist.  Off stops
+                   both routes -- the local link and the relay -- so it means what
+                   it appears to mean. -->
+              <label v-if="device.paired && !device.relay" class="device-sync"
+                :title="t('关闭后，本机复制的内容不会发送到这台设备（局域网与中继都不发）。')">
+                <input type="checkbox" :checked="device.syncs_to !== false"
+                  :disabled="busy" :aria-label="t('向此设备同步剪贴板')"
+                  @change="toggleDeviceSync(device, $event)" />
+                <span>{{ t("同步剪贴板") }}</span>
+              </label>
               <div v-if="pairingPending(device)" class="pairing-controls">
                 <!-- The code is meant to be read off this screen and compared
                      with the one the other machine is showing, which is fine
