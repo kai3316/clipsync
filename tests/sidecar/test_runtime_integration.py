@@ -59,7 +59,14 @@ class PeerProcess:
         self.stderr.start()
         self.closed = False
         try:
-            frame = self.frames.get(timeout=15)
+            # Generous on purpose.  This is a fresh Python interpreter that
+            # imports the sidecar, prepares an identity, derives keys and brings
+            # up a transport before it says anything -- and it runs while the rest
+            # of the suite is also running.  Measured with a 15 s bound: clean in
+            # isolation six runs out of six, and one failure in five full-suite
+            # runs.  What the bound is for is "did it start at all", so it has to
+            # be long enough that a loaded machine cannot answer it "no".
+            frame = self.frames.get(timeout=45)
             # A process that died before its handshake says so here, and the
             # reason is on the stderr this class already keeps: without it the
             # failure is a bare "None is not None" and the cause has to be
@@ -114,7 +121,15 @@ class PeerProcess:
             assert frame["ok"], frame.get("error")
             return frame["result"]
 
-    def wait(self, method, predicate, timeout=10, **params):
+    def wait(self, method, predicate, timeout=20, **params):
+        """Poll until *predicate* holds, with the same reasoning as the startup bound.
+
+        Ten seconds is enough for any single transition when the machine is quiet
+        and not obviously enough when the rest of the suite is running: this waits
+        on a real sidecar process answering over stdio, so the clock measures a
+        loaded Python interpreter, not the transition.  Callers that mean a
+        tighter bound pass one.
+        """
         deadline = time.monotonic() + timeout
         while True:
             result = self.call(method, **params)
