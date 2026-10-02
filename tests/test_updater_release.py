@@ -38,13 +38,18 @@ ARTIFACTS = {
     "bundles/clipsync-desktop-macos/macos/ClipSync.app.tar.gz": "sig-mac",
     "bundles/clipsync-desktop-linux/appimage/ClipSync_1.0.3_amd64.AppImage": "sig-appimage",
     "bundles/clipsync-desktop-linux/deb/ClipSync_1.0.3_amd64.deb": "sig-deb",
+    # The ARM64 leg, which is a second Linux runner rather than a cross-build.
+    "bundles/clipsync-desktop-linux-arm64/appimage/"
+    "ClipSync_1.0.3_arm64.AppImage": "sig-appimage-arm",
+    "bundles/clipsync-desktop-linux-arm64/deb/ClipSync_1.0.3_arm64.deb": "sig-deb-arm",
 }
 
 # Every key the plugin can ask for, given the installers these legs build:
 # `{os}-{arch}-{installer}` first, then `{os}-{arch}`.  Linux needs both of its
 # own because a .deb and an AppImage are different payloads -- one bare
 # `linux-x86_64` entry could only ever name one of them, and a .deb client
-# handed AppImage bytes fails the installer's own format check.
+# handed AppImage bytes fails the installer's own format check.  ARM64 needs its
+# own pair for the same reason, under the arch name the plugin uses for it.
 EXPECTED_KEYS = {
     "windows-x86_64-nsis",
     "windows-x86_64",
@@ -53,7 +58,15 @@ EXPECTED_KEYS = {
     "linux-x86_64-appimage",
     "linux-x86_64-deb",
     "linux-x86_64",
+    "linux-aarch64-appimage",
+    "linux-aarch64-deb",
+    "linux-aarch64",
 }
+
+# The keys that only exist when their leg produced something.  Published
+# unconditionally they would name an artifact that is not on the release, which
+# is the client-side failure the assembler refuses to publish at all.
+AARCH64_KEYS = {"linux-aarch64-appimage", "linux-aarch64-deb", "linux-aarch64"}
 
 
 def workflow_text(name="desktop.yml"):
@@ -130,6 +143,50 @@ def test_each_key_names_the_payload_its_installer_can_actually_install(tmp_path)
     # The fallback for a machine whose bundle type the plugin could not read
     # installs an AppImage, so that is what it must name.
     assert platforms["linux-x86_64"]["url"].endswith(".AppImage")
+
+
+def test_each_key_names_the_payload_of_its_own_architecture(tmp_path):
+    """The two Linux legs must not be able to swap payloads.
+
+    Both legs produce an `AppImage` and a `deb`, so a matcher written as
+    `*.AppImage` fills the x64 key with whichever leg was walked first.  The
+    failure that produces is close to invisible: the manifest is valid, signed,
+    the download succeeds and the installer refuses the bytes.  Tauri puts
+    `_amd64`/`_arm64` in the name, so the keys are checked against it.
+    """
+    result = run_manifest(tmp_path)
+    assert result.returncode == 0, result.stderr
+    platforms = json.loads(result.stdout)["platforms"]
+
+    assert "_amd64.AppImage" in platforms["linux-x86_64-appimage"]["url"]
+    assert "_amd64.deb" in platforms["linux-x86_64-deb"]["url"]
+    assert "_amd64.AppImage" in platforms["linux-x86_64"]["url"]
+    assert "_arm64.AppImage" in platforms["linux-aarch64-appimage"]["url"]
+    assert "_arm64.deb" in platforms["linux-aarch64-deb"]["url"]
+    assert "_arm64.AppImage" in platforms["linux-aarch64"]["url"]
+
+
+def test_a_release_without_the_arm64_leg_does_not_name_its_artifacts(tmp_path):
+    """One leg failing to build must not cost the release its manifest.
+
+    The assembler refuses to publish a manifest naming an artifact that is not on
+    the release -- that is deliberate, a client that reads one fails on install
+    with nothing to show for it.  So the ARM64 keys have to be conditional: named
+    only when that leg produced something, and absent otherwise rather than
+    reporting a missing artifact that no build was ever going to attach.
+    """
+    drop = tuple(name for name in ARTIFACTS if "linux-arm64" in name)
+    result = run_manifest(tmp_path, drop=drop)
+    assert result.returncode == 0, result.stderr
+    platforms = json.loads(result.stdout)["platforms"]
+
+    assert not (AARCH64_KEYS & set(platforms)), (
+        f"the manifest names ARM64 artifacts that were never built: "
+        f"{sorted(AARCH64_KEYS & set(platforms))}"
+    )
+    # And the x64 keys are still filled from the x64 leg alone, which is the
+    # other half of the same property.
+    assert "_amd64.AppImage" in platforms["linux-x86_64-appimage"]["url"]
 
 
 def test_the_manifest_matches_the_macos_bundle_whatever_it_is_called(tmp_path):

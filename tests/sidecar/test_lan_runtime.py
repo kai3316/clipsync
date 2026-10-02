@@ -2980,8 +2980,18 @@ def test_a_resolved_pairing_is_published_with_its_status(rig):
 
 
 def test_a_chat_invite_settles_the_pairing_prompt_it_suppressed(rig):
-    """A prompt the invite suppressed must not stay on screen elsewhere."""
+    """A prompt the invite suppressed must not stay on screen elsewhere.
+
+    The debounce is pinned, as its sibling below does, and the first version of
+    this test did not -- which made it flaky rather than wrong.  A pairing notice
+    is published on the *second* refresh that sees a code, and only once
+    ``PAIRING_NOTICE_DELAY`` (1.2 s) has gone by; whether the invite's own refresh
+    was that second one came down to how long the steps before it took.  Measured,
+    it passed and failed in isolation on the same machine, and it is the kind of
+    flake that teaches a reader to re-run CI instead of reading it.
+    """
     runtime, pairing, transport, _, _, _, events, *_ = rig
+    runtime.PAIRING_NOTICE_DELAY = 60
     transport.connected.add("remote")
     pairing.generate_shared_pairing_code("remote")
     runtime._receive(

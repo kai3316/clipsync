@@ -43,7 +43,28 @@ jobs:
           - os: ubuntu-24.04
             bundles: deb,appimage
             artifact: clipsync-desktop-linux-x64
+          # ARM64 Linux, which the previous Python application published and this
+          # one did not: `build.yml` shipped `clipsync-linux-arm64.tar.gz` up to
+          # 1.0.33 and the desktop matrix only ever had x64, so an ARM64 user who
+          # moved across lost their build.  `ubuntu-24.04-arm` is a native ARM
+          # runner, not an emulated one, so this costs a second Linux leg rather
+          # than a QEMU cross-build, and Tauri's own bundler resolves the host
+          # triple (`aarch64-unknown-linux-gnu`) from the runner.
+          #
+          # `continue-on-error`, and that is a decision about the other three
+          # legs rather than this one.  `needs: [package]` covers the whole
+          # matrix, so a leg that fails takes the release with it: a new platform
+          # nobody has built yet would be able to hold Windows, macOS and x64
+          # Linux hostage on its first outing.  Tolerated, a failure here leaves
+          # the ARM64 keys out of the manifest -- which the assembler already
+          # handles, because it refuses to name an artifact that is not on the
+          # release -- and the three proven legs publish as they always did.
+          - os: ubuntu-24.04-arm
+            bundles: deb,appimage
+            artifact: clipsync-desktop-linux-arm64
+            continue-on-error: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error == true }}
     # Windows and macOS ship the sidecar as a directory resource; Linux still
     # ships the onefile, because nobody has run the onedir package there and the
     # two shapes are chosen separately on purpose (see clipsync-sidecar.spec).
@@ -421,15 +442,40 @@ jobs:
           # The bare entries are the fallback for a client whose bundle type the
           # plugin could not identify; on Linux that path installs an AppImage,
           # which is what they therefore name.
+          #
+          # Every pattern names its architecture, and that is load-bearing now
+          # that there are two Linux legs: `*.AppImage` matched whichever leg was
+          # walked first, so the x64 key could have been filled with the ARM64
+          # payload and every x64 client would have been served bytes it cannot
+          # install -- with the manifest signed and the download successful, which
+          # is the least visible way for that to fail.  Tauri puts the
+          # architecture in the file name (`_amd64`/`_arm64` for deb and
+          # AppImage), so the pattern is the place to hold it.
           wanted = {
               "windows-x86_64-nsis": "*-setup.exe",
               "darwin-aarch64-app": "*.app.tar.gz",
-              "linux-x86_64-appimage": "*.AppImage",
-              "linux-x86_64-deb": "*.deb",
+              "linux-x86_64-appimage": "*_amd64.AppImage",
+              "linux-x86_64-deb": "*_amd64.deb",
+              "linux-aarch64-appimage": "*_arm64.AppImage",
+              "linux-aarch64-deb": "*_arm64.deb",
               "windows-x86_64": "*-setup.exe",
               "darwin-aarch64": "*.app.tar.gz",
-              "linux-x86_64": "*.AppImage",
+              "linux-x86_64": "*_amd64.AppImage",
+              "linux-aarch64": "*_arm64.AppImage",
           }
+
+          # `linux-aarch64*` is published only when the ARM64 leg built.  Failing
+          # the whole manifest because one leg is missing would take the x64 and
+          # Windows installers down with it, so the ARM64 keys are required on the
+          # same terms as the rest only if their leg produced anything at all.
+          optional = ("linux-aarch64-appimage", "linux-aarch64-deb", "linux-aarch64")
+          produced_aarch64 = any(
+              path.name.endswith(("_arm64.deb", "_arm64.AppImage"))
+              for path in pathlib.Path("bundles").rglob("*")
+          )
+          if not produced_aarch64:
+              for key in optional:
+                  wanted.pop(key, None)
 
           # The artifact zip keeps the path it had under `bundle/`, so match on
           # the basename and never on the full path.
