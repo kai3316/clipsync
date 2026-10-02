@@ -43,6 +43,16 @@
       "signingIdentity": "-",
       "entitlements": "entitlements.plist"
     },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libappindicator3-1",
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "xclip"
+        ]
+      }
+    },
     "icon": [
       "../../assets/32x32.png",
       "../../assets/128x128.png",

@@ -263,10 +263,12 @@ cd desktop && npm ci && npm run tauri -- dev    # macOS / Linux
 
 **On Linux you also need `xclip` (X11) or `wl-clipboard` (Wayland)** — the Linux
 build reads and writes the clipboard through them: `sudo apt install xclip`, or
-`sudo apt install wl-clipboard`. Without one the application starts and its
-interface works, but **clipboard sync does nothing**; the log carries an
-`xclip not found` line and the interface does not yet say so. See "Known gaps"
-below.
+`sudo apt install wl-clipboard`. The `.deb` declares `xclip` as a dependency and
+installs it for you; **the AppImage cannot carry dependencies**, so if you use
+that one, install a tool yourself. Without either, the application starts, pairs
+and lists devices, and **clipboard sync does nothing** — the status bar shows a
+warning (hover it for the install command) and the log carries an
+`xclip not found` line.
 
 ---
 

@@ -262,7 +262,7 @@ cd desktop && npm ci && npm run tauri -- dev    # macOS / Linux
 
 > `Start-ClipSync.bat` 是**开发入口，不是打包好的应用**：它检查上面那三样依赖，第一次运行会在本机编译整个 Rust 应用，数据默认写在仓库里的 `.tauri-dev-data`。只想用的话请下载安装包。加 `-CheckOnly` 只做依赖检查。
 
-**Linux 上还需要 `xclip`（X11）或 `wl-clipboard`（Wayland）**，Linux 的剪贴板读写是通过它们完成的：`sudo apt install xclip` 或 `sudo apt install wl-clipboard`。缺了它应用能启动、界面能用，但**剪贴板同步不会工作**——日志里会有一行 `xclip not found`，界面上目前不会提示。详见下面「已知的功能缺口」。
+**Linux 上还需要 `xclip`（X11）或 `wl-clipboard`（Wayland）**，Linux 的剪贴板读写是通过它们完成的：`sudo apt install xclip` 或 `sudo apt install wl-clipboard`。`.deb` 已经把 `xclip` 声明为依赖，装包时会一起装上；**AppImage 带不了依赖**，所以用 AppImage 的话请自己装一个。缺了它应用能启动、能配对、能列设备，但**剪贴板同步什么都不做**——状态栏会显示一条警告（悬停有安装命令），日志里也有一行 `xclip not found`。
 
 ---
 

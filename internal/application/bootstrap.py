@@ -3,6 +3,7 @@
 import contextlib
 import json
 import logging
+import platform
 import secrets
 import threading
 import time
@@ -30,7 +31,7 @@ from internal.data.recovery import (
     records_without_identity,
 )
 from internal.data.reset import reset_data_dir
-from internal.diagnostics.localize import localize
+from internal.diagnostics.localize import localize, translate
 from internal.diagnostics.report import build_report
 from internal.i18n import set_locale
 from internal.infrastructure.persistence.favorites import FavoritesRepository
@@ -50,6 +51,65 @@ from internal.version import __version__
 from internal.web.api.settings import get_settings, update_settings
 
 logger = logging.getLogger(__name__)
+
+
+def capability_warnings(language: str = "") -> list[dict]:
+    """Things this application cannot do on this machine, for the window to show.
+
+    The one that matters is Linux's clipboard: capture there goes through
+    ``xclip`` (X11) or ``wl-paste``/``wl-copy`` (Wayland), neither of which is
+    part of the desktop bundle or a declared dependency of the ``.deb``.  On a
+    machine without one, ClipSync starts, pairs, lists devices and shows an empty
+    history -- because nothing it copies is ever seen.  The only trace was a
+    single ``xclip not found`` line in the log file and an item inside the
+    diagnostics report, which is a place a user with a *working-looking* app has
+    no reason to open.  That is the worst shape a failure can take: the product
+    appears to work.
+
+    Answering it in ``app.status`` puts it where the window already looks on
+    every launch, so the answer arrives without anyone asking a question.
+
+    Each entry carries the same ``*_key`` names the diagnostics report uses,
+    resolved here through the same i18n table -- so the two surfaces cannot drift
+    into describing different problems, and the window receives finished
+    sentences in the user's language rather than a key it would have to look up.
+    ``detail`` and ``guidance`` stay as the builder's fallbacks for a language
+    whose table has not been translated yet.
+    """
+    if platform.system() != "Linux":
+        return []
+    try:
+        from internal.diagnostics.report import clipboard_tool_probe
+    except Exception:  # pragma: no cover - an import that cannot fail in practice
+        return []
+    try:
+        probe = clipboard_tool_probe()
+    except Exception:
+        # A warning is not worth failing a status read over: an unanswerable
+        # probe means "unknown", not "broken".
+        logger.debug("clipboard tool probe failed", exc_info=True)
+        return []
+    if not probe or probe.get("ok"):
+        return []
+
+    table = {}
+    if language:
+        with contextlib.suppress(Exception):
+            from internal.diagnostics.localize import translations
+
+            table = translations(language)
+    return [
+        {
+            "code": "clipboard_tool_missing",
+            "detail": probe.get("detail", ""),
+            "detail_key": probe.get("detail_key", ""),
+            "detail_text": translate(table, probe.get("detail_key")) or probe.get("detail", ""),
+            "guidance": probe.get("guidance", ""),
+            "guidance_key": probe.get("guidance_key", ""),
+            "guidance_text": translate(table, probe.get("guidance_key"))
+            or probe.get("guidance", ""),
+        }
+    ]
 
 
 class SidecarApplication:
@@ -653,6 +713,11 @@ class SidecarApplication:
                 "relay.delivery_status",
             ] if self.runtime is not None and self.runtime.sync_state in ("running", "paused")
                 else []),
+            # What the application cannot do on this machine, in the form the
+            # window can show without asking a second question.  See
+            # `capability_warnings` for why an unusable clipboard is reported
+            # here rather than only in the diagnostics suite.
+            "warnings": capability_warnings(cfg.language if cfg else ""),
         }
 
     def internet_pairing_test(self, brokers=None) -> dict:

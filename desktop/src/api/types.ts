@@ -1,3 +1,23 @@
+export interface AppWarning {
+  /** Machine-readable, so the window can decide how loudly to say it. */
+  code: string;
+  /** The builder's fallback wording, and the key it came from. */
+  detail: string;
+  detail_key?: string;
+  guidance: string;
+  guidance_key?: string;
+  /**
+   * The same two sentences resolved through the i18n table.
+   *
+   * The sidecar localizes them because it already holds the table the
+   * diagnostics report is worded from, and two surfaces describing one problem
+   * must not be able to drift.  The window renders these and keeps the raw
+   * fields as the fallback for a language whose table is incomplete.
+   */
+  detail_text?: string;
+  guidance_text?: string;
+}
+
 export interface AppStatus {
   version: string;
   health: "starting" | "locked" | "ready" | "stopped";
@@ -7,6 +27,15 @@ export interface AppStatus {
   sync_state: string;
   runtime_error?: string;
   capabilities: string[];
+  /**
+   * What this application cannot do on this machine.
+   *
+   * The case it exists for is Linux without `xclip`/`wl-paste`: ClipSync starts,
+   * pairs and lists devices, and never sees a copy.  That failure is invisible
+   * without this, because a user whose history is simply empty has no reason to
+   * open a diagnostics page.
+   */
+  warnings?: AppWarning[];
   session_id: string;
   seq: number;
 }

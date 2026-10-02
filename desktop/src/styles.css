@@ -431,6 +431,20 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
    only thing on the right rather than the first of a group. */
 .bottom-status span:first-of-type { margin-left: auto; }
 .pause-status { white-space: nowrap; }
+/* A capability this machine does not have -- today only Linux without
+   `xclip`/`wl-paste`, which makes every copy invisible.
+
+   It warns rather than errors, and that is the point: the application is
+   running and everything else works, so it takes the danger palette without the
+   alarm an `.error-band` carries, and it does not take the `margin-left: auto`
+   above, which belongs to the sync state.  `cursor: help` because the install
+   command is the tooltip and there is no room for it in the bar. */
+.capability-warning {
+  white-space: nowrap;
+  cursor: help;
+  color: var(--warn-text);
+  border-bottom: 1px dotted currentColor;
+}
 .error-band { display: flex; gap: 10px; align-items: center; padding: 14px var(--page-gutter); color: var(--danger-text); background: var(--danger-soft); border-bottom: 1px solid var(--danger-line); }
 .error-band > svg { flex-shrink: 0; }
 .error-band strong { font-weight: 550; }

@@ -5816,6 +5816,18 @@ async function translateText() {
              about a pause started here, or about a page the user has since left,
              is still readable. -->
         <span v-if="statusMessage()" class="note status-message" role="status">{{ statusMessage() }}</span>
+        <!-- Something the application cannot do here, said where the user is
+             already looking.  It is deliberately not a toast: a toast is
+             dismissible and gone, and this condition does not fix itself -- on
+             Linux without `xclip`/`wl-paste` every copy is simply never seen,
+             which looks exactly like an application that is working. -->
+        <span
+          v-for="warning in state.status?.warnings || []"
+          :key="warning.code"
+          class="capability-warning"
+          role="alert"
+          :title="warning.guidance_text || warning.guidance"
+        >⚠ {{ warning.detail_text || warning.detail }}</span>
         <!-- The notice stack is placed against this bar rather than against the
              window: the stylesheet measures it from the bar's top edge, because
              the bar is the only element that knows where its own top edge is.
