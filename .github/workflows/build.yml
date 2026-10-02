@@ -81,21 +81,33 @@ jobs:
 
           What is new in this release:
 
-          - **The previous Python application is discontinued.**  There is no
-            `clipsync-windows.zip`, `clipsync-macos-arm64.zip`,
-            `clipsync-linux.tar.gz` or `clipsync-linux-arm64.tar.gz` on this
-            release and there will not be one on any later release.  If you are
-            running the old Python build, its update check will still offer you
-            this version and then find nothing to download — that is expected,
-            not a broken download.  Install the desktop application from the
-            assets below instead; it is what this project builds and supports
-            now.
+          - **Linux ARM64 is back.**  The Python build published
+            `clipsync-linux-arm64.tar.gz` up to 1.0.33 and the desktop build only
+            ever had x64, so an ARM64 Linux user lost their build in the move.
+            The release now carries `ClipSync_<version>_arm64.deb` and
+            `ClipSync_<version>_arm64.AppImage` again, built on a native ARM
+            runner, and the update manifest carries the `linux-aarch64` entries
+            for them.
 
-          - The Python codebase dropped the old Tk interface entirely — the
-            window, the settings dialogs, the tray icon and the global hotkey
-            module.  The desktop shell has owned all of that for several
-            releases, and keeping a second interface meant every change had to
-            be made twice.
+          - **You can now choose which devices get what you copy.**  A copy used
+            to go to every paired device — over the local network or the relay,
+            whichever could carry it.  That is right for two machines on one desk
+            and wrong the moment a third is paired: a laptop, a work desktop and
+            a machine at a relative's house are all paired, so a password copied
+            on the laptop lands in the history of all three, and nothing tells
+            you.  Each device on the devices page now has a 同步剪贴板 switch.
+            Turning one off stops both routes.  Devices paired before this
+            release keep syncing, so nothing changes unless you change it.
+
+          - **Linux: ClipSync now tells you when it cannot read the clipboard.**
+            Capture on Linux goes through `xclip` (X11) or `wl-clipboard`
+            (Wayland).  Without one the application started, paired, listed
+            devices and showed an empty history, because it never saw a copy —
+            the only trace was a line in a log file.  The status bar now says so
+            and the tooltip carries the install command.  The `.deb` also
+            declares `xclip` as a dependency again, so installing it brings the
+            tool; the AppImage cannot carry dependencies, so install one yourself
+            if you use that.
 
           - Fixed: a shutdown could hang and be logged as "did not release
             ownership within its budget".  The dial that was still connecting
@@ -120,6 +132,17 @@ jobs:
             moment it was finalized, and a file request could take over an
             in-flight send.  A hostile transfer name could also land outside the
             download directory.
+
+          Still true from 1.0.34, and repeated because it is the question a
+          returning user asks first:
+
+          - **The previous Python application is discontinued.**  There is no
+            `clipsync-windows.zip`, `clipsync-macos-arm64.zip`,
+            `clipsync-linux.tar.gz` or `clipsync-linux-arm64.tar.gz` on this
+            release, and there will not be one again.  If you are running the old
+            Python build, its update check will offer you this version and then
+            find nothing to download — that is expected, not a broken download.
+            Install the desktop application from the assets below instead.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
