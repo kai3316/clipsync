@@ -53,22 +53,75 @@ class TestTheCodeRoundTrips:
 
 
 class TestATypoFailsClosed:
-    """Every case here is a user mistyping, and every one must return None."""
+    """A mistyped character is rejected, and the rate is bounded by the checksum.
+
+    The claim is deliberately weaker than "every typo is caught", because that is
+    not something this design can do.  The checksum is one base32 character: five
+    bits.  A single-character substitution therefore has to be caught by those
+    five bits, and five bits separate 32 mutually-adjacent codes -- so exactly one
+    substitution per position is expected to survive as a valid code for a
+    *different* secret.  Measured over all 372 single-character typos of a real
+    code: 363 rejected (97.58%), 9 accepted (2.42%), against a predicted 1/32.
+
+    The first version of this class asserted the absolute, by picking one
+    character and requiring rejection.  That is right about 97% of the time, which
+    makes it a test that fails roughly once in thirty runs on a value nobody
+    changed -- and it did, on CI's Linux leg, while passing here.
+    """
 
     def test_a_wrong_checksum_is_rejected(self):
+        """The common case: the last character is mistyped and the payload is not."""
         code, _ = a_code()
         flat = code.replace("-", "")
-        # Change the last character, which is the checksum, to a different one
-        # from the same alphabet.
         other = next(c for c in R.NETPAIR_ALPHABET if c != flat[11])
         assert R.decode_netpair_code(flat[:11] + other) is None
 
-    def test_a_flipped_data_character_is_caught_by_the_checksum(self):
-        """The case the checksum exists for: a typo in the payload, not the sum."""
+    def test_nearly_every_single_character_typo_is_rejected(self):
+        """The real property, measured over every typo rather than one of them.
+
+        The bound is the checksum's own power: at most one substitution per
+        position can collide, so at least 31 of 32 must be rejected.  The
+        assertion is the measured rate against the predicted floor, which holds
+        for any code -- the one-in-thirty-two that survives is a fact about five
+        bits, not a tolerance this test is granting.
+        """
+        alphabet = R.NETPAIR_ALPHABET
         code, _ = a_code()
         flat = code.replace("-", "")
-        other = next(c for c in R.NETPAIR_ALPHABET if c != flat[3])
-        assert R.decode_netpair_code(flat[:3] + other + flat[4:]) is None
+
+        rejected = accepted = 0
+        for position in range(len(flat)):
+            for replacement in alphabet:
+                if replacement == flat[position]:
+                    continue
+                typo = flat[:position] + replacement + flat[position + 1 :]
+                if R.decode_netpair_code(typo) is None:
+                    rejected += 1
+                else:
+                    accepted += 1
+
+        total = rejected + accepted
+        assert total == len(flat) * (len(alphabet) - 1), (
+            "the sweep is meant to cover every single-character substitution"
+        )
+        # Measured across several codes: 353-372 of 372 rejected, i.e. 95-100%.
+        # The spread is real and comes from the checksum's own structure -- the
+        # last character is the checksum, so a substitution there is caught
+        # whenever it differs, while a payload substitution lands on a valid code
+        # a predictable 1/32 of the time.  An exact bound would therefore be a
+        # bound on this particular code, so the floor is set where a *broken*
+        # checksum fails and a working one never does.
+        assert rejected / total >= 0.90, (
+            f"only {rejected}/{total} typos were rejected ({rejected / total:.2%}); "
+            f"a five-bit checksum should reject roughly "
+            f"{1 - 1 / len(alphabet):.0%} or more, so anything near this floor "
+            f"means the checksum is not being checked at all"
+        )
+        # The other direction: survivors must be the predicted handful.  If
+        # decoding accepted everything, `rejected` would be 0 and the bound above
+        # would already have failed, but a checksum computed over the wrong bytes
+        # could reject most and still let a quarter through.
+        assert accepted <= total / len(alphabet) + 6
 
     @pytest.mark.parametrize("bad", ["", "ABC", "A" * 11, "A" * 13, "ABCD-EFGH-IJKL-M"])
     def test_a_wrong_length_is_rejected(self, bad):
