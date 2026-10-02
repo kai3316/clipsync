@@ -69,3 +69,11 @@ work/
 # published -- `docs/` is the GitHub Pages root, so anything under it is served,
 # and these belong to the process rather than to the product.
 notes/
+
+# The audit and performance reports.  Same reasoning as the notes above, and
+# more of it: they list the findings that are fixed *and* the ones that are still
+# open, with reachable paths written out.  This repository is public, so a
+# description of an unpatched defect in here is a description of an unpatched
+# defect to anyone reading.  They stay on the maintainer's disk.
+AUDIT-REPORT.md
+PERF-REPORT.md
