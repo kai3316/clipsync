@@ -496,6 +496,57 @@ export function createApplicationStore() {
       : value;
   }
 
+  /** Report a failure that did not come from the bridge.
+   *
+   * The error band renders `state.error.message`, `.code` and `.retryable`, so
+   * `state.error` has to be a bridge-shaped object.  Several callers used to
+   * assign a plain string (``state.error = reason?.message``), which rendered as
+   * an empty red band with no text and no retry button — a TypeScript-visible
+   * mistake the moment `reason` stops being `any`, and until then a silent one.
+   * Callers outside the store go through this; the store's own paths already use
+   * `setError`. */
+  function fail(message: string, code = "CONNECTION_FAILED", retryable = true) {
+    setError({ code, message, retryable });
+  }
+
+  /**
+   * Run one bridge call and own the window's busy flag while it is in flight.
+   *
+   * The flag is what stops a second click doubling a request, and the `finally`
+   * is what lets the window go again -- after a failure too, and even when the
+   * failure arrives after the store was disposed. Written out a dozen times, the
+   * `finally` is a line a reader has to check every time; here it is a line that
+   * cannot be left out.
+   */
+  async function guardNull<T>(run: () => Promise<T>): Promise<T | null> {
+    if (disposed || state.pending) return null;
+    state.pending = true;
+    state.error = null;
+    try {
+      return await run();
+    } catch (error) {
+      if (!disposed) setError(error);
+      return null;
+    } finally {
+      if (!disposed) state.pending = false;
+    }
+  }
+
+  /** `guardNull` for the calls whose failure is a plain no. */
+  async function guardFlag(run: () => Promise<boolean>): Promise<boolean> {
+    if (disposed || state.pending) return false;
+    state.pending = true;
+    state.error = null;
+    try {
+      return await run();
+    } catch (error) {
+      if (!disposed) setError(error);
+      return false;
+    } finally {
+      if (!disposed) state.pending = false;
+    }
+  }
+
   async function refreshHistory() {
     if (disposed) return;
     const request = ++requestSequence;
@@ -865,7 +916,11 @@ export function createApplicationStore() {
         const id = ++noticeSequence;
         state.notices.push({
           id,
-          title: t("数据修复"),
+          // A key, not a sentence: `NoticeStack.title` is a table keyed by name
+          // and its default branch returns the name unchanged, so a translated
+          // string here was already resolved and the table could not re-word it
+          // — the English interface showed 数据修复 for this one notice.
+          title: "ui.data_recovery",
           message: t("已将损坏的文件移到一旁：{files}", { files: files.join(", ") }),
         });
         if (state.notices.length > 5) dismissNotice(state.notices[0].id);
@@ -952,7 +1007,7 @@ export function createApplicationStore() {
 
   return {
     state, favorites, delivery, start, refreshHistory,
-    dismissNotice, toast,
+    dismissNotice, toast, setError, fail,
     /** Which conversation the chat page has on screen, or "" for none. */
     setOpenChatSession(sessionId: string) {
       state.openChatSession = String(sessionId || "");
@@ -1253,33 +1308,13 @@ export function createApplicationStore() {
      * not a mutation, so there is no snapshot to re-read afterwards.
      */
     async openLink(item: HistoryItem) {
-      if (disposed || state.pending) return null;
-      state.pending = true;
-      state.error = null;
-      try {
-        return await bridge.openHistoryLink(item.id);
-      } catch (error) {
-        if (!disposed) setError(error);
-        return null;
-      } finally {
-        if (!disposed) state.pending = false;
-      }
+      return guardNull(() => bridge.openHistoryLink(item.id));
     },
     forget: (device: Device) => action(() => bridge.forgetDevice(device.id)),
     restore: (device: Device) => action(() => bridge.restoreDevice(device.id)),
     purge: (device: Device) => action(() => bridge.purgeDevice(device.id)),
     async probe(device: Device) {
-      if (disposed || state.pending) return null;
-      state.pending = true;
-      state.error = null;
-      try {
-        return await bridge.testDevice(device.id);
-      } catch (error) {
-        if (!disposed) setError(error);
-        return null;
-      } finally {
-        if (!disposed) state.pending = false;
-      }
+      return guardNull(() => bridge.testDevice(device.id));
     },
     async certificates() {
       if (disposed || state.pending) return null;
@@ -1359,32 +1394,12 @@ export function createApplicationStore() {
     async diagnostics() {
       // Live snapshot built by the same use case the legacy panel renders, so
       // the two surfaces cannot disagree about the state of this machine.
-      if (disposed || state.pending) return null;
-      state.pending = true;
-      state.error = null;
-      try {
-        return await bridge.diagnosticsReport();
-      } catch (error) {
-        if (!disposed) setError(error);
-        return null;
-      } finally {
-        if (!disposed) state.pending = false;
-      }
+      return guardNull(() => bridge.diagnosticsReport());
     },
     async repairDiagnostics(kind: DiagnosticAction) {
       // The caller re-runs diagnostics afterwards: the repair only opens the
       // OS settings or applies the rule, it does not prove the check passes.
-      if (disposed || state.pending) return null;
-      state.pending = true;
-      state.error = null;
-      try {
-        return await bridge.diagnosticsRequest(kind);
-      } catch (error) {
-        if (!disposed) setError(error);
-        return null;
-      } finally {
-        if (!disposed) state.pending = false;
-      }
+      return guardNull(() => bridge.diagnosticsRequest(kind));
     },
     async loadUpdateStatus() {
       // Hydration after a reload: the sidecar keeps the live phase, so a
@@ -1427,17 +1442,7 @@ export function createApplicationStore() {
       // this installation and relaunches the app. A reply therefore means the
       // install did not happen, and the host has already published the failing
       // phase, so the caller only has to decide what to say about it.
-      if (disposed || state.pending) return null;
-      state.pending = true;
-      state.error = null;
-      try {
-        return await bridge.updateInstall();
-      } catch (error) {
-        if (!disposed) setError(error);
-        return null;
-      } finally {
-        if (!disposed) state.pending = false;
-      }
+      return guardNull(() => bridge.updateInstall());
     },
     async installReadyUpdate() {
       // The install the card can run on an archive that is already on disk.
@@ -1445,44 +1450,14 @@ export function createApplicationStore() {
       // cannot install itself it hands to the reader, and the caller has to say
       // which of the two happened rather than leave a click with nothing after
       // it.
-      if (disposed || state.pending) return null;
-      state.pending = true;
-      state.error = null;
-      try {
-        return await bridge.updateInstallReady();
-      } catch (error) {
-        if (!disposed) setError(error);
-        return null;
-      } finally {
-        if (!disposed) state.pending = false;
-      }
+      return guardNull(() => bridge.updateInstallReady());
     },
     async downloadUpdate() {
       // Returns immediately; progress arrives as `update.state` events.
-      if (disposed || state.pending) return null;
-      state.pending = true;
-      state.error = null;
-      try {
-        return await bridge.updateDownload();
-      } catch (error) {
-        if (!disposed) setError(error);
-        return null;
-      } finally {
-        if (!disposed) state.pending = false;
-      }
+      return guardNull(() => bridge.updateDownload());
     },
     async openUpdateFolder() {
-      if (disposed || state.pending) return null;
-      state.pending = true;
-      state.error = null;
-      try {
-        return await bridge.updateOpenFolder();
-      } catch (error) {
-        if (!disposed) setError(error);
-        return null;
-      } finally {
-        if (!disposed) state.pending = false;
-      }
+      return guardNull(() => bridge.updateOpenFolder());
     },
     setDiscoveryEnabled: (enabled: boolean) => discoveryToggle("enabled", enabled),
     setDiscoveryVisible: (enabled: boolean) => discoveryToggle("visible", enabled),

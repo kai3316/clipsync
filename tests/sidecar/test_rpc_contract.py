@@ -1,6 +1,6 @@
 """The IPC contract table and the code it describes are held to each other.
 
-`notes/tauri/rpc-v1.md` is the document the migration points at when it claims the
+`contracts/rpc-v1.md` is the document the migration points at when it claims the
 window can reach a capability, so a method the dispatcher routes and the table
 does not list is exactly the kind of gap the table exists to prevent -- and the
 table carried a "this table is not yet complete" note for long enough that a
@@ -29,28 +29,19 @@ import os
 import re
 import sys
 
-import pytest
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from internal.adapters.sidecar.favorites import METHODS as FAVORITES_METHODS
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _RPC = os.path.join(_ROOT, "internal", "adapters", "sidecar", "rpc.py")
-_CONTRACT = os.path.join(_ROOT, "notes", "tauri", "rpc-v1.md")
-
-# The document these tests hold lives in `notes/`, which is where the project
-# keeps its process record: `docs/` is the GitHub Pages root, so a file under it
-# is served to the public, and a migration ledger is not a thing to publish.
-# `notes/` is not committed, which means a checkout without it -- CI, anyone
-# else's clone -- has nothing to hold the code to.  The guard is skipped there
-# rather than deleted: the failure it catches (a routed method nobody wrote
-# down, a command that vanished from the table) is one that happens while
-# somebody is editing this tree with the notes open beside them.
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(_CONTRACT),
-    reason="rpc-v1.md is in notes/, which is not committed",
-)
+# In the repository, not in `notes/`.  These tables are the contract, and a
+# contract that only the maintainer's checkout can read is not one: this file
+# spent its first life skipped on CI and in every clone (see git history for the
+# `skipif`), which meant the one guard against the dispatcher and the table
+# drifting apart ran nowhere but one machine.  `docs/` is the GitHub Pages root
+# and cannot hold it, so the tables live in `contracts/`.
+_CONTRACT = os.path.join(_ROOT, "contracts", "rpc-v1.md")
 
 
 _MAIN_RS = os.path.join(_ROOT, "desktop", "src-tauri", "src", "main.rs")

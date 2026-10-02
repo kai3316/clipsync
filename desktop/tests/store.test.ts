@@ -223,7 +223,10 @@ describe("desktop application store", () => {
     expect(await store.recoverData()).toBe(true);
     expect(store.state.notices).toEqual([
       expect.objectContaining({
-        title: "数据修复",
+        // The key, not the sentence: `NoticeStack.title` words a notice from a
+        // table keyed by this name, and it cannot re-word a string that was
+        // already translated by the time it got here.
+        title: "ui.data_recovery",
         message: "已将损坏的文件移到一旁：config.json.corrupt-20260912_101500, " +
           "clipboard_history.db.corrupt-20260912_101500",
       }),

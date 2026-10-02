@@ -106,7 +106,9 @@ def test_a_rename_is_registered_rather_than_only_stored(monkeypatch):
     registered, unregistered = [], []
     subject = service("书房的台式机")
     subject._zc = SimpleNamespace(
-        register_service=registered.append,
+        # The keyword the real registration carries (cooperating_responders)
+        # is accepted and ignored: what this test holds is which name went out.
+        register_service=lambda info, **_: registered.append(info),
         unregister_service=unregistered.append,
     )
     # Not None: this device is advertising.

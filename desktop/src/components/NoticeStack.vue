@@ -40,6 +40,10 @@ function title(name: string): string {
     // what failed is a transfer, and the row that started it is on another page.
     case "clip.file.denied": return t("文件传输");
     case "device.security_alert": return t("设备身份变更");
+    // Raised by the window itself after a repair pass, and named as a key like
+    // every event above: this table is what words a notice, so a title that
+    // arrived already translated could not be re-worded here.
+    case "ui.data_recovery": return t("数据修复");
     default: return name;
   }
 }

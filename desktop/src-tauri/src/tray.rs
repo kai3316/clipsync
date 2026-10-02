@@ -629,19 +629,22 @@ pub async fn refresh(app: &AppHandle) {
     let Some(gate) = app.try_state::<RefreshGate>() else {
         return;
     };
-    // Already refreshing: note that one more is wanted and leave.  The running
-    // refresh picks it up, so the last event of a burst is never dropped.
-    if gate.running.swap(true, Ordering::SeqCst) {
-        gate.again.store(true, Ordering::SeqCst);
-        return;
-    }
     loop {
+        // Take the gate, or record that the holder owes us one more pass and
+        // leave — the holder consumes that, so the last event of a burst is not
+        // dropped.  The gate is released at the *end* of a pass and this is the
+        // top, so a request that lands in the gap between the two either opens
+        // its own pass or is picked up by the swap below.
+        if gate.running.swap(true, Ordering::SeqCst) {
+            gate.again.store(true, Ordering::SeqCst);
+            return;
+        }
         read_and_apply(app).await;
+        gate.running.store(false, Ordering::SeqCst);
         if !gate.again.swap(false, Ordering::SeqCst) {
-            break;
+            return;
         }
     }
-    gate.running.store(false, Ordering::SeqCst);
 }
 
 async fn read_and_apply(app: &AppHandle) {
@@ -659,10 +662,14 @@ async fn read_and_apply(app: &AppHandle) {
     // The peers submenu needs the second call.  It is the round trip that buys
     // `devices.changed` its place in the refresh triggers; without it the menu
     // would list devices as they were when something *else* last changed.
-    let devices = bridge
-        .call("devices.list", json!({}))
-        .await
-        .unwrap_or(Value::Null);
+    //
+    // A failed read is not an empty device list.  `.unwrap_or(Value::Null)`
+    // rendered as "no connected devices", which is the opposite of the truth on
+    // a machine with paired peers and only lasts until the next successful
+    // refresh — the same reason `settings.get` above returns early instead.
+    let Ok(devices) = bridge.call("devices.list", json!({})).await else {
+        return;
+    };
     let settings = &settings["settings"];
     let state = TrayState {
         device_name: settings["device_name"].as_str().unwrap_or_default().to_owned(),

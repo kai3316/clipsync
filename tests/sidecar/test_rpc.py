@@ -243,6 +243,80 @@ def test_settings_round_trip_and_unknown_field_rejection(app):
         Dispatcher(app).call("settings.update", {"private_key_pem": "secret"})
 
 
+def test_every_field_the_window_settings_form_sends_is_accepted(app):
+    """The settings page submits its whole form in one call.
+
+    ``validate_params`` refuses a frame naming any field outside the table, so a
+    field the window sends and the table does not know is not "ignored" -- it
+    fails the entire save, on every control, with a message about a request that
+    "was not in the form this build expects".  That is exactly what happened to
+    ``file_open_to_all``: it was on the form from the day the page was written
+    and missing from this table, so nothing on the desktop's settings page could
+    be saved at all.
+
+    The names below are the payload keys in ``desktop/src/App.vue``'s
+    ``saveSettings``.  They are listed rather than parsed out of the .vue file
+    because a test that reads the other tree's source is a test that breaks on
+    a formatting change; keeping the list here means a field added to the form
+    has to be added here too, and this test then says why.
+    """
+    form_fields = {
+        "device_name", "appearance_mode", "plain_text_only", "chat_open_to_all",
+        "file_open_to_all", "log_sharing", "app_filter_enabled", "app_filter_mode",
+        "app_filter_list", "filter_enabled_categories", "history_max_entries",
+        "history_max_age_days", "translate_url", "sound_enabled",
+        "ui_animation_enabled", "source_tracking_enabled", "paste_to_top",
+        "internet_sync_enabled", "relay_brokers", "relay_private_brokers",
+        "relay_username", "relay_password", "relay_max_message_bytes",
+        "relay_max_bytes_per_second", "port", "service_type", "web_history_limit",
+        "sync_debounce", "clipboard_poll_interval", "file_receive_dir",
+        "transfer_timeout", "max_reconnect_attempts", "log_level", "low_memory_mode",
+        "retry_capture_enabled", "dedup_method", "data_dir", "auto_start",
+    }
+    # Sent conditionally, when the control was touched rather than on every
+    # submit, and each one goes on its own for a reason: the password is not
+    # echoed back, and the encryption toggle re-wires the live manager.  They
+    # are still part of what has to be accepted, and they are exercised at the
+    # end of this test rather than in the whole-form frame.
+    conditional_fields = {"encryption_enabled", "password"}
+    # A whole-form submit, with each field at a value the table accepts.  One
+    # frame, because that is how the window sends it -- and the point is that no
+    # member of it is refused.
+    payload = {
+        "device_name": "Desk", "appearance_mode": "dark", "plain_text_only": False,
+        "chat_open_to_all": True, "file_open_to_all": False, "log_sharing": True,
+        "app_filter_enabled": False, "app_filter_mode": "blacklist",
+        "app_filter_list": [], "filter_enabled_categories": ["password"],
+        "history_max_entries": 200, "history_max_age_days": 30,
+        "translate_url": "", "sound_enabled": True, "ui_animation_enabled": True,
+        "source_tracking_enabled": True, "paste_to_top": True,
+        "internet_sync_enabled": False, "relay_brokers": [],
+        "relay_private_brokers": [], "relay_username": "", "relay_password": "",
+        "relay_max_message_bytes": 256 * 1024,
+        "relay_max_bytes_per_second": 512 * 1024, "port": 19990,
+        "service_type": "_clipsync._tcp.local.", "web_history_limit": 100,
+        "sync_debounce": 0.3, "clipboard_poll_interval": 1.0, "file_receive_dir": "",
+        "transfer_timeout": 120, "max_reconnect_attempts": 10, "log_level": "INFO",
+        "low_memory_mode": False, "retry_capture_enabled": True,
+        "dedup_method": "sha256", "data_dir": "", "auto_start": False,
+    }
+    assert set(payload) == form_fields
+    assert not conditional_fields & set(payload)
+    result = Dispatcher(app).call("settings.update", payload)
+    assert result["ok"] is True
+    # The one field whose absence broke the page: it has to reach the config the
+    # same way its chat twin does, not merely stop being refused.
+    assert app.config.file_open_to_all is False
+    assert Dispatcher(app).call("settings.get", {})["settings"]["file_open_to_all"] is False
+    # The conditional three, on their own as the window sends them.
+    assert Dispatcher(app).call(
+        "settings.update", {"encryption_enabled": False}
+    )["ok"] is True
+    assert Dispatcher(app).call(
+        "settings.update", {"password": "Str0ng-Passw0rd!"}
+    )["ok"] is True
+
+
 def test_notification_switches_round_trip_but_the_unread_one_is_refused(app):
     """The per-type switches stay settable; the fourth is refused.
 
@@ -780,10 +854,20 @@ def test_process_exits_on_eof_and_releases_ownership(tmp_path):
 
 
 def test_no_tk_import_in_sidecar_process(tmp_path):
+    """The sidecar must not pull the desktop GUI toolkit in.
+
+    `tkinter` is the check that matters and it is why this test exists: the
+    sidecar is a stdio server for the Tauri shell, and importing the toolkit
+    would put a second GUI in the process.  `src.main` and `internal.ui` are
+    named as well because they were the modules that would have done it -- both
+    are deleted now, so these two assertions can only fail by someone
+    reintroducing them, which is exactly when a reminder is worth having.
+    """
     code = (
         "import sys; from internal.application.bootstrap import SidecarApplication; "
         "a=SidecarApplication(); a.lifecycle.start(); "
         "assert 'tkinter' not in sys.modules; assert 'src.main' not in sys.modules; "
+        "assert 'internal.ui' not in sys.modules; "
         "a.lifecycle.stop()"
     )
     result = subprocess.run(

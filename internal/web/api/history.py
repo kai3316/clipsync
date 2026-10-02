@@ -9,8 +9,13 @@ import time
 import uuid
 
 from internal.clipboard.format import decode_text
+from internal.config.config import FIELD_RULES
 
 logger = logging.getLogger(__name__)
+
+# The largest page an API client may ask for, taken from the one table that
+# owns this field's bounds so the API and the config loader cannot disagree.
+WEB_HISTORY_LIMIT_MAX = FIELD_RULES["web_history_limit"][2]
 
 
 def _source_label(sid: str, device_names: dict, cfg) -> str:
@@ -38,13 +43,18 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
     """
     items = history.get_all()
 
-    # Allow callers (e.g. quick-paste window) to request more items
+    # Allow callers (e.g. quick-paste window) to request more items than the
+    # configured page size -- but not without a ceiling.  The response is one
+    # JSON document built in memory, and this endpoint is reachable by any client
+    # holding the web token, so `?limit=100000000` was a way to ask for every row
+    # this machine has ever kept.  The cap is the same one the settings page
+    # enforces on this field (`FIELD_RULES["web_history_limit"]`).
     limit = cfg.web_history_limit
     if limit_str is not None:
         try:
             parsed = int(limit_str)
             if parsed > 0:
-                limit = parsed
+                limit = min(parsed, WEB_HISTORY_LIMIT_MAX)
         except (ValueError, TypeError):
             pass
 
@@ -126,7 +136,12 @@ def get_history_item(query_params, history, cfg):
         # use it to pick the right MIME when rendering IMAGE entries.
         "image_fmt": entry.get("image_fmt", ""),
         "text_preview": entry.get("text_preview", ""),
-        "types": entry.get("types", {}),
+        # `dict(...)`, not the mapping itself: a loaded row carries a lazy
+        # payload mapping that reads its own column on first use, and `json`
+        # serialises a dict through its C storage without calling an override --
+        # so handing it the mapping as it stands would ship `{}` for the formats
+        # while the row still looked right everywhere else.
+        "types": dict(entry.get("types") or {}),
         "source_device": sid,
         "source_name": _source_label(sid, device_names, cfg),
         "source_app": entry.get("source_app", ""),

@@ -114,6 +114,145 @@ def test_ws_broadcast_returns_delivered_count():
         b.close()
 
 
+def _masked_frame(opcode: int, payload: bytes, *, final: bool = True) -> bytes:
+    """One client-to-server frame, masked as RFC 6455 §5.1 requires."""
+    mask = b"\x11\x22\x33\x44"
+    head = bytes([(0x80 if final else 0x00) | opcode])
+    length = len(payload)
+    if length < 126:
+        head += bytes([0x80 | length])
+    elif length < 65536:
+        head += bytes([0x80 | 126]) + struct.pack("!H", length)
+    else:
+        head += bytes([0x80 | 127]) + struct.pack("!Q", length)
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return head + mask + masked
+
+
+def _read_frame(sock):
+    """Read one server-to-client frame; returns (opcode, payload)."""
+    head = sock.recv(2)
+    opcode = head[0] & 0x0F
+    length = head[1] & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", sock.recv(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", sock.recv(8))[0]
+    payload = b""
+    while len(payload) < length:
+        chunk = sock.recv(length - len(payload))
+        if not chunk:
+            break
+        payload += chunk
+    return opcode, payload
+
+
+def _read_frame(sock):
+    """Read one server-to-client frame; returns (opcode, payload)."""
+    head = sock.recv(2)
+    opcode = head[0] & 0x0F
+    length = head[1] & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", sock.recv(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", sock.recv(8))[0]
+    payload = b""
+    while len(payload) < length:
+        chunk = sock.recv(length - len(payload))
+        if not chunk:
+            break
+        payload += chunk
+    return opcode, payload
+
+
+def test_ws_reassembles_a_fragmented_message():
+    """A message split across frames arrives whole (RFC 6455 §5.4).
+
+    The FIN bit used to be read and never consulted, and a continuation frame
+    fell into the unknown-opcode branch, so a client that fragmented got only the
+    first piece — silently truncated, with no error to notice.  Our own page
+    always sends one frame, which is why nothing caught it.
+    """
+    a, b = socket.socketpair()
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        b.sendall(_masked_frame(0x1, b'{"first":', final=False))
+        b.sendall(_masked_frame(0x0, b'"second"}'))
+        assert client.recv_frame(timeout=1.0) == b'{"first":"second"}'
+    finally:
+        a.close()
+        b.close()
+
+
+def test_ws_ignores_a_ping_that_arrives_mid_message():
+    """A keepalive between fragments must not end the message."""
+    a, b = socket.socketpair()
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        b.sendall(_masked_frame(0x1, b"one", final=False))
+        b.sendall(_masked_frame(0x9, b"keepalive"))
+        b.sendall(_masked_frame(0x0, b"two"))
+        assert client.recv_frame(timeout=1.0) == b"onetwo"
+        # The ping was answered, as §5.5.2 requires.
+        opcode, payload = _read_frame(b)
+        assert opcode == 0xA
+        assert payload == b"keepalive"
+    finally:
+        a.close()
+        b.close()
+
+
+def test_ws_closes_on_an_unmasked_client_frame():
+    """§5.1: every client-to-server frame must be masked.
+
+    The old code used an unmasked payload as if it were text, which is what a
+    naive non-browser client would send and what the spec says must fail the
+    connection with 1002.
+    """
+    a, b = socket.socketpair()
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        b.sendall(bytes([0x81, 0x02]) + b"hi")  # text, unmasked
+        assert client.recv_frame(timeout=1.0) is None
+        assert client._closed is True
+        opcode, payload = _read_frame(b)
+        assert opcode == 0x8  # CLOSE
+        assert struct.unpack("!H", payload[:2])[0] == 1002
+    finally:
+        a.close()
+        b.close()
+
+
+def test_ws_refuses_a_message_that_grows_past_the_ceiling():
+    """Reassembly is bounded, one legal frame at a time.
+
+    A single oversized frame was already refused; a message assembled from many
+    small ones was not, which is the same memory ceiling reached the long way.
+    The writer runs on its own thread because the socketpair's buffer is smaller
+    than the message: the client stops reading once it refuses, and a blocking
+    send would deadlock the test rather than the client.
+    """
+    a, b = socket.socketpair()
+    client = WebSocketClient(a, ("127.0.0.1", 0))
+    piece = b"x" * 65535
+
+    def write_forever():
+        with contextlib.suppress(OSError):
+            b.sendall(_masked_frame(0x1, piece, final=False))
+            for _ in range(40):  # 40 * 65535 > 1 MB
+                b.sendall(_masked_frame(0x0, piece, final=False))
+
+    writer = threading.Thread(target=write_forever, daemon=True)
+    writer.start()
+    try:
+        assert client.recv_frame(timeout=5.0) is None
+        assert client._closed is True
+    finally:
+        a.close()
+        b.close()
+        writer.join(timeout=5)
+
+
 def test_ws_broadcast_history_deleted_payload():
     a, b = socket.socketpair()
     mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
@@ -732,7 +871,15 @@ def _fake_commands(monkeypatch, netsh, powershell):
 
     Passing None for either makes that program fail to start, which is how a
     test can assert a probe was never reached.
+
+    The registry reader is switched off here: it answers the question the
+    probes below are being asked, in a few milliseconds and without starting
+    anything, so on a Windows host it would answer first and these tests would
+    never see the output they are written around.  It has its own test class.
     """
+    monkeypatch.setattr(
+        web_server.WebServer, "_firewall_rule_ports_registry", staticmethod(lambda: None)
+    )
     asked = []
 
     def run(argv, **kwargs):
@@ -752,6 +899,18 @@ def _fake_commands(monkeypatch, netsh, powershell):
 
 
 class TestTheFirewallRuleIsReadInAnyLanguage:
+    @pytest.fixture(autouse=True)
+    def _fresh_firewall_cache(self):
+        """Each case starts with no remembered answer.
+
+        The cached read is per process by design (the startup path asks the
+        same question every launch), so one case's answer would otherwise be
+        the next one's starting state.
+        """
+        web_server.WebServer._fw_read_cache.clear()
+        yield
+        web_server.WebServer._fw_read_cache.clear()
+
     def test_a_localized_rule_that_allows_the_ports_is_read_as_allowing_them(
         self, monkeypatch, on_windows
     ):
@@ -825,9 +984,17 @@ class TestTheFirewallRuleIsReadInAnyLanguage:
 
         return run
 
+    @staticmethod
+    def _no_registry(monkeypatch):
+        """Keep the fast registry read out of the way of the probes under test."""
+        monkeypatch.setattr(
+            web_server.WebServer, "_firewall_rule_ports_registry", staticmethod(lambda: None)
+        )
+
     def test_a_rule_read_as_wrong_is_replaced_instead_of_stacked(
         self, monkeypatch, on_windows
     ):
+        self._no_registry(monkeypatch)
         # netsh creates a SECOND rule under the same name rather than updating
         # one, so a repair that only adds leaves a duplicate behind every time.
         # A rule whose ports were read and found wrong is the one case where
@@ -836,6 +1003,9 @@ class TestTheFirewallRuleIsReadInAnyLanguage:
         monkeypatch.setattr(
             subprocess, "run", self._recording_run(commands, CIM_OTHER_PORT, CN_RULE)
         )
+        monkeypatch.setattr(
+            web_server.WebServer, "_firewall_repair_is_safe", staticmethod(lambda: True)
+        )
         assert web_server.WebServer._open_firewall(19990, 19991) is True
         assert [argv[3] for argv in commands if argv[0] == "netsh"] == [
             "show",
@@ -843,9 +1013,33 @@ class TestTheFirewallRuleIsReadInAnyLanguage:
             "add",
         ]
 
+    def test_a_repair_that_cannot_be_undone_is_not_attempted(
+        self, monkeypatch, on_windows
+    ):
+        """Unelevated, the delete is the one step that cannot be taken back.
+
+        netsh needs elevation to add a rule, so a refused add after a
+        successful delete leaves the machine with no rule where it had a
+        working one — strictly worse than the mismatch the repair set out to
+        fix, and it used to be attempted on every launch.
+        """
+        self._no_registry(monkeypatch)
+        commands = []
+        monkeypatch.setattr(
+            subprocess, "run", self._recording_run(commands, CIM_OTHER_PORT, CN_RULE)
+        )
+        monkeypatch.setattr(
+            web_server.WebServer, "_firewall_repair_is_safe", staticmethod(lambda: False)
+        )
+        assert web_server.WebServer._open_firewall(19990, 19991) is False
+        # The read still happened — "is it wrong?" has to be answered before
+        # "may I repair it?" — but nothing was removed and nothing added.
+        assert [argv[3] for argv in commands if argv[0] == "netsh"] == ["show"]
+
     def test_a_rule_that_could_not_be_read_is_never_deleted(
         self, monkeypatch, on_windows
     ):
+        self._no_registry(monkeypatch)
         # Unreadable is not the same answer as wrong, and this delete is the
         # one that cannot be taken back: netsh needs elevation to add a rule,
         # so a refused add after a successful delete leaves the machine with no
@@ -860,10 +1054,14 @@ class TestTheFirewallRuleIsReadInAnyLanguage:
         monkeypatch.setattr(
             subprocess, "run", self._recording_run(commands, "", CN_RULE)
         )
+        monkeypatch.setattr(
+            web_server.WebServer, "_firewall_repair_is_safe", staticmethod(lambda: True)
+        )
         assert web_server.WebServer._open_firewall(19990, 19991) is True
         assert [argv[3] for argv in commands if argv[0] == "netsh"] == ["show", "add"]
 
     def test_an_already_correct_rule_is_not_repaired(self, monkeypatch, on_windows):
+        self._no_registry(monkeypatch)
         # The other half of the same contract: nothing to fix must mean no UAC
         # prompt, so the repair may not touch a rule that is already right.
         commands = []

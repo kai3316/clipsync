@@ -215,10 +215,66 @@ def test_a_resolved_pairing_drops_the_phone_prompt_card():
 
 
 def test_an_ai_config_file_event_is_forwarded_as_it_arrived():
-    r = rig()
-    r.publish("aiconfig.file", {"event": {"file": "rules.md"}})
+    """The runtime publishes this flat, with the page's own event name in `type`.
 
-    assert r.messages == [("aiconfig_file", {"file": "rules.md"})]
+    There is no ``event`` key: ``ai_config._emit`` hands the dict to
+    ``lan.py``'s ``event_fn``, which publishes it as-is under
+    ``aiconfig.file``, and ``EventJournal`` forwards the data untouched.  The
+    phone's page reads ``rel_path``/``status`` off the top level, so the whole
+    payload (minus the ``type`` that names the broadcast) is what has to travel.
+    """
+    r = rig()
+    r.publish(
+        "aiconfig.file",
+        {
+            "type": "aiconfig_file",
+            "peer_id": "remote",
+            "tool": "claude",
+            "root": "",
+            "rel_path": "rules.md",
+            "status": "saved",
+        },
+    )
+
+    assert r.messages == [
+        (
+            "aiconfig_file",
+            {
+                "peer_id": "remote",
+                "tool": "claude",
+                "root": "",
+                "rel_path": "rules.md",
+                "status": "saved",
+            },
+        )
+    ]
+
+
+def test_an_ai_config_inventory_event_keeps_its_own_broadcast_name():
+    """The same channel carries two event names, and only `type` says which.
+
+    ``aiconfig_inventory`` is the answer to a refresh; broadcasting it as
+    ``aiconfig_file`` would drop it, because the page's file handler requires a
+    ``status`` from the pull vocabulary and an inventory answer has none.
+    """
+    r = rig()
+    r.publish(
+        "aiconfig.file",
+        {
+            "type": "aiconfig_inventory",
+            "peer_id": "remote",
+            "device_name": "Remote",
+            "count": 3,
+            "legacy": False,
+        },
+    )
+
+    assert r.messages == [
+        (
+            "aiconfig_inventory",
+            {"peer_id": "remote", "device_name": "Remote", "count": 3, "legacy": False},
+        )
+    ]
 
 
 def test_the_device_list_the_server_already_pushes_is_not_forwarded_twice():

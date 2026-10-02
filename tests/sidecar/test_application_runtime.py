@@ -600,12 +600,21 @@ def test_password_verification_precedes_runtime_creation(tmp_path, monkeypatch):
 
 
 def test_partial_runtime_start_is_cleaned_before_identity_is_released(tmp_path, monkeypatch):
+    """A runtime that fails to start is still stopped before its data is released.
+
+    The lifecycle registers this resource before calling its start (a resource
+    that raises may already hold a handle) and stop() walks what it owns
+    backwards, so the runtime is released ahead of the history and the lock
+    file.  The start's exception still reaches the caller — that is how a
+    launch that cannot bring the LAN up says so.
+    """
     monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
     created = []
 
     class FailingRuntime(Runtime):
         def start(self):
             created.append(self)
+            self.sync_state = "running"
             raise ApplicationError("LAN_START_FAILED", "Could not start LAN services")
 
     app = SidecarApplication(runtime_factory=FailingRuntime)

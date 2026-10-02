@@ -44,6 +44,14 @@ jobs:
             bundles: deb,appimage
             artifact: clipsync-desktop-linux-x64
     runs-on: ${{ matrix.os }}
+    # Windows and macOS ship the sidecar as a directory resource; Linux still
+    # ships the onefile, because nobody has run the onedir package there and the
+    # two shapes are chosen separately on purpose (see clipsync-sidecar.spec).
+    # macOS is onedir whatever this says -- the spec forces it -- and the
+    # staging step and the bundler config both read this variable so they cannot
+    # disagree about which shape was staged.
+    env:
+      CLIPSYNC_SIDECAR_ONEDIR: ${{ matrix.os == 'windows-latest' && '1' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,23 +100,40 @@ jobs:
       - name: Smoke the packaged sidecar
         # Windows only, because that is where this has actually been run: the
         # other two runners get the build without the check rather than a check
-        # nobody has watched pass.  What it holds: the Companion resources
-        # embedded in the executable match the tree byte for byte, and the
-        # packaged binary answers its own IPC and serves authenticated HTTP over
-        # two full restart cycles.  None of that is visible to the Python suite,
-        # which never loads the executable at all.
+        # nobody has watched pass.  What it holds: the Companion resources in the
+        # build match the tree byte for byte -- read out of the executable's own
+        # archive for a onefile, off disk under `_internal/` for a directory --
+        # and the packaged binary answers its own IPC and serves authenticated
+        # HTTP over two full restart cycles.  None of that is visible to the
+        # Python suite, which never loads the executable at all.
+        #
+        # The path follows the shape: an onedir build puts the executable one
+        # level down, and naming the onefile path unconditionally is how this
+        # step would fail on a Windows leg that had switched (see the job's
+        # CLIPSYNC_SIDECAR_ONEDIR).
         if: runner.os == 'Windows'
-        run: python scripts/smoke_sidecar.py dist/clipsync-sidecar.exe
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="dist/clipsync-sidecar.exe"
+          if [ -n "${CLIPSYNC_SIDECAR_ONEDIR:-}" ]; then
+            exe="dist/clipsync-sidecar/clipsync-sidecar.exe"
+          fi
+          python scripts/smoke_sidecar.py "$exe"
       - name: Stage the sidecar beside the host
         # Bash on every runner: the Windows default shell would not run this.
         shell: bash
         run: |
           set -euo pipefail
-          # macOS builds the sidecar as a directory (see clipsync-sidecar.spec)
-          # and ships it as a bundle resource, so what is staged is the tree
-          # itself.  Everywhere else it stays the onefile executable, staged
-          # under the target-triple name Tauri's `externalBin` expects.
-          if [ "$RUNNER_OS" = "macOS" ]; then
+          # macOS always builds the sidecar as a directory (see
+          # clipsync-sidecar.spec) and ships it as a bundle resource, so what is
+          # staged is the tree itself.  Windows does the same when
+          # CLIPSYNC_SIDECAR_ONEDIR is set -- that is what the environment on
+          # the job says -- because the tree starts in ~191ms against the
+          # onefile's ~1004ms, and a resource is how a tree gets shipped.
+          # Everywhere else it stays the onefile executable, staged under the
+          # target-triple name Tauri's `externalBin` expects.
+          if [ "$RUNNER_OS" = "macOS" ] || [ -n "${CLIPSYNC_SIDECAR_ONEDIR:-}" ]; then
             rm -rf desktop/src-tauri/sidecar
             cp -R dist/clipsync-sidecar desktop/src-tauri/sidecar
             ls -l desktop/src-tauri/sidecar
@@ -129,6 +154,7 @@ jobs:
           mkdir -p build
           python - <<'PY'
           import json
+          import os
           import sys
 
           sys.path.insert(0, ".")
@@ -136,9 +162,13 @@ jobs:
 
           # macOS ships the sidecar as a resource directory and starts it from
           # `Contents/Resources/sidecar/`; a single externalBin has nowhere to
-          # put the `_internal` tree it needs beside it.  See the spec's
-          # docstring for what that buys.
-          if "${{ runner.os }}" == "macOS":
+          # put the `_internal` tree it needs beside it.  Windows does the same
+          # when the job sets CLIPSYNC_SIDECAR_ONEDIR -- the staging step above
+          # makes the same decision from the same variable, and the two have to
+          # agree or the bundler is pointed at a path that was not staged.  See
+          # the spec's docstring for what the directory buys.
+          onedir = bool(os.environ.get("CLIPSYNC_SIDECAR_ONEDIR", "").strip() not in ("", "0"))
+          if "${{ runner.os }}" == "macOS" or onedir:
               bundle = {"resources": ["sidecar"]}
           else:
               bundle = {"externalBin": ["binaries/clipsync-sidecar"]}

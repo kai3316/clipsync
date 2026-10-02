@@ -4,6 +4,10 @@ Replaces the JSON-file persistence in ClipboardHistory with a local
 SQLite database while keeping the identical public API and internal
 attribute signatures (``_entries``, ``_lock``, ``_save()``, etc.).
 
+The ``types`` column -- the base64 payloads, which on a real history are very
+nearly the whole file -- is read on demand rather than at startup.  See
+``_LazyTypes`` for what that saves and for the one thing it cannot do.
+
 Database location: {config_dir}/clipboard_history.db
 Auto-creates tables on first use.  Auto-migrates from the legacy
 ``clipboard_history.json`` when the DB is empty and the JSON exists.
@@ -11,6 +15,7 @@ Auto-creates tables on first use.  Auto-migrates from the legacy
 
 import base64
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -136,6 +141,198 @@ def _build_preview(types: dict[ContentType, bytes]) -> str:
 
 def _map_type_to_label(content_type: ContentType) -> str:
     return CONTENT_TYPE_LABELS.get(content_type, "TEXT")
+
+
+class _LazyTypes(dict):
+    """A row's format payloads, fetched when something asks for them.
+
+    The ``types`` column holds the base64 of every format a clip was captured
+    in, so on a real history it is very nearly the whole database: measured on
+    this machine's own, **169 MB of a 170 MB file**, with a single image row at
+    19 MB.  Reading it is therefore not ``SELECT``-shaped work but I/O, and
+    ``_load`` was doing it for every row at startup -- 940 ms of a 1080 ms
+    construction, into memory nothing had asked for yet.
+
+    So a loaded entry carries this instead of the mapping.  It is a ``dict``
+    subclass, which is the point: every existing caller writes
+    ``entry.get("types")``, ``entry["types"].items()``, ``isinstance(stored,
+    dict)``, and all of those keep working.  What it is *not* is a dict that
+    ``json.dumps`` can see: ``json`` serializes a dict through its C storage and
+    never calls an override, so an entry that reached a serializer unhydrated
+    would write ``{}`` -- silently, and only for the formats, so the row would
+    still look right.  Hydrate first (``_hydrate``), or let a read of the
+    mapping do it; nothing that serializes an entry should ever receive the raw
+    object.  ``tests/test_history_db_lazy.py`` holds both halves of that.
+
+    The same caveat applies to ``dict | other``, ``dict.copy()``, and
+    ``copy.copy()``, all of which bypass overrides on a C type.  ``__eq__``,
+    ``__or__``, and ``copy`` are wrapped below because they are cheap to wrap;
+    ``json`` cannot be, which is why the warning is here rather than a note in
+    a changelog.
+    """
+
+    __slots__ = ("_db", "_entry_id", "_hydrated")
+
+    def __init__(self, db: "ClipboardHistoryDB", entry_id):
+        super().__init__()
+        self._db = db
+        self._entry_id = entry_id
+        self._hydrated = False
+
+    # -- hydration ----------------------------------------------------
+
+    def _hydrate(self) -> "_LazyTypes":
+        """Fetch and parse this row's payloads, once.
+
+        Idempotent, and cheap after the first call.  The database's own lock is
+        an ``RLock``, so this is safe both from inside a critical section (the
+        capture path asks for the top row's types while holding it) and from a
+        read that is not holding it.
+        """
+        if not self._hydrated:
+            with self._db._lock:
+                if not self._hydrated:
+                    super().update(self._db._read_types(self._entry_id))
+                    self._hydrated = True
+        return self
+
+    @property
+    def hydrated(self) -> bool:
+        """Whether the payloads are in memory.  For tests and diagnostics."""
+        return self._hydrated
+
+    # -- the reads a caller actually makes ----------------------------
+    #
+    # Each hydrates in a statement of its own before touching `super()`.
+    # Written as `super() if hydrated else self._hydrate()` -- which is how this
+    # first went in -- the `super()` sits inside a conditional *expression*, and
+    # Python's zero-argument `super()` is a proxy defined against the enclosing
+    # cell rather than a bound object: inside an expression it is not the thing
+    # being called, so `x == {}` returned False for a mapping that was empty and
+    # a hydrated row that was not.  Nothing raised.  Each call is now unguarded
+    # and explicit, which is also why `_hydrate` is a plain method call rather
+    # than something clever.
+
+    def __getitem__(self, key):
+        self._hydrate()
+        # `dict(...)` for the mapping itself, and this is not cosmetic: reading
+        # this row's own payloads is exactly the call the row builder makes to
+        # hand them to `json.dumps`, and the live object is one `json` cannot
+        # see into.  A snapshot is the only answer that is safe to escape with,
+        # and `get` below does the same for the same reason.
+        if key == "types":
+            return dict(super().copy())
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self._hydrate()
+        if key == "types":
+            return dict(super().copy())
+        return super().get(key, default)
+
+    def __iter__(self):
+        self._hydrate()
+        return super().__iter__()
+
+    def __len__(self):
+        self._hydrate()
+        return super().__len__()
+
+    def __contains__(self, key):
+        self._hydrate()
+        return super().__contains__(key)
+
+    def keys(self):
+        self._hydrate()
+        return super().keys()
+
+    def values(self):
+        self._hydrate()
+        return super().values()
+
+    def items(self):
+        self._hydrate()
+        return super().items()
+
+    def __bool__(self):
+        # `bool` is `__len__` for a mapping, and the probe was explicit about
+        # which of the two CPython routes through an override.
+        self._hydrate()
+        return super().__len__() > 0
+
+    # -- the C-level paths that skip overrides ------------------------
+
+    def __eq__(self, other):
+        self._hydrate()
+        return super().__eq__(other)
+
+    def __ne__(self, other):
+        self._hydrate()
+        return not super().__eq__(other)
+
+    __hash__ = None  # a mapping is unhashable, and neither is a mutable dict
+
+    def __or__(self, other):
+        self._hydrate()
+        return super().__or__(other)
+
+    def __ror__(self, other):
+        self._hydrate()
+        return super().__ror__(other)
+
+    def copy(self):
+        self._hydrate()
+        return dict(super().copy())
+
+    def __copy__(self):
+        self._hydrate()
+        return dict(super().copy())
+
+    def __deepcopy__(self, memo):
+        self._hydrate()
+        return copy.deepcopy(dict(super().copy()), memo)
+
+    def __reduce__(self):
+        # Without this, pickling copies the raw (empty) C storage.
+        self._hydrate()
+        return (dict, (dict(super().copy()),))
+
+    def __repr__(self):
+        # Deliberately does not hydrate: printing an entry must not pull 19 MB
+        # into memory, and the state is what a reader needs to see anyway.
+        if not self._hydrated:
+            return f"<types of entry {self._entry_id!r}, not read yet>"
+        return super().__repr__()
+
+    # -- mutation -----------------------------------------------------
+
+    def __setitem__(self, key, value):
+        self._hydrate()
+        return super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        self._hydrate()
+        return super().__delitem__(key)
+
+    def update(self, *args, **kwargs):
+        self._hydrate()
+        return super().update(*args, **kwargs)
+
+    def setdefault(self, key, default=None):
+        self._hydrate()
+        return super().setdefault(key, default)
+
+    def pop(self, *args, **kwargs):
+        self._hydrate()
+        return super().pop(*args, **kwargs)
+
+    def popitem(self):
+        self._hydrate()
+        return super().popitem()
+
+    def clear(self):
+        self._hydrate()
+        return super().clear()
 
 
 class ClipboardHistoryDB:
@@ -349,6 +546,68 @@ class ClipboardHistoryDB:
             return {}
         return parsed if isinstance(parsed, dict) else {}
 
+    def _read_types(self, entry_id) -> dict:
+        """One row's payloads, read and decrypted.
+
+        Called by ``_LazyTypes`` the first time anything asks a loaded entry for
+        its formats.  Reading one row by primary key is what makes the startup
+        cost disappear: the alternative -- reading all of them up front -- is
+        what the 940 ms was, and nothing asks for most rows at all.
+
+        Never raises: a row that has gone (deleted between the load and the
+        read, or a database that lost its file) answers with an empty mapping,
+        which is the same reading a corrupt row gets and the one every caller
+        already handles.
+        """
+        try:
+            conn = self._get_conn()
+            row = conn.execute(
+                "SELECT types FROM history WHERE entry_id = ?", (entry_id,)
+            ).fetchone()
+        except Exception as exc:
+            logger.warning("Could not read formats for entry %r: %s", entry_id, exc)
+            return {}
+        if row is None:
+            return {}
+        return self._decrypt_types(self._parse_types_json(row[0]))
+
+    def _decrypt_types(self, parsed: dict) -> dict:
+        """Decrypt a row's formats, keeping anything that is not ciphertext.
+
+        A non-string value is left exactly as stored rather than dropped: this
+        used to filter to strings and hand only those on, which would have
+        deleted a value a foreign or future writer had put there -- a silent
+        loss of the payload, which is the one thing this column exists to hold.
+        """
+        if not self._enc_mgr or not parsed:
+            return parsed
+        out = {}
+        for name, payload in parsed.items():
+            if isinstance(payload, str):
+                plain = self._enc_mgr.decrypt_storage(payload)
+                out[name] = payload if plain is None else plain
+            else:
+                out[name] = payload
+        return out
+
+    @staticmethod
+    def payloads_for_write(entry: dict) -> dict:
+        """An entry's formats as a plain dict, ready to hand to a serializer.
+
+        ``dict(...)`` and not the mapping itself, because that is not decoration:
+        a loaded row carries a ``_LazyTypes``, ``json`` serialises a dict through
+        its C storage without ever calling an override, and so a write that
+        passed the mapping straight to ``json.dumps`` would store ``{}`` for
+        every row it touched -- silently, and only for the payloads, so the row
+        would still look right.  ``_save`` did exactly that, and it is what
+        import and restore go through.
+
+        Everything that turns an entry into bytes calls this.  The comment is
+        long because the failure is invisible: a caller that "knows" types is a
+        dict is right about every reader and wrong about every writer.
+        """
+        return dict(entry.get("types") or {})
+
     def _entry_row(self, entry: dict) -> tuple:
         """Serialize (and encrypt, if configured) one entry into a DB row."""
         e = self._encrypt_entry(entry) if self._enc_mgr else entry
@@ -357,7 +616,7 @@ class ClipboardHistoryDB:
             e.get("timestamp", 0.0),
             e.get("content_type", ""),
             e.get("text_preview", ""),
-            json.dumps(e.get("types", {}), ensure_ascii=False),
+            json.dumps(self.payloads_for_write(e), ensure_ascii=False),
             e.get("source_device", ""),
             e.get("source_app", ""),
             e.get("source_title", ""),
@@ -543,16 +802,28 @@ class ClipboardHistoryDB:
                 # A capture that adds a format the surviving entry lacks
                 # must upgrade the entry, not be dropped (that drop used to
                 # lose the rich flavor forever); a true duplicate stays dropped.
+                #
+                # The newest row is only a candidate for "which row holds this
+                # content": anything re-used moves to the top (``touch``), so a
+                # pinned entry the user pasted in between can be sitting there
+                # instead of the row this key belongs to.  Both the merge and
+                # the id an offer names have to come from that check -- the
+                # guard used to cover the merge alone and the return named the
+                # top row regardless, handing the offer a stranger's entry id.
                 top = self._entries[0] if self._entries else None
-                if (
-                    top is not None
-                    and self._stored_text_key(top) == dedup_key
-                    and adds_new_flavors(top.get("types"), content.types)
-                ):
-                    self._merge_into_top(top, content, source_app, captured_at)
-                # The row that already holds this content is the one an offer
-                # should name, whether or not this capture added a flavor to it.
-                return top.get("entry_id") if top is not None else None
+                holds_key = top is not None and self._stored_text_key(top) == dedup_key
+                if holds_key:
+                    if adds_new_flavors(top.get("types"), content.types):
+                        self._merge_into_top(top, content, source_app, captured_at)
+                    # The row that already holds this content is the one an
+                    # offer should name, whether or not this capture added a
+                    # flavor to it.
+                    return top.get("entry_id")
+                # The window matched a key no row holds -- which is what a wipe
+                # leaves behind, because clear() cannot clear the window: with
+                # nothing to merge into, this capture is new and has to be
+                # stored rather than dropped.  Returning None here lost the
+                # first clip copied after a "clear history".
             self._last_dedup_key = dedup_key
             self._last_dedup_time = now
 
@@ -701,15 +972,21 @@ class ClipboardHistoryDB:
         }
         if self._enc_mgr:
             enc = self._encrypt_entry(
-                {k: (entry.get(k) or ({} if k == "types" else "")) for k in text_fields},
+                {
+                    k: (self.payloads_for_write(entry) if k == "types" else entry.get(k) or "")
+                    for k in text_fields
+                },
             )
         else:
-            enc = {k: (entry.get(k) or ({} if k == "types" else "")) for k in text_fields}
+            enc = {
+                k: (self.payloads_for_write(entry) if k == "types" else entry.get(k) or "")
+                for k in text_fields
+            }
         fields["text_preview"] = enc["text_preview"]
         fields["source_device"] = enc["source_device"]
         fields["source_app"] = enc["source_app"]
         fields["source_title"] = enc["source_title"]
-        fields["types"] = json.dumps(enc["types"], ensure_ascii=False)
+        fields["types"] = json.dumps(self.payloads_for_write(enc), ensure_ascii=False)
         self._update_row(entry.get("entry_id"), **fields)
 
     def get_all(self) -> list[dict]:
@@ -801,9 +1078,20 @@ class ClipboardHistoryDB:
             return False
 
     def clear(self) -> None:
-        """Delete all history entries and persist the empty state."""
+        """Delete all history entries and persist the empty state.
+
+        The coalesce window is reset with the rows.  It exists to fold one clip
+        captured in several formats into one entry, and that reading is about
+        rows that are now gone: leaving it standing meant the next capture of
+        the same content was matched against a key no row held, and the row it
+        would have been folded into does not exist.  (``add`` no longer drops
+        that capture either -- see the window there -- but the window itself
+        would still be reading a history this call just emptied.)
+        """
         with self._lock:
             self._entries.clear()
+            self._last_dedup_key = ""
+            self._last_dedup_time = 0.0
             self._delete_all_rows()
             self._vacuum_db()
 
@@ -935,7 +1223,15 @@ class ClipboardHistoryDB:
     # ------------------------------------------------------------------
 
     def _load(self) -> None:
-        """Load entries from the SQLite database.
+        """Load entries from the SQLite database, without their payloads.
+
+        The ``types`` column is deliberately not read: it is where every clip's
+        formats live in base64, so on a real history it is very nearly the whole
+        file (169 MB of 170 MB measured here, one image row at 19 MB) and reading
+        it is I/O rather than row work -- 940 ms of a 1080 ms construction, into
+        memory nothing had asked for.  Each row carries a ``_LazyTypes`` that
+        reads its own column on first use instead; see that class for what it
+        costs and the one thing it cannot do.
 
         Automatically migrates from the legacy JSON file if the database
         is empty and the JSON file exists.
@@ -960,7 +1256,7 @@ class ClipboardHistoryDB:
             # a peer's clock skew reordering entries after a restart.
             rows = conn.execute(
                 "SELECT entry_id, timestamp, content_type, text_preview, "
-                "types, source_device, source_app, source_title, "
+                "source_device, source_app, source_title, "
                 "pinned, paste_count, status, image_fmt, transport "
                 "FROM history ORDER BY pinned DESC, timestamp DESC, entry_id DESC"
             ).fetchall()
@@ -972,15 +1268,15 @@ class ClipboardHistoryDB:
                     "timestamp": row[1],
                     "content_type": row[2],
                     "text_preview": row[3],
-                    "types": self._parse_types_json(row[4]),
-                    "source_device": row[5],
-                    "source_app": row[6],
-                    "source_title": row[7],
-                    "pinned": bool(row[8]),
-                    "paste_count": row[9] if row[9] else 0,
-                    "status": row[10] if len(row) > 10 else "",
-                    "image_fmt": row[11] if len(row) > 11 else "",
-                    "transport": row[12] if len(row) > 12 else "",
+                    "types": _LazyTypes(self, row[0]),
+                    "source_device": row[4],
+                    "source_app": row[5],
+                    "source_title": row[6],
+                    "pinned": bool(row[7]),
+                    "paste_count": row[8] if row[8] else 0,
+                    "status": row[9] if len(row) > 9 else "",
+                    "image_fmt": row[10] if len(row) > 10 else "",
+                    "transport": row[11] if len(row) > 11 else "",
                 }
                 self._entries.append(entry)
 
@@ -999,13 +1295,14 @@ class ClipboardHistoryDB:
             if highest is not None:
                 self._next_id = int(highest) + 1
 
-            if self._enc_mgr:
-                for entry in self._entries:
-                    self._decrypt_entry(entry)
-                logger.debug(
-                    "History load: decrypted %d entries from DB",
-                    len(self._entries),
-                )
+            # Nothing to decrypt here any more.  The loaded rows carry metadata
+            # only -- the text columns are read as raw stored ciphertext by the
+            # queries above, and `_prepare_metadata` below is what opens them,
+            # while the payloads stay sealed until `_LazyTypes` reads a row.
+            # Calling `_decrypt_entry` over the page as this used to would have
+            # loaded every payload at startup, which is the whole cost this
+            # change exists to remove.
+            self._decrypt_metadata(self._entries)
 
             # Apply the age-based cleanup limit (no-op unless wired) once
             # at startup so stale entries don't linger until the next copy.
@@ -1030,6 +1327,17 @@ class ClipboardHistoryDB:
             )
         try:
             conn = self._get_conn()
+            # Rows are built BEFORE the table is cleared, and that ordering is
+            # load-bearing rather than tidy.  Building a row reads the entry's
+            # payloads, and a loaded entry reads its payloads from this same
+            # table -- so `DELETE FROM history` first meant the read found
+            # nothing and every row was written with `{}` for its formats.  The
+            # delete-then-generate shape only worked while the payloads happened
+            # to be in memory already, which is exactly what this change stopped
+            # being true.  It is `import_history` and `restore` that come through
+            # here, so the failure was a silent wipe of every payload in the
+            # user's history.
+            rows = [self._entry_row(e) for e in self._entries]
             with conn:
                 conn.execute("DELETE FROM history")
                 conn.executemany(
@@ -1037,7 +1345,7 @@ class ClipboardHistoryDB:
                     "(entry_id, timestamp, content_type, text_preview, types, "
                     "source_device, source_app, source_title, pinned, paste_count, status, image_fmt, transport) "  # noqa: E501
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self._entry_row(e) for e in self._entries),
+                    rows,
                 )
             self._secure_db_files()
         except Exception as exc:
@@ -1085,24 +1393,11 @@ class ClipboardHistoryDB:
                 "(entry_id, timestamp, content_type, text_preview, types, "
                 "source_device, source_app, source_title, pinned, paste_count, status, image_fmt, transport) "  # noqa: E501
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    (
-                        e.get("entry_id", 0),
-                        e.get("timestamp", 0.0),
-                        e.get("content_type", ""),
-                        e.get("text_preview", ""),
-                        json.dumps(e.get("types", {}), ensure_ascii=False),
-                        e.get("source_device", ""),
-                        e.get("source_app", ""),
-                        e.get("source_title", ""),
-                        1 if e.get("pinned") else 0,
-                        e.get("paste_count", 0),
-                        e.get("status", ""),
-                        e.get("image_fmt", ""),
-                        e.get("transport", ""),
-                    )
-                    for e in entries
-                ),
+                # The same row builder the live writer uses, rather than a second
+                # copy of it: the copy here was the one place `types` was still
+                # handed to `json.dumps` raw, and a second definition of a
+                # thirteen-column tuple is a thing that drifts.
+                (self._entry_row(e) for e in entries),
             )
 
         logger.info(
@@ -1115,6 +1410,28 @@ class ClipboardHistoryDB:
     # ------------------------------------------------------------------
     # Encryption helpers (identical to ClipboardHistory)
     # ------------------------------------------------------------------
+
+    def _decrypt_metadata(self, entries: list[dict]) -> None:
+        """Open the text columns of freshly loaded rows, in place.
+
+        ``_load`` reads them as stored, which on an encrypted history is
+        ciphertext; this is the half of ``_decrypt_entry`` that can be done
+        without touching a payload.  The ``types`` column is not among them --
+        ``_LazyTypes`` opens its own row, so a page of 200 rows costs 200 short
+        decryptions instead of every image the history has ever held.
+        """
+        enc = self._enc_mgr
+        if not enc:
+            return
+        fields = [name for name in self._ENCRYPTED_FIELDS if name != "types"]
+        for entry in entries:
+            for name in fields:
+                value = entry.get(name)
+                if isinstance(value, str):
+                    plain = enc.decrypt_storage(value)
+                    if plain is not None:
+                        entry[name] = plain
+        logger.debug("History load: decrypted metadata for %d entries", len(entries))
 
     def _encrypt_entry(self, entry: dict) -> dict:
         """Return a copy of entry with sensitive fields encrypted for at-rest storage."""

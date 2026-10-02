@@ -1,8 +1,14 @@
 # ClipSync Tauri Desktop
 
-Implementation in progress. The native host, history, identity and initial LAN
-runtime are connected; full functionality and platform parity remain unfinished.
-Do not replace a production installation with this build.
+This is the primary application: the root README recommends it to all new users,
+and the release workflow publishes its installers alongside a signed
+`latest.json`, so an installed copy updates itself in place.
+
+The notes below are about running it **from a source checkout**, where the host,
+the sidecar and the front end are built separately. A checkout build writes to
+its own `.tauri-dev-data` directory and is not what an installed copy uses, so a
+development build and an installation can sit on one machine without touching
+each other's history.
 
 ## Double-Click Startup (Windows)
 

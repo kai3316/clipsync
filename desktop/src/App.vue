@@ -18,6 +18,7 @@ import { PAIRING_LIVE_STATUSES, chatReachable, deviceLabel, deviceRank, deviceSt
 import { openContextMenu, type ContextMenuItem } from "./lib/context-menu";
 import { copyText } from "./lib/clipboard";
 import { announce, clearStatus, statusMessage } from "./lib/status";
+import { useDialog } from "./lib/use-dialog";
 import { deliveryIcon, deliveryLabel } from "./stores/delivery";
 import FavoritesView from "./components/FavoritesView.vue";
 import TransfersView from "./components/TransfersView.vue";
@@ -71,7 +72,7 @@ const LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"] as const;
 // it was the only thing on this page that *ran* on this machine, and the group
 // it anchored kept one member afterwards — the translation card, which is a
 // service this machine calls rather than one it hosts, and so belongs with what
-// it talks to.  That leaves four groups over eleven cards, and no group holding
+// it talks to.  That leaves four groups over ten cards, and no group holding
 // a single entry.
 const settingsGroups = computed<Array<{ label: string; items: Array<{ id: string; label: string }> }>>(() => [
   { label: t("通用"), items: [
@@ -95,7 +96,7 @@ const settingsGroups = computed<Array<{ label: string; items: Array<{ id: string
 ]);
 /** The settings card the rail is pointing at, and the only one on screen.
  *
- * The page is eleven cards long and each of them is a form's worth of
+ * The page is ten cards long and each of them is a form's worth of
  * controls, so a single column of them was a page the reader had to scroll to
  * reach anything on — and the Save bar at the very end of it, ten cards
  * away from the field that was just changed.  A mature settings window shows
@@ -389,34 +390,19 @@ const passwordValid = computed(() => securityPassword.value.length > 0 && passwo
 const passwordMismatch = computed(() => securityPasswordConfirm.value.length > 0 && securityPasswordConfirm.value !== securityPassword.value);
 const passwordBlocked = computed(() => securityPassword.value.length > 0 && (!passwordValid.value || passwordMismatch.value));
 const clearPasswordOpen = ref(false);
-const clearPasswordDialog = ref<HTMLDialogElement | null>(null);
 const factoryResetOpen = ref(false);
-const factoryResetDialog = ref<HTMLDialogElement | null>(null);
 const recoverOpen = ref(false);
-const recoverDialog = ref<HTMLDialogElement | null>(null);
 // The sidecar reports DATA_INVALID when it refuses to start on its own data
 // directory; nothing else it can report is repaired the same way.
 const dataInvalid = computed(() => state.error?.code === "DATA_INVALID");
-watch(recoverOpen, async (open) => {
-  await nextTick();
-  if (open) recoverDialog.value?.showModal();
-  else recoverDialog.value?.close();
-});
+const recoverDialog = useDialog(recoverOpen);
 async function confirmRecover() {
   if (state.pending) return;
   recoverOpen.value = false;
   await store.recoverData();
 }
-watch(clearPasswordOpen, async (open) => {
-  await nextTick();
-  if (open) clearPasswordDialog.value?.showModal();
-  else clearPasswordDialog.value?.close();
-});
-watch(factoryResetOpen, async (open) => {
-  await nextTick();
-  if (open) factoryResetDialog.value?.showModal();
-  else factoryResetDialog.value?.close();
-});
+const clearPasswordDialog = useDialog(clearPasswordOpen);
+const factoryResetDialog = useDialog(factoryResetOpen);
 async function clearPassword() {
   if (securityBusy.value) return;
   clearPasswordOpen.value = false;
@@ -449,24 +435,14 @@ const companionPort = ref(8080);
 const companionBusy = ref(false);
 let companionGeneration = 0;
 const companionRotatePending = ref(false);
-const companionRotateDialog = ref<HTMLDialogElement | null>(null);
-watch(companionRotatePending, async (pending) => {
-  await nextTick();
-  if (pending) companionRotateDialog.value?.showModal();
-  else companionRotateDialog.value?.close();
-});
+const companionRotateDialog = useDialog(companionRotatePending);
 async function rotateCompanionToken() {
   if (!companionRotatePending.value || companionBusy.value || !companion.value?.running) return;
   companionRotatePending.value = false;
   await configureCompanion(true, true);
 }
 const companionClearPending = ref(false);
-const companionClearDialog = ref<HTMLDialogElement | null>(null);
-watch(companionClearPending, async (pending) => {
-  await nextTick();
-  if (pending) companionClearDialog.value?.showModal();
-  else companionClearDialog.value?.close();
-});
+const companionClearDialog = useDialog(companionClearPending);
 /**
  * Clear the companion's access token — the legacy web panel's 清除访问令牌.
  *
@@ -545,12 +521,7 @@ function backupMeta(item: Record<string, unknown>): string {
 const backupMessage = ref("");
 const restorePath = ref<string | null>(null);
 const restoreBusy = ref(false);
-const restoreDialog = ref<HTMLDialogElement | null>(null);
-watch(restorePath, async (path) => {
-  await nextTick();
-  if (path) restoreDialog.value?.showModal();
-  else restoreDialog.value?.close();
-});
+const restoreDialog = useDialog(restorePath);
 const translationText = ref("");
 const translationResult = ref("");
 const translationSource = ref("auto");
@@ -590,22 +561,16 @@ watch([translationText, translationSource, translationTarget], () => {
 // and the result are not, or a clip's translation would appear under a textarea
 // still holding the snippet the user typed.
 const translateItemOpen = ref(false);
-const translateItemDialog = ref<HTMLDialogElement | null>(null);
 const translateItemText = ref("");
 const translateItemTruncated = ref(false);
 const translateItemResult = ref("");
 const translateItemReading = ref(false);
 const translateItemBusy = ref(false);
 let translateItemGeneration = 0;
-watch(translateItemOpen, async (open) => {
-  await nextTick();
-  if (open) translateItemDialog.value?.showModal();
-  else {
-    // Invalidates an in-flight translation, so a late response cannot land in
-    // a dialog the user has already dismissed.
-    ++translateItemGeneration;
-    translateItemDialog.value?.close();
-  }
+const translateItemDialog = useDialog(translateItemOpen, () => {
+  // Invalidates an in-flight translation, so a late response cannot land in a
+  // dialog the user has already dismissed.
+  ++translateItemGeneration;
 });
 watch([translationSource, translationTarget], () => {
   if (!translateItemOpen.value) return;
@@ -1307,12 +1272,7 @@ const aiEditorContent = ref("");
 const aiSavedContent = ref("");
 const aiEditorDirty = computed(() => !!aiSelectedItem.value && aiEditorContent.value !== aiSavedContent.value);
 const aiNextFile = ref<Record<string, any> | null>(null);
-const aiDiscardDialog = ref<HTMLDialogElement | null>(null);
-watch(aiNextFile, async (item) => {
-  await nextTick();
-  if (item) aiDiscardDialog.value?.showModal();
-  else aiDiscardDialog.value?.close();
-});
+const aiDiscardDialog = useDialog(aiNextFile);
 function requestAiRead(item: Record<string, any>) {
   if (aiMutationBusy.value) return;
   if (aiEditorDirty.value) aiNextFile.value = item;
@@ -1326,12 +1286,7 @@ async function discardAiChanges() {
 let aiReadGeneration = 0;
 const aiMutationBusy = ref(false);
 const aiTrashItem = ref<Record<string, any> | null>(null);
-const aiTrashDialog = ref<HTMLDialogElement | null>(null);
-watch(aiTrashItem, async (item) => {
-  await nextTick();
-  if (item) aiTrashDialog.value?.showModal();
-  else aiTrashDialog.value?.close();
-});
+const aiTrashDialog = useDialog(aiTrashItem);
 async function confirmAiTrash() {
   if (aiTrashItem.value) await trashAiLocal(aiTrashItem.value);
 }
@@ -1386,7 +1341,6 @@ const aiPullPending = ref<{
   items: Array<Record<string, any>>;
   mode: string;
 } | null>(null);
-const aiPullDialog = ref<HTMLDialogElement | null>(null);
 /** One row per page of the remote list; the page and the select-all checkbox read
  * the same slice so "select this page" cannot mean two different sets. */
 const AI_PAGE_SIZE = 40;
@@ -1596,6 +1550,9 @@ const aiMigrateSummary = computed(() => {
   return t("将覆盖 {count} 个不同的配置项，被覆盖的原文件保留为 .bak", { count });
 });
 async function openAiMigrate() {
+  // Awaits the tick itself rather than going through `useDialog`: the read that
+  // fills the wizard has to see the dialog's own state, and the flag is raised
+  // by the caller (a device button, the tray command) rather than by the dialog.
   aiMigrateOpen.value = true;
   await nextTick();
   aiMigrateDialog.value?.showModal();
@@ -1723,11 +1680,7 @@ const aiPullProgress = ref<{ peerId: string; total: number; done: number; failed
 /** How the last pull ended, for the line that reports it: empty while a pull is
  * running or before one has. */
 const aiPullOutcome = ref<"" | "done" | "failed">("");
-watch(aiPullPending, async (pending) => {
-  await nextTick();
-  if (pending) aiPullDialog.value?.showModal();
-  else aiPullDialog.value?.close();
-});
+const aiPullDialog = useDialog(aiPullPending);
 function requestAiPull(item: Record<string, any>) {
   if (aiPullMode.value === "copy") void pullAiRemote([item], "copy");
   else aiPullPending.value = aiPullAbout([item], aiPullMode.value);
@@ -1856,24 +1809,17 @@ function deliveryGlyph(peerId: string) {
 }
 const password = ref("");
 const deleteItem = ref<HistoryItem | null>(null);
-const deleteDialog = ref<HTMLDialogElement | null>(null);
 const batchDeleteIds = ref<string[] | null>(null);
-const batchDeleteDialog = ref<HTMLDialogElement | null>(null);
 const clearHistoryOpen = ref(false);
-const clearHistoryDialog = ref<HTMLDialogElement | null>(null);
 const revokeDevice = ref<Device | null>(null);
-const revokeDialog = ref<HTMLDialogElement | null>(null);
 const forgetDevice = ref<Device | null>(null);
-const forgetDialog = ref<HTMLDialogElement | null>(null);
 /** The internet-paired device a 解除互联网配对 is being confirmed for.  It has
  * its own dialog rather than sharing 撤销信任's: that one names a pinned
  * certificate this machine holds and the pairing repository it drops, and an
  * internet peer has neither — what ends is a code pairing, and the sentence
  * that says so is a different sentence. */
 const relayUnpairDevice = ref<Device | null>(null);
-const relayUnpairDialog = ref<HTMLDialogElement | null>(null);
 const purgeDevice = ref<Device | null>(null);
-const purgeDialog = ref<HTMLDialogElement | null>(null);
 const probeResults = ref<Record<string, DeviceProbeResult>>({});
 /** What the rename dialog is open on: a device on this machine's list, whose
  * alias is rewritten from the context menu (the row has its own 设备备注 field
@@ -1889,7 +1835,6 @@ type RenameTarget =
   | { kind: "internet"; peerId: string };
 const renameTarget = ref<RenameTarget | null>(null);
 const renameValue = ref("");
-const renameDialog = ref<HTMLDialogElement | null>(null);
 /** The conversation the chat page should open when it next mounts, handed over
  * by 打开聊天 on a device row.  The chat page owns which session is selected —
  * it has to, since it is the one polling the list — so this is a request rather
@@ -1931,6 +1876,11 @@ const certAlertName = computed(() =>
  * prompt would leave that device silently unreachable until the app restarts.
  * A later alert replaces the message in place, which is how "trust again"
  * becomes available once the device has connected with its new certificate.
+ *
+ * One of the few dialogs that does not go through `useDialog`: it is driven by
+ * an alert object rather than by a flag it owns, and it refuses to close on the
+ * user's behalf, so the "is it up" guard is real here (`showModal()` on an
+ * already-open dialog throws) rather than the tick the composable supplies.
  */
 watch(() => state.certAlert, async (alert) => {
   await nextTick();
@@ -1952,7 +1902,6 @@ async function rejectCertAlert() {
   if (state.certAlert) await store.keepUnpaired(state.certAlert.device_id);
 }
 const sendUrlDevice = ref<Device | null>(null);
-const sendUrlDialog = ref<HTMLDialogElement | null>(null);
 const sendUrlValue = ref("");
 const sendUrlBusy = ref(false);
 // Who the dialog can send to. A row's button targets exactly that device; a
@@ -1965,11 +1914,9 @@ const sendUrlDeviceId = computed({
   },
 });
 const pushTextOpen = ref(false);
-const pushTextDialog = ref<HTMLDialogElement | null>(null);
 const pushTextValue = ref("");
 const pushTextBusy = ref(false);
 const logsOpen = ref(false);
-const logsDialog = ref<HTMLDialogElement | null>(null);
 const logLines = ref<string[]>([]);
 /** The subset of `logLines` that reports a failure — what the dialog opens on. */
 const logProblems = ref<string[]>([]);
@@ -1979,11 +1926,9 @@ const logsBusy = ref(false);
 const logsExporting = ref(false);
 const logExportMessage = ref("");
 const aboutOpen = ref(false);
-const aboutDialog = ref<HTMLDialogElement | null>(null);
 const aboutBusy = ref(false);
 const aboutMessage = ref("");
 const qrOpen = ref(false);
-const qrDialog = ref<HTMLDialogElement | null>(null);
 const qrBusy = ref(false);
 const qrImage = ref("");
 const qrUrl = ref("");
@@ -2006,9 +1951,7 @@ const dropActive = ref(false);
  * once it has them, so a later visit does not re-stage a finished drop. */
 const droppedPaths = ref<string[]>([]);
 const restartOpen = ref(false);
-const restartDialog = ref<HTMLDialogElement | null>(null);
 const diagnosticsOpen = ref(false);
-const diagnosticsDialog = ref<HTMLDialogElement | null>(null);
 const diagnosticsReport = ref<DiagnosticsReport | null>(null);
 const diagnosticsBusy = ref(false);
 const diagnosticsRepairBusy = ref(false);
@@ -2121,14 +2064,9 @@ watch(ready, async (isReady) => {
 // The first-run picker: shown once per session and only while the sidecar says
 // no language has ever been chosen.  Dismissing it leaves the flag False, so it
 // returns on the next launch — the legacy onboarding behaves the same way.
-const languageDialog = ref<HTMLDialogElement | null>(null);
 const languagePromptOpen = ref(false);
 let languagePrompted = false;
-watch(languagePromptOpen, async (open) => {
-  await nextTick();
-  if (open) languageDialog.value?.showModal();
-  else languageDialog.value?.close();
-});
+const languageDialog = useDialog(languagePromptOpen);
 function maybePromptLanguage(chosen: unknown) {
   if (languagePrompted || chosen !== false) return;
   languagePrompted = true;
@@ -2276,11 +2214,7 @@ async function pinSelected(pinned: boolean) {
       : t("已取消置顶 {count} 条", { count }));
   }
 }
-watch(batchDeleteIds, async (ids) => {
-  await nextTick();
-  if (ids) batchDeleteDialog.value?.showModal();
-  else batchDeleteDialog.value?.close();
-});
+const batchDeleteDialog = useDialog(batchDeleteIds);
 watch(() => [state.query, state.offset], () => { batchDeleteIds.value = null; }, { flush: "sync" });
 async function favoriteSelected() {
   const count = await store.batchFavorite([...state.selectedIds]);
@@ -2338,11 +2272,7 @@ async function confirmClearHistory() {
     store.toast("ui.history", t("已清空 {count} 条历史记录", { count: cleared }));
   }
 }
-watch(clearHistoryOpen, async (open) => {
-  await nextTick();
-  if (open) clearHistoryDialog.value?.showModal();
-  else clearHistoryDialog.value?.close();
-});
+const clearHistoryDialog = useDialog(clearHistoryOpen);
 onUnmounted(() => { clearStatus(); clearTimeout(previewTimer); });
 async function pauseSync(minutes: number) {
   if (pauseBusy.value) return;
@@ -2357,7 +2287,7 @@ async function pauseSync(minutes: number) {
     await store.refresh();
     store.toast("ui.sync", t("同步已暂停 {minutes} 分钟", { minutes }));
   }
-  catch (reason: any) { state.error = reason?.message || t("暂停同步失败"); }
+  catch (reason: any) { store.fail(reason?.message || t("暂停同步失败")); }
   finally { pauseBusy.value = false; }
 }
 async function resumeSync() {
@@ -2370,7 +2300,7 @@ async function resumeSync() {
     await store.refresh();
     store.toast("ui.sync", t("同步已恢复"));
   }
-  catch (reason: any) { state.error = reason?.message || t("恢复同步失败"); }
+  catch (reason: any) { store.fail(reason?.message || t("恢复同步失败")); }
   finally { pauseBusy.value = false; }
 }
 function pairingPending(device: Device) {
@@ -2572,7 +2502,7 @@ function relayLastSeen(device: Device) {
 async function saveDeviceNote(device: Device, event: Event) {
   const note = (event.target as HTMLInputElement).value;
   try { await bridge.setDeviceNote(device.id, note); await store.refresh(); }
-  catch (reason: any) { state.error = reason?.message || t("保存设备备注失败"); }
+  catch (reason: any) { store.fail(reason?.message || t("保存设备备注失败")); }
 }
 /** Rename *this* machine, from the overview's own card.
  *
@@ -2588,7 +2518,8 @@ async function renameThisDevice(name: string) {
     await store.refresh();
     store.toast("ui.devices", t("设备名称已更新"));
   } catch (reason: any) {
-    state.error = reason?.message || t("重命名失败");
+    // store.fail, not a bare string: the band renders .message/.code/.retryable.
+    store.fail(reason?.message || t("重命名失败"));
   }
 }
 /** Confirm the alias the rename dialog collected.  A device's name goes through
@@ -2615,23 +2546,16 @@ async function confirmRename() {
     if (target.kind === "device") store.toast("ui.devices", t("已重命名为 {name}", { name: alias }));
     else announce(t("已重命名为 {name}", { name: alias }));
   } catch (reason: any) {
-    state.error = reason?.message || t("重命名失败");
+    // store.fail, not a bare string: the band renders .message/.code/.retryable.
+    store.fail(reason?.message || t("重命名失败"));
   }
 }
-watch(renameTarget, async (target) => {
-  await nextTick();
-  if (target) renameDialog.value?.showModal();
-  else renameDialog.value?.close();
-});
+const renameDialog = useDialog(renameTarget);
 async function confirmRevoke() {
   const current = state.devices.find((device) => device.id === revokeDevice.value?.id && device.paired);
   if (current && await store.unpair(current)) revokeDevice.value = null;
 }
-watch(revokeDevice, async (device) => {
-  await nextTick();
-  if (device) revokeDialog.value?.showModal();
-  else revokeDialog.value?.close();
-});
+const revokeDialog = useDialog(revokeDevice);
 async function confirmForget() {
   const target = forgetDevice.value;
   if (target && await store.forget(target)) forgetDevice.value = null;
@@ -2651,25 +2575,13 @@ async function confirmRelayUnpair() {
   if (await unpairInternet(target.id)) relayUnpairDevice.value = null;
   else announce(t("解除互联网配对失败"));
 }
-watch(relayUnpairDevice, async (device) => {
-  await nextTick();
-  if (device) relayUnpairDialog.value?.showModal();
-  else relayUnpairDialog.value?.close();
-});
+const relayUnpairDialog = useDialog(relayUnpairDevice);
 async function confirmPurge() {
   const target = purgeDevice.value;
   if (target && await store.purge(target)) purgeDevice.value = null;
 }
-watch(forgetDevice, async (device) => {
-  await nextTick();
-  if (device) forgetDialog.value?.showModal();
-  else forgetDialog.value?.close();
-});
-watch(purgeDevice, async (device) => {
-  await nextTick();
-  if (device) purgeDialog.value?.showModal();
-  else purgeDialog.value?.close();
-});
+const forgetDialog = useDialog(forgetDevice);
+const purgeDialog = useDialog(purgeDevice);
 function channelLabel(channel: string) {
   return channel === "lan" ? t("局域网") : t("中继");
 }
@@ -2871,13 +2783,11 @@ function openSendUrlFromHost() {
   sendUrlValue.value = "";
   sendUrlDevice.value = candidates[0];
 }
-watch(sendUrlDevice, async (device) => {
-  await nextTick();
-  const dialog = sendUrlDialog.value;
-  if (!dialog) return;
-  // The host can re-request while the dialog is already open.
-  if (device) { if (!dialog.open) dialog.showModal(); }
-  else { dialog.close(); sendUrlCandidates.value = []; }
+const sendUrlDialog = useDialog(sendUrlDevice, () => {
+  // Leaving the dialog forgets who it was pointed at: the picker is rebuilt per
+  // request, and a stale candidate list would offer a device this request has
+  // nothing to do with.
+  sendUrlCandidates.value = [];
 });
 async function confirmSendUrl() {
   const device = sendUrlDevice.value;
@@ -2898,11 +2808,7 @@ function openPushText() {
   pushTextValue.value = "";
   pushTextOpen.value = true;
 }
-watch(pushTextOpen, async (open) => {
-  await nextTick();
-  if (open) pushTextDialog.value?.showModal();
-  else pushTextDialog.value?.close();
-});
+const pushTextDialog = useDialog(pushTextOpen);
 async function confirmPushText() {
   const text = pushTextValue.value.trim();
   if (!text) return;
@@ -2920,11 +2826,7 @@ async function confirmPushText() {
     pushTextBusy.value = false;
   }
 }
-watch(logsOpen, async (open) => {
-  await nextTick();
-  if (open) logsDialog.value?.showModal();
-  else logsDialog.value?.close();
-});
+const logsDialog = useDialog(logsOpen);
 async function loadLogs(lines = logCount.value) {
   logsBusy.value = true;
   try {
@@ -2962,11 +2864,7 @@ async function exportLogs() {
   } catch (error) { state.error = error as any; }
   finally { logsExporting.value = false; }
 }
-watch(qrOpen, async (open) => {
-  await nextTick();
-  if (open) qrDialog.value?.showModal();
-  else qrDialog.value?.close();
-});
+const qrDialog = useDialog(qrOpen);
 async function openCompanionQr() {
   qrImage.value = "";
   qrUrl.value = "";
@@ -3010,11 +2908,7 @@ watch(() => state.hostRequest, (request) => {
   if (request.kind === "qr") void openCompanionQr();
   else openSendUrlFromHost();
 });
-watch(aboutOpen, async (open) => {
-  await nextTick();
-  if (open) aboutDialog.value?.showModal();
-  else aboutDialog.value?.close();
-});
+const aboutDialog = useDialog(aboutOpen);
 function openAbout() {
   aboutMessage.value = "";
   aboutOpen.value = true;
@@ -3028,21 +2922,13 @@ async function openAboutLink(target: "homepage" | "releases") {
   } catch (error) { state.error = error as any; }
   finally { aboutBusy.value = false; }
 }
-watch(restartOpen, async (open) => {
-  await nextTick();
-  if (open) restartDialog.value?.showModal();
-  else restartDialog.value?.close();
-});
+const restartDialog = useDialog(restartOpen);
 async function confirmRestart() {
   restartOpen.value = false;
   // The host exits this process: nothing after the call is guaranteed to run.
   await bridge.restartApp();
 }
-watch(diagnosticsOpen, async (open) => {
-  await nextTick();
-  if (open) diagnosticsDialog.value?.showModal();
-  else diagnosticsDialog.value?.close();
-});
+const diagnosticsDialog = useDialog(diagnosticsOpen);
 function diagnosticLabel(item: DiagnosticItem) {
   return item.label_text || item.id;
 }
@@ -3223,11 +3109,7 @@ async function confirmDelete() {
   if (deleteItem.value) await store.delete(deleteItem.value);
   deleteItem.value = null;
 }
-watch(deleteItem, async (item) => {
-  await nextTick();
-  if (item) deleteDialog.value?.showModal();
-  else deleteDialog.value?.close();
-});
+const deleteDialog = useDialog(deleteItem);
 /** The sidebar, top to bottom: what Ctrl+1…8 counts.  The numbers belong to the
  * rows the user can see, which is why this list has to stay in the order the
  * template renders them and not in whatever order would read better here. */
@@ -4933,7 +4815,7 @@ async function translateText() {
             <!-- The legacy Settings window searched itself the same way: over
                  the text the reader can see, marking which parts of the page
                  hold it.  The box is the page's rather than the strip's — it is
-                 about all eleven cards, and a reader with a query in mind
+                 about all ten cards, and a reader with a query in mind
                  should not have to guess which one holds it — and it sits above
                  the strip, which stays put as the card scrolls. -->
             <div class="settings-search">
@@ -4944,13 +4826,13 @@ async function translateText() {
                 ? t("{count} 个分区匹配“{query}”", { count: settingsMatchTotal, query: settingsQuery.trim() })
                 : t("没有匹配“{query}”的设置项", { query: settingsQuery.trim() }) }}</p>
             </div>
-            <!-- Two rows, because eleven cards answer two questions: which part
+            <!-- Two rows, because ten cards answer two questions: which part
                  of the app this is about, and which card inside it.  The four
                  groups are the table of contents; the row under them is the
                  group the reader is in.  Both open cards — a group opens its
                  first — so neither row is a label with nothing to aim at, and
                  the pair is what lets the page be browsed in two steps instead
-                 of eleven.  The group row stays while the section row changes
+                 of ten.  The group row stays while the section row changes
                  under it, which is what keeps the reader's place: the whole
                  strip is the same width whichever group is open. -->
             <nav class="settings-nav" :aria-label="t('设置分区')">

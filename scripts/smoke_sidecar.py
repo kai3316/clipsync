@@ -331,13 +331,42 @@ def verify_companion_runtime(command, directory):
 
 
 def verify_companion_resources(executable: str) -> None:
-    from PyInstaller.archive.readers import CArchiveReader
+    """The Companion's static files really are in what was built.
 
-    archive = CArchiveReader(executable)
-    entries = {name.replace("\\", "/"): name for name in archive.toc}
+    Two shapes reach this, and the resources are in a different place in each
+    (see clipsync-sidecar.spec): a **onefile** executable carries them inside its
+    CArchive, and a **onedir** build leaves them as ordinary files under
+    ``_internal/`` beside it.  The check is that every file the source tree has
+    is present and byte-identical in the build -- which is the failure that
+    happens silently, because the web server then serves only its minimal
+    fallback page and the app looks broken rather than unbuilt.
+    """
+    target = Path(executable)
     static = Path(__file__).resolve().parents[1] / "internal" / "web" / "static"
     files = [path for path in static.rglob("*") if path.is_file()]
     assert files, "Companion source resources are missing"
+
+    internal = target.parent / "_internal"
+    if internal.is_dir():
+        # Onedir: the resources are files, so compare them as files.
+        root = internal
+        missing = []
+        for path in files:
+            built = root / "internal" / "web" / "static" / path.relative_to(static)
+            if not built.is_file():
+                missing.append(str(path.relative_to(static)))
+            elif built.read_bytes() != path.read_bytes():
+                raise AssertionError(
+                    f"Packaged Companion resource is stale: {path.relative_to(static)}"
+                )
+        assert not missing, f"Packaged Companion resources missing: {', '.join(missing[:5])}"
+        print(f"Packaged Companion resources ({len(files)} files): PASS")
+        return
+
+    from PyInstaller.archive.readers import CArchiveReader
+
+    archive = CArchiveReader(str(target))
+    entries = {name.replace("\\", "/"): name for name in archive.toc}
     for path in files:
         name = "internal/web/static/" + path.relative_to(static).as_posix()
         assert name in entries, f"Packaged Companion resource missing: {name}"

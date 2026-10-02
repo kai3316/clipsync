@@ -238,33 +238,36 @@ test("an invitation shows its band above an empty conversation", async ({ page }
 /** The retry count, which is the one thing that tells a peer being reconnected
  *  apart from a peer that is gone.
  *
- * Both rows are offline and paired; only one of them is being worked on.  The
- * chip is asserted on its own — the legacy panel's own words — and against the
- * settled row beside it, because a counter that read the same as 离线 would be
- * no answer at all.
+ * Both rows are paired and neither is online; only one of them is being worked
+ * on, and the difference the reader sees is 正在同步 against 已配对 — the same
+ * two words the rest of the list uses.
+ *
+ * The *count* is in the chip's title rather than in its text, which is where it
+ * moved when the state was collapsed from two chips into one: 本地·在线 and
+ * 重连中 2/5 were never things a reader scanned the list for, and the tooltip is
+ * where they went.  This test asserted the text until it was rewritten here,
+ * which means it had been failing since that change rather than proving
+ * anything about it — so the assertion is on the attribute the count actually
+ * lives in.
  */
 test("a device being retried says how far along it is", async ({ page }) => {
   const failures = await open(page, 1280);
-  await page.getByRole("button", { name: "设备", exact: true }).click();
+  await page.getByRole("button", { name: T("设备", "Devices"), exact: true }).click();
   const retrying = page.locator(".device-row", { hasText: "家里的台式机" }).first();
-  await expect(retrying.locator(".channel", { hasText: "重连中" })).toContainText("重连中 3/10");
-  const both = await page.evaluate(() => {
-    const chip = (name: string) => {
-      const row = [...document.querySelectorAll(".device-row")]
-        .find(element => element.textContent?.includes(name));
-      // Named rather than asserted-on: the `!` this used to carry turned a
-      // renamed device into "cannot read properties of undefined", which says
-      // nothing about which name went missing.
-      if (!row) throw new Error(`no device row for ${name}`);
-      const channel = row.querySelector(".channel--connecting, .channel--offline");
-      if (!channel) throw new Error(`${name} carries no channel`);
-      return getComputedStyle(channel).color;
-    };
-    // The retried one, against a peer that is also offline and paired: only the
-    // first is being worked on, and 重连中 3/10 is the whole difference.
-    return { retry: chip("家里的台式机"), settled: chip("Mac mini") };
-  });
-  expect(both.retry).not.toBe(both.settled);
+  const chip = retrying.locator(".channel").first();
+  await expect(chip).toHaveAttribute("title", T("重连中 3/10", "Reconnecting 3/10"));
+  await expect(chip).toHaveText(T("正在同步", "Syncing"));
+
+  const settled = page.locator(".device-row", { hasText: "Mac mini" }).first();
+  // The peer that is not being worked on reads as paired, not as syncing, and
+  // carries no count at all: the two rows differ in the two ways they should.
+  await expect(settled.locator(".channel").first()).toHaveText(T("已配对", "Paired"));
+  await expect(settled.locator(".channel").first()).toHaveAttribute(
+    "title",
+    // Built, not translated as one string: the chip is `${t("本地")}·${state}`,
+    // so the English form has no spaces around the separator.
+    T("本地·离线", "Local·offline"),
+  );
   expect(failures).toEqual([]);
   await page.screenshot({ path: "test-results/page-devices-retrying.png" });
 });

@@ -1723,9 +1723,34 @@ async fn recover_data_dir(
     // a failed repair must not leave the window with no background process. The
     // repair's own failure is reported first — it is the actionable one, and a
     // sidecar that will not come back already has the window's retry.
-    let items = items?;
+    //
+    // That order is why this is not `items?`: the early return skipped the
+    // restart the comment above promises, leaving the window with no background
+    // process for as long as the repair took to fail.
+    let items = match items {
+        Ok(items) => items,
+        Err(error) => {
+            if let Err(restart) = host.restart_bridge().await {
+                log_restart_failure(&error, &restart);
+            }
+            return Err(error);
+        }
+    };
     host.restart_bridge().await?;
     Ok(json!({ "items": items }))
+}
+
+/// Record a failure to bring the sidecar back after a repair pass.
+///
+/// The repair's own error is what the caller reports — it is the actionable one
+/// — so a second failure to restart must not replace it. It still has to be
+/// visible somewhere: a window with no background process and no account of why
+/// is the state this whole path exists to avoid.
+fn log_restart_failure(repair: &BridgeError, restart: &BridgeError) {
+    eprintln!(
+        "clipsync: data repair failed ({}: {}) and the sidecar did not restart ({}: {})",
+        repair.code, repair.message, restart.code, restart.message
+    );
 }
 
 #[tauri::command]

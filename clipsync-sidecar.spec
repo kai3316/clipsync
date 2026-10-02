@@ -1,22 +1,39 @@
 # -*- mode: python ; coding: utf-8 -*-
 """Business-only sidecar. The legacy desktop bundle remains a separate target.
 
-macOS is built as a directory (``COLLECT``); every other platform stays onefile.
+Two shapes come out of this file, chosen by ``CLIPSYNC_SIDECAR_ONEDIR``:
 
-A onefile executable unpacks its whole runtime into a *fresh* ``_MEIxxxx``
-directory under the temp root on every launch, and macOS validates the code
-signature of every binary written there.  With a path that changes each time,
-neither that validation nor the filesystem cache can be reused, so the cost is
-paid in full on every start.  Measured on an M-series laptop by timing
-``--help`` -- unpacking, the interpreter, and no application code at all:
-onefile 8.5s on every run, the same application as a directory 0.15s once warm
-(the single 19s first run is that same validation, paid once because the paths
-do not move).  Windows has no per-file validation step, which is why the same
-onefile costs it far less and why it keeps the single-file shape.
+* onefile (default) -- one ``clipsync-sidecar`` executable.  A launch unpacks
+  the whole runtime into a *fresh* ``_MEIxxxx`` directory under the temp root.
+* onedir (``CLIPSYNC_SIDECAR_ONEDIR=1``) -- a ``clipsync-sidecar/`` directory
+  holding the executable and its ``_internal`` tree.  A launch starts it where
+  it lies.
+
+The difference is the unpacking.  Measured here by timing ``--help``, which
+starts the interpreter and runs no application code at all: onefile 870 ms on
+every run, onedir 180 ms.  On macOS that gap is wider still, because the
+platform validates the code signature of every binary written to a path that
+changes each time -- 8.5s against 0.15s warm on an M-series laptop, which is why
+macOS has always built the directory.
+
+Windows and Linux stayed onefile for the reason the release is shaped the way it
+is: ``externalBin`` takes a single executable, and a directory has nowhere to
+put itself.  That is a packaging constraint, not a preference, and it is lifted
+by shipping the tree as a bundle *resource* -- which macOS already does.  So the
+shape is now the packager's choice per platform rather than this file's.
+
+A caller that stages the directory form must also tell the host where to find
+it: ``internal/transport``'s sibling lookup in ``desktop/src-tauri/src/bridge.rs``
+prefers ``sidecar/clipsync-sidecar`` when it is there, and falls back to the
+onefile beside the host.
 """
 
 import os
 import sys
+
+# Set by the packager for the platform that ships the tree; see the docstring.
+_onedir = os.environ.get("CLIPSYNC_SIDECAR_ONEDIR", "").strip() not in ("", "0", "false")
+_onedir = _onedir or sys.platform == "darwin"
 
 root = os.path.abspath(SPECPATH)
 web_static = os.path.join(root, "internal", "web", "static")
@@ -33,7 +50,7 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-if sys.platform == "darwin":
+if _onedir:
     exe = EXE(
         pyz,
         a.scripts,

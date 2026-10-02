@@ -15,6 +15,15 @@ use tokio::{
 };
 
 const MAX_FRAME: usize = 1024 * 1024;
+/// How long the sidecar has to report ready before it is treated as wedged.
+///
+/// Wide, because the wait includes the packaging: a onefile build unpacks its
+/// whole runtime before the application starts (`clipsync-sidecar.spec`), and
+/// that is the slow end of the two shapes.  See `Bridge::start` for what the
+/// figure was set from.  120s covers the slowest platform measured with room for
+/// a machine several times slower; a genuinely wedged sidecar is bounded by the
+/// user's retry rather than by this.
+const SIDECAR_READY_TIMEOUT_SECONDS: u64 = 120;
 /// How much of the sidecar's stderr is kept to explain a failure. Bounded
 /// because it is a live process's output and this must not grow with runtime.
 const STDERR_LINES: usize = 40;
@@ -22,6 +31,19 @@ const STDERR_LINES: usize = 40;
 /// `dyld` refusal is a sentence, so this is generous rather than tight.
 const STDERR_LINE_CHARS: usize = 300;
 type Reply = oneshot::Sender<Result<Value, BridgeError>>;
+
+/// Lock a standard mutex, recovering from a poisoned one.
+///
+/// `Mutex::lock()` returns `Err` once a thread has panicked while holding it,
+/// and `.unwrap()` on that turns one unrelated panic into a permanent one: the
+/// mutex stays poisoned, so every later lock panics too. In this file that is a
+/// restart loop -- the stdout reader task panics, the reader ends, and the host
+/// reads the sidecar as dead. The guards here own a bounded stderr buffer and a
+/// table of pending replies, neither of which a panic can leave half-written in
+/// a way that matters, so the guard is taken and the work goes on.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// The tail of a sidecar's stderr.
 ///
@@ -41,7 +63,7 @@ impl StderrTail {
         if line.is_empty() {
             return;
         }
-        let mut tail = self.0.lock().unwrap();
+        let mut tail = lock_or_recover(&self.0);
         if tail.len() == STDERR_LINES {
             tail.pop_front();
         }
@@ -49,7 +71,7 @@ impl StderrTail {
     }
 
     fn last(&self) -> Option<String> {
-        self.0.lock().unwrap().back().cloned()
+        lock_or_recover(&self.0).back().cloned()
     }
 }
 
@@ -57,6 +79,43 @@ impl StderrTail {
 /// exposes no accessor of its own.
 fn program_of(command: &mut tokio::process::Command) -> PathBuf {
     PathBuf::from(command.as_std_mut().get_program())
+}
+
+/// Where the packaged sidecar is, out of the two shapes a packager may stage.
+///
+/// A PyInstaller **onefile** executable unpacks its whole runtime into a fresh
+/// temporary directory on every launch: measured here, 1004 ms against 191 ms
+/// for the same application as a **onedir** tree, and that second is paid by
+/// every launch.  The tree has nowhere to put itself in the `externalBin`
+/// field -- that field takes one executable -- so a platform that ships it
+/// stages it as a bundle *resource* instead, under `sidecar/`.  macOS has
+/// always done that; Windows and Linux can now do the same, and this decides
+/// which of the two is here.
+// Called only from the release, non-macOS branch of `command()`; the tests reach
+// `pick_sidecar` directly, so a debug build has no caller for this wrapper.
+#[allow(dead_code)]
+fn sidecar_path() -> Result<PathBuf, BridgeError> {
+    let exe = std::env::current_exe().map_err(|_| BridgeError::unavailable())?;
+    Ok(pick_sidecar(&exe))
+}
+
+/// The choice `sidecar_path` makes, from the host's own location.
+///
+/// The directory wins when it exists, because staging it is a deliberate act: a
+/// packager that copied both meant the tree.  Absent either, the onefile path is
+/// returned anyway so the failure names what was expected rather than reporting
+/// that nothing was found.
+fn pick_sidecar(exe: &std::path::Path) -> PathBuf {
+    let name = if cfg!(windows) {
+        "clipsync-sidecar.exe"
+    } else {
+        "clipsync-sidecar"
+    };
+    let tree = exe
+        .parent()
+        .map(|dir| dir.join("sidecar").join(name))
+        .filter(|candidate| candidate.is_file());
+    tree.unwrap_or_else(|| exe.with_file_name(name))
 }
 
 /// The failure to report when the sidecar could not be launched at all.
@@ -107,7 +166,7 @@ fn fail_pending(
     ready: &watch::Sender<Option<Result<(), BridgeError>>>,
     error: BridgeError,
 ) {
-    let mut pending = pending.lock().unwrap();
+    let mut pending = lock_or_recover(&pending);
     if matches!(&*ready.borrow(), Some(Err(_))) {
         return;
     }
@@ -230,7 +289,7 @@ struct PendingGuard<'a> {
 
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
-        self.pending.lock().unwrap().remove(&self.id);
+        lock_or_recover(&self.pending).remove(&self.id);
     }
 }
 
@@ -310,17 +369,25 @@ impl Bridge {
         let startup = bridge.clone();
         let startup_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            // Generous on purpose.  The sidecar is a PyInstaller onefile build,
-            // so the clock here covers unpacking its Python runtime to a temp
-            // directory, starting the interpreter, and only then bringing the
-            // LAN runtime up -- measured at ~15s warm and ~20s cold on an M-series
-            // laptop, against a 15s bound that the sidecar therefore lost by a
-            // fraction of a second.  Losing it is not a slow start: this branch
-            // terminates the sidecar, so the window reported SIDECAR_UNAVAILABLE
-            // for a process that was in fact still coming up.  A timeout only
-            // bounds a failure, so the cost of the headroom is paid by a sidecar
-            // that is genuinely wedged.
-            if tokio::time::timeout(Duration::from_secs(60), startup.wait_ready())
+            // Generous on purpose, and wider than the figures it was set from.
+            // The clock here covers whatever the packaging costs before the
+            // application runs at all: unpacking the runtime (a onefile build)
+            // or starting in place (a directory), starting the interpreter, and
+            // only then bringing the LAN runtime up -- measured at ~15s warm and
+            // ~20s cold on an M-series laptop for the onefile, against a 15s
+            // bound that the sidecar therefore lost by a fraction of a second.
+            // Losing it is not a slow start: this branch terminates the sidecar,
+            // so the window reported SIDECAR_UNAVAILABLE for a process that was
+            // in fact still coming up.
+            //
+            // 60s was chosen against the macOS figure, which osascript and the
+            // extra signature validation make the slow end.  On a Windows or
+            // Linux onefile the measured 4.4s left 55s of margin, which is fine;
+            // what it does not leave room for is a slower machine than the one
+            // measured on.  A timeout only bounds a failure, so the cost of the
+            // headroom is paid only by a sidecar that is genuinely wedged --
+            // and the user has a retry button for that.
+            if tokio::time::timeout(Duration::from_secs(SIDECAR_READY_TIMEOUT_SECONDS), startup.wait_ready())
                 .await
                 .is_err()
             {
@@ -374,7 +441,7 @@ impl Bridge {
                 bridge.stderr.note(&String::from_utf8_lossy(&buffer));
             }
         });
-        *bridge.stderr_drain.lock().unwrap() = Some(drain);
+        *lock_or_recover(&bridge.stderr_drain) = Some(drain);
         Ok(bridge)
     }
 
@@ -418,15 +485,15 @@ impl Bridge {
                     .join("clipsync-sidecar"),
             )))
         }
+        // Windows and Linux ship the same two shapes macOS can: a directory
+        // staged as a bundle resource, or the onefile executable beside the
+        // host.  Which one is there decides which is started -- see
+        // `sidecar_path`.  `externalBin` (the onefile) is still the default
+        // because it needs no configuration beyond the field itself; the
+        // directory is what a packager stages when the launch cost matters.
         #[cfg(all(not(debug_assertions), not(target_os = "macos")))]
         {
-            let exe = std::env::current_exe().map_err(|_| BridgeError::unavailable())?;
-            let name = if cfg!(windows) {
-                "clipsync-sidecar.exe"
-            } else {
-                "clipsync-sidecar"
-            };
-            Ok(Self::declare_shell(Command::new(exe.with_file_name(name))))
+            Ok(Self::declare_shell(Command::new(sidecar_path()?)))
         }
     }
 
@@ -448,7 +515,7 @@ impl Bridge {
     }
 
     fn receive(self: &Arc<Self>, app: &AppHandle, value: Value) -> Result<(), BridgeError> {
-        let mut session = self.session.lock().unwrap();
+        let mut session = lock_or_recover(&self.session);
         if matches!(&*self.ready.borrow(), Some(Err(_))) {
             return Err(BridgeError::unavailable());
         }
@@ -468,7 +535,7 @@ impl Bridge {
                     ));
                 }
                 // Serialize readiness with failure and pending insertion.
-                let _pending = self.pending.lock().unwrap();
+                let _pending = lock_or_recover(&self.pending);
                 if matches!(&*self.ready.borrow(), Some(Err(_))) {
                     return Err(BridgeError::unavailable());
                 }
@@ -481,7 +548,7 @@ impl Bridge {
                     .as_str()
                     .ok_or_else(|| BridgeError::new("PROTOCOL_ERROR", "Missing response ID"))?;
                 // Late replies after timeout are harmless; mutations are never replayed.
-                if let Some(reply) = self.pending.lock().unwrap().remove(id) {
+                if let Some(reply) = lock_or_recover(&self.pending).remove(id) {
                     let result = if value["ok"] == true {
                         Ok(value["result"].clone())
                     } else {
@@ -624,7 +691,7 @@ impl Bridge {
         // without waiting is a race that loses exactly the line worth having.
         // Bounded, because a sidecar that left a grandchild holding the pipe
         // must not stall the failure the user is waiting on.
-        let drain = self.stderr_drain.lock().unwrap().take();
+        let drain = lock_or_recover(&self.stderr_drain).take();
         if let Some(drain) = drain {
             let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
         }
@@ -701,7 +768,7 @@ impl Bridge {
         frame.push(b'\n');
         let (send, receive) = oneshot::channel();
         {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = lock_or_recover(&self.pending);
             if self.stopping.load(std::sync::atomic::Ordering::SeqCst) && !shutdown {
                 return Err(BridgeError::unavailable());
             }
@@ -722,7 +789,7 @@ impl Bridge {
         // partial write poisons the session before another writer can acquire it.
         tauri::async_runtime::spawn(async move {
             let mut input = writer.input.lock().await;
-            if !writer.pending.lock().unwrap().contains_key(&id)
+            if !lock_or_recover(&writer.pending).contains_key(&id)
                 || matches!(&*writer.ready.borrow(), Some(Err(_)))
             {
                 return;
@@ -833,6 +900,40 @@ pub(crate) async fn recover() -> Result<Value, BridgeError> {
 mod tests {
     use super::*;
 
+    /// The packaged sidecar is one of two shapes, and the tree wins.
+    ///
+    /// A onefile build unpacks its runtime on every launch (measured: 1004 ms
+    /// against 191 ms for the tree beside it), so a packager that staged
+    /// `sidecar/` meant the tree.  Staging both is possible -- one platform's
+    /// build copies the resource and `externalBin` may still be configured --
+    /// and picking the executable there would silently give up the cost the
+    /// tree was staged for.
+    #[test]
+    fn a_staged_sidecar_tree_is_preferred_over_the_onefile_beside_the_host() {
+        let dir = std::env::temp_dir().join(format!("clipsync-sidecar-pick-{}", std::process::id()));
+        let bin = dir.join("bin");
+        let tree = bin.join("sidecar");
+        std::fs::create_dir_all(&tree).expect("temp tree");
+        let name = if cfg!(windows) {
+            "clipsync-sidecar.exe"
+        } else {
+            "clipsync-sidecar"
+        };
+        let host = bin.join(if cfg!(windows) { "ClipSync.exe" } else { "ClipSync" });
+        std::fs::write(&host, b"").expect("host stub");
+
+        // Nothing staged yet: the onefile beside the host is what is expected,
+        // so the failure it produces names that path.
+        assert_eq!(pick_sidecar(&host), bin.join(name));
+
+        // The tree appears: it wins.
+        let inside = tree.join(name);
+        std::fs::write(&inside, b"").expect("tree stub");
+        assert_eq!(pick_sidecar(&host), inside);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_dying_sidecar_explains_itself_with_its_last_line() {
         // The reported shape: a packaged macOS build spawned the sidecar, the
@@ -893,8 +994,8 @@ mod tests {
         // Oldest lines fall off, so what survives is the *end* of the output --
         // which is where a crash says what happened.
         assert_eq!(tail.last().unwrap(), format!("line {}", STDERR_LINES + 9));
-        assert_eq!(tail.0.lock().unwrap().len(), STDERR_LINES);
-        assert!(tail.0.lock().unwrap().iter().all(|line| !line.trim().is_empty()));
+        assert_eq!(lock_or_recover(&tail.0).len(), STDERR_LINES);
+        assert!(lock_or_recover(&tail.0).iter().all(|line| !line.trim().is_empty()));
     }
 
     #[test]
@@ -909,14 +1010,14 @@ mod tests {
         let pending = Mutex::new(HashMap::new());
         let (ready, _) = watch::channel(None);
         let (send, receive) = oneshot::channel();
-        pending.lock().unwrap().insert("id".into(), send);
+        lock_or_recover(&pending).insert("id".into(), send);
         fail_pending(
             &pending,
             &ready,
             BridgeError::new("STARTUP_TIMEOUT", "timeout"),
         );
         fail_pending(&pending, &ready, BridgeError::unavailable());
-        assert!(pending.lock().unwrap().is_empty());
+        assert!(lock_or_recover(&pending).is_empty());
         assert_eq!(receive.await.unwrap().unwrap_err().code, "STARTUP_TIMEOUT");
         assert_eq!(
             ready.borrow().as_ref().unwrap().as_ref().unwrap_err().code,
@@ -1080,7 +1181,7 @@ mod tests {
     async fn canceled_request_removes_pending_sender() {
         let pending = Mutex::new(HashMap::new());
         let (send, receive) = oneshot::channel();
-        pending.lock().unwrap().insert("id".into(), send);
+        lock_or_recover(&pending).insert("id".into(), send);
         let request = async {
             let _guard = PendingGuard {
                 pending: &pending,
@@ -1091,7 +1192,7 @@ mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(10), request)
             .await
             .is_err());
-        assert!(pending.lock().unwrap().is_empty());
+        assert!(lock_or_recover(&pending).is_empty());
         assert!(receive.await.is_err());
     }
 
