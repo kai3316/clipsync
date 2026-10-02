@@ -2638,7 +2638,7 @@ def test_an_ordinary_received_file_never_reaches_the_update_sink(rig, tmp_path):
 # ── web-host accessors (the phone Companion's host callbacks) ────────────
 
 
-def test_discovered_peers_shape_matches_the_web_devices_api(rig):
+def test_discovered_peers_shape_matches_the_web_devices_api(rig, monkeypatch):
     runtime, _, _, discovery, *_ = rig
     hashed = peer_id_hash("remote")
     discovery.found(hashed, "Remote-ad", "127.0.0.1", 9999)
@@ -2656,6 +2656,13 @@ def test_discovered_peers_shape_matches_the_web_devices_api(rig):
     # decides what the row is made of: for as long as it is there at all, a
     # quiet device is still the device this machine knows the name, address and
     # version of.
+    #
+    # The bound is exclusive in `_sightings`, so a zero grace means gone.  It was
+    # inclusive, which kept a sighting whose age was exactly 0.0 -- what a lost
+    # sighting has whenever the clock did not advance between its loss and the
+    # read.  Whether that happened came down to the platform's monotonic clock
+    # resolution, which is why this assertion passed here and failed on a CI
+    # runner.  The assertion is left as it was; the fix is in `_sightings`.
     runtime.PRESENCE_GRACE = 0.0
     assert runtime.discovered_peers() == {}
 

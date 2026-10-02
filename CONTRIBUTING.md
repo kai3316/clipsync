@@ -38,7 +38,6 @@ desktop/                 # The desktop application (Rust + Tauri 2, Vue 3)
   src/                   #   its interface; api/bridge.ts is the only invoke site
   src-tauri/             #   the native host, which spawns the sidecar below
 src/sidecar_main.py      # The Python service that host runs
-src/main.py              # The previous Tk application's entry point
 internal/                # Business logic, shared by every front end
   adapters/sidecar/      #   the IPC method table (rpc.py) and its favourites rows
   application/           #   lifecycle, bootstrap, use cases, event journal
@@ -52,13 +51,16 @@ internal/                # Business logic, shared by every front end
   protocol/              #   wire format encoding/decoding
   security/              #   encryption, pairing, identity
   sync/                  #   sync orchestration, file transfer, chat, AI config
-  system/                #   updater, QR, archive, file manager, hotkeys (Tk only)
+  system/                #   updater, QR, archive, file manager
   transport/             #   TLS connections, mDNS discovery, internet relay
-  ui/                    #   the previous Tk interface (not in the desktop bundle)
   web/                   #   HTTP server, REST API and the mobile companion page
 contracts/               # The IPC table and legacy surface map, held by tests
 tests/                   # pytest suite (tests/sidecar/ for the IPC layer)
 ```
+
+The previous Tk interface — `internal/ui/`, `internal/system/hotkey.py` and
+`src/main.py` — was removed in 1.0.34; the desktop shell owns the window, settings,
+tray and shortcuts.
 
 ## Adding a new feature
 
@@ -69,9 +71,6 @@ tests/                   # pytest suite (tests/sidecar/ for the IPC layer)
   fails if the two disagree
 - Desktop interface work goes in `desktop/src/` — the store in
   `stores/application.ts`, the bridge wrapper in `api/bridge.ts`
-- The previous Tk interface is `internal/ui/dashboard.py` and
-  `settings_window.py`, wired in `src/main.py`. It is maintenance-only; new
-  features belong in the desktop application
 - Config fields are defined in `internal/config/config.py`, in the `FIELD_RULES`
   table that the loader, the backup restore and the web settings API all read
 - Add tests in the `tests/` directory

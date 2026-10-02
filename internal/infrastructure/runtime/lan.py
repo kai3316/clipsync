@@ -3280,7 +3280,16 @@ class LanRuntime:
             sightings = {
                 pid: info
                 for pid, (info, when) in self._lost_sightings.items()
-                if now - when <= limit
+                # Strictly inside the window, so a grace of 0.0 means *gone*.  It
+                # used to be `<=`, and that made the zero case depend on the
+                # clock: `lost()` records ``time.monotonic()`` and this runs
+                # later, so an entry is at exactly age 0.0 whenever the clock did
+                # not tick in between.  On a machine with a coarse monotonic
+                # clock that happens nearly always and the entry survived a
+                # zero grace; on one with a fine clock it never did.  A test that
+                # sets ``PRESENCE_GRACE = 0.0`` therefore passed on the machine
+                # it was written on and failed on a CI runner.
+                if now - when < limit
             }
             sightings.update(self._discovered)
         return sightings

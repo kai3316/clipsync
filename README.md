@@ -262,7 +262,7 @@ cd desktop && npm ci && npm run tauri -- dev    # macOS / Linux
 
 > `Start-ClipSync.bat` 是**开发入口，不是打包好的应用**：它检查上面那三样依赖，第一次运行会在本机编译整个 Rust 应用，数据默认写在仓库里的 `.tauri-dev-data`。只想用的话请下载安装包。加 `-CheckOnly` 只做依赖检查。
 
-旧版 Tk 界面仍可运行：`python src/main.py`（Linux 需要 `xclip` 或 `wl-clipboard`）。
+**Linux 上还需要 `xclip`（X11）或 `wl-clipboard`（Wayland）**，Linux 的剪贴板读写是通过它们完成的：`sudo apt install xclip` 或 `sudo apt install wl-clipboard`。缺了它应用能启动、界面能用，但**剪贴板同步不会工作**——日志里会有一行 `xclip not found`，界面上目前不会提示。详见下面「已知的功能缺口」。
 
 ---
 
@@ -283,9 +283,8 @@ desktop/                      桌面窗口（Rust + Tauri 2）
   e2e/                        Playwright 预览（无宿主时用假数据渲染整窗口）
 
 src/sidecar_main.py           打包进应用内的 Python 服务入口
-main.py                       旧版入口（重定向到 src/main.py）
 
-internal/                     业务逻辑，两个界面共用
+internal/                     业务逻辑
   adapters/sidecar/rpc.py     方法表：每个能力在这里登记
   application/use_cases/      用例层
   clipboard/                  各平台原生剪贴板读写、历史库、去重、过滤

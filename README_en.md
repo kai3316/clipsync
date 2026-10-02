@@ -261,7 +261,12 @@ cd desktop && npm ci && npm run tauri -- dev    # macOS / Linux
 
 > `Start-ClipSync.bat` is a **development launcher, not the packaged application**: it checks for the three toolchains above, compiles the whole Rust application on first run, and keeps its data in `.tauri-dev-data` inside the repository. If you just want to use ClipSync, download an installer. `-CheckOnly` runs the prerequisite checks and nothing else.
 
-The previous Tk interface still runs: `python src/main.py` (Linux needs `xclip` or `wl-clipboard`).
+**On Linux you also need `xclip` (X11) or `wl-clipboard` (Wayland)** — the Linux
+build reads and writes the clipboard through them: `sudo apt install xclip`, or
+`sudo apt install wl-clipboard`. Without one the application starts and its
+interface works, but **clipboard sync does nothing**; the log carries an
+`xclip not found` line and the interface does not yet say so. See "Known gaps"
+below.
 
 ---
 
@@ -282,9 +287,8 @@ desktop/                      The desktop window (Rust + Tauri 2)
   e2e/                        Playwright previews (renders the window on fixtures, no host)
 
 src/sidecar_main.py           The Python service, packaged inside the app
-main.py                       Previous entry point (redirects to src/main.py)
 
-internal/                     Business logic shared by both interfaces
+internal/                     Business logic
   adapters/sidecar/rpc.py     The method table: every capability is registered here
   application/use_cases/      Use cases
   clipboard/                  Per-platform clipboard I/O, history store, dedup, filtering
