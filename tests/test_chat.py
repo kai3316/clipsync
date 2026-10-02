@@ -9,7 +9,6 @@ relay sizing are covered the same way.
 
 import json
 import os
-import socket
 import struct
 import sys
 import time
@@ -34,7 +33,7 @@ from internal.protocol.codec import (
 from internal.security.pairing import PairingManager
 from internal.sync.file_transfer import MAX_FILE_SIZE
 from internal.sync.nearby_chat import ChatFileTooLargeError, ChatManager
-from internal.transport.connection import PeerConnection, PortInUseError, TransportManager
+from internal.transport.connection import PeerConnection, TransportManager
 from internal.transport.relay import MAX_RELAY_PAYLOAD
 from internal.web.api import chat as chat_api
 from internal.web.routes import dispatch
@@ -1152,13 +1151,6 @@ NAME_B = "Device B"
 FILE_BYTES = 1500 * 1024
 
 
-def _free_port() -> int:
-    """Return a currently-free ephemeral TCP port on 127.0.0.1."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def _deadline(pred, timeout: float = 10.0, interval: float = 0.02) -> bool:
     """Poll *pred* to a deadline instead of sleeping a fixed amount."""
     deadline = time.monotonic() + timeout
@@ -1184,7 +1176,17 @@ class _Stack:
         self.pairing.load_or_create_identity("", "")
         self.chat = ChatManager(device_id, device_name, receive_dir=str(receive_dir))
         self.chat.set_own_fingerprint(self.pairing.get_identity().fingerprint)
-        self.transport = TransportManager(device_id, device_name, _free_port(), self.pairing)
+        # Port 0, so the kernel picks the port and start_server reads it back.
+        # This used to be _free_port(), which probes for a free port and
+        # *closes it* before the transport binds, leaving the interval between
+        # the two open to anything else on the machine.  When two stacks in one
+        # test were handed the same port the second bind won (a listener on
+        # 0.0.0.0 against the probe 127.0.0.1), and a dial to the peer landed on
+        # the dialer own listener -- a TLS client hello arriving at a TLS server,
+        # which is exactly the WRONG_VERSION_NUMBER and the
+        # DECRYPTION_FAILED_OR_BAD_RECORD_MAC that failed CI Linux leg about one
+        # run in three while never reproducing here on Windows.
+        self.transport = TransportManager(device_id, device_name, 0, self.pairing)
         self.transport.set_on_peer_message(self._route)
 
     # ---- transport → chat wiring (mirrors the host router contract) --------
@@ -1214,14 +1216,14 @@ class _Stack:
         return self.transport._port
 
     def start(self):
-        """Bind the server, retrying through any ephemeral-port race."""
-        for _ in range(25):
-            try:
-                self.transport.start_server()
-                return
-            except PortInUseError:
-                self.transport._port = _free_port()
-        pytest.skip("could not bind an ephemeral localhost port for the E2E test")
+        """Bind the server.
+
+        One attempt, because the port is 0 and the kernel cannot hand out a port
+        that is in use.  The retry this used to carry existed to walk away from a
+        `PortInUseError`, which is what a *probed* port can produce; asking for 0
+        removes both the error and the race that caused it (see `__init__`).
+        """
+        self.transport.start_server()
 
     def stop(self):
         try:

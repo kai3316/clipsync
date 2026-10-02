@@ -1155,6 +1155,14 @@ class TransportManager:
                     self._server_sock.bind(("0.0.0.0", self._port))
                 except OSError as e:
                     raise PortInUseError(self._port) from e
+                # The port the kernel actually gave us.  Asked for port 0 this is
+                # the only way to learn it, and *asking* for 0 is the only way to
+                # get a port without a race: any caller that first probes for a
+                # free port and then binds it has handed the interval between the
+                # two to every other process on the machine.  Read back
+                # unconditionally, so a real port reads as itself and only the
+                # ephemeral case learns something.
+                self._port = self._server_sock.getsockname()[1]
                 self._server_sock.listen(5)
                 self._server_sock.settimeout(1.0)
                 self._stopped.clear()
