@@ -39,8 +39,12 @@ ARTIFACTS = {
     "bundles/clipsync-desktop-linux/appimage/ClipSync_1.0.3_amd64.AppImage": "sig-appimage",
     "bundles/clipsync-desktop-linux/deb/ClipSync_1.0.3_amd64.deb": "sig-deb",
     # The ARM64 leg, which is a second Linux runner rather than a cross-build.
+    # Note the two spellings: Tauri names the AppImage `aarch64` and the deb
+    # `arm64` (measured on the 1.0.35 build, the first to produce them).
+    # Assuming one spelling for both is what made that release's manifest step
+    # exit with "no artifact for: linux-aarch64-appimage".
     "bundles/clipsync-desktop-linux-arm64/appimage/"
-    "ClipSync_1.0.3_arm64.AppImage": "sig-appimage-arm",
+    "ClipSync_1.0.3_aarch64.AppImage": "sig-appimage-arm",
     "bundles/clipsync-desktop-linux-arm64/deb/ClipSync_1.0.3_arm64.deb": "sig-deb-arm",
 }
 
@@ -161,9 +165,12 @@ def test_each_key_names_the_payload_of_its_own_architecture(tmp_path):
     assert "_amd64.AppImage" in platforms["linux-x86_64-appimage"]["url"]
     assert "_amd64.deb" in platforms["linux-x86_64-deb"]["url"]
     assert "_amd64.AppImage" in platforms["linux-x86_64"]["url"]
-    assert "_arm64.AppImage" in platforms["linux-aarch64-appimage"]["url"]
+    # Two spellings, one architecture: Tauri uses arch64 for the AppImage and
+    # rm64 for the deb, and a pattern written for one of them silently drops
+    # the other key.
+    assert "_aarch64.AppImage" in platforms["linux-aarch64-appimage"]["url"]
     assert "_arm64.deb" in platforms["linux-aarch64-deb"]["url"]
-    assert "_arm64.AppImage" in platforms["linux-aarch64"]["url"]
+    assert "_aarch64.AppImage" in platforms["linux-aarch64"]["url"]
 
 
 def test_a_release_without_the_arm64_leg_does_not_name_its_artifacts(tmp_path):

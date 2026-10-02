@@ -1,0 +1,18 @@
+fix: name the ARM64 AppImage the way Tauri does, so the manifest can be built
+
+1.0.35 published its installers and no `latest.json`.  The manifest step exited
+with "no artifact for: linux-aarch64-appimage, linux-aarch64", which means no
+client could see the release it was attached to: the updater reads the manifest,
+and a release without one is invisible however many assets it carries.
+
+Tauri spells the two ARM64 payloads differently and I had guessed one spelling for
+both.  Measured on the 1.0.35 build -- the first to produce them -- the AppImage is
+`ClipSync_1.0.35_aarch64.AppImage` and the deb is `ClipSync_1.0.35_arm64.deb`.  The
+patterns and the detector that decides whether the ARM64 keys belong in the
+manifest both name each spelling now.
+
+Also fixes the desktop store test that failed on CI's runner but not here: it
+sampled the status call count once near the top and compared it after advancing
+fake timers 120 ms, and the store had a poll already scheduled that fired in
+between.  "expected 1 times, but got 2" was that poll, not the refresh the test is
+about; the count is now sampled immediately before each advance.
