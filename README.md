@@ -83,7 +83,7 @@ ClipSync 让这些设备彼此直连：**同一局域网内自动发现、加密
 | **文件传输** | 发送文件 / 文件夹、拖拽发送、进度与续传、速度测试、传输历史 |
 | **附近聊天** | 与附近设备会话，可发文字与文件，支持未配对设备 |
 | **AI 配置** | 本机与已配对设备的 AI 工具配置清单、差异比对、迁移向导 |
-| **设置** | 通用 / 连接 / 数据 / 系统 四组共十一张卡片，支持搜索 |
+| **设置** | 通用 / 连接 / 数据 / 系统 四组共十张卡片，支持搜索 |
 
 <p align="center">
   <img src="docs/assets/zh-history.png" alt="剪贴板历史" width="410">
@@ -272,10 +272,13 @@ cd desktop && npm ci && npm run tauri -- dev    # macOS / Linux
 desktop/                      桌面窗口（Rust + Tauri 2）
   src/                        Vue 3 + TypeScript 界面
     App.vue                   外壳、侧栏、八个页面、全部对话框
-    components/               Overview / Favorites / Transfers / Chat 视图
-    stores/application.ts     窗口状态与 RPC 调用
+    components/               Overview / Favorites / Transfers / Chat 视图、菜单与提示
+    api/bridge.ts             每个 Tauri 命令的封装（唯一的 invoke 调用点）
+    api/types.ts              两侧共用的载荷类型
+    stores/application.ts     窗口状态、事件订阅与用例编排
+    lib/                      设备行、配对码、剪贴板、差异比对等纯函数
     i18n/                     中英文字符串表
-  src-tauri/                  Rust 侧：托盘、通知、自启、窗口、拖拽、桥接
+  src-tauri/                  Rust 侧：托盘、自启、窗口、拖拽、桥接
     src/bridge.rs             把界面调用转发给 Python 服务
   e2e/                        Playwright 预览（无宿主时用假数据渲染整窗口）
 
@@ -327,10 +330,19 @@ cd desktop
 npm run build                      # 类型检查 + 前端构建
 npm test                           # 前端单元测试
 npm run test:e2e                   # 用假宿主把窗口渲染出来截图
-cargo test --locked                # Rust 侧测试
+cargo test --manifest-path src-tauri/Cargo.toml --locked   # Rust 侧测试
 ```
 
 `npm run test:e2e` 会用 `desktop/e2e/` 里的假数据把八个页面都渲染并截图到 `desktop/test-results/`，加 `CLIPSYNC_E2E_LANG=en` 可出英文版。
+
+打包入口：
+
+```powershell
+.\Start-ClipSync.bat -CheckOnly    # 只检查桌面端的构建依赖
+pwsh -File scripts\build-sidecar.ps1 -SelfTest   # 打包 Python 服务并验证它的 stdio
+```
+
+桌面端安装包由 `.github/workflows/desktop.yml` 在 tag 上构建；`.github/workflows/build.yml` 负责创建并发布 release（`prepare` 建、`release` 发布），也是桌面端工作流附加上传的目标。旧版 Tk 应用的 `build.bat` / `scripts/build_exe.ps1` / `Makefile` 已随该应用一并移除。
 
 贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
@@ -343,9 +355,10 @@ cargo test --locked                # Rust 侧测试
 | [落地页](https://kai3316.github.io/clipsync/) | 功能介绍、界面截图、下载入口 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献流程与代码结构约定 |
 | [`desktop/README.md`](desktop/README.md) | 桌面窗口自身的构建与调试 |
+| [`contracts/`](contracts/) | IPC 方法表与旧版页面对照表：两侧的契约，由测试逐条核对 |
 | [Releases](https://github.com/kai3316/clipsync/releases) | 每个版本的改动与下载 |
 
-代码里每个能力都登记在 `internal/adapters/sidecar/rpc.py` 的方法表上，窗口那一侧对应的是一张 Tauri 命令表——两边的对应关系写在代码旁边的注释里，不另立文档。
+代码里每个能力都登记在 `internal/adapters/sidecar/rpc.py` 的方法表上，窗口那一侧对应的是一张 Tauri 命令表。两侧的对应关系落在 [`contracts/rpc-v1.md`](contracts/rpc-v1.md)（一方法一行），由 `tests/sidecar/test_rpc_contract.py` 逐条核对——方法表里多一个、少一个，或者 Tauri 命令没注册，都会让测试变红。
 
 ---
 

@@ -37,6 +37,33 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches internal version
+        # Moved here from the deleted PyInstaller job, and it has to stay
+        # somewhere: the uploader writes the tag into the updater manifest as the
+        # version, so a tag that disagrees with `internal/version.py` ships a
+        # manifest whose version is not the one the app reports, and every
+        # client's update check fails silently from then on -- nothing on the
+        # release page shows it.  This job runs first, so a mismatch now stops
+        # the release before it is even created rather than after four builds.
+        shell: bash
+        run: |
+          # github.ref_name is the tag that triggered this run (guaranteed on a
+          # tag push); equivalent to `git describe --tags --exact-match HEAD`.
+          ACTUAL="${{ github.ref_name }}"
+          EXPECTED="v$(python -c 'from internal.version import __version__; print(__version__)')"
+          echo "Expected version tag: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Tag $ACTUAL does not match internal version $EXPECTED"
+            exit 1
+          fi
+
       - name: Create the release if it is missing
         env:
           GH_TOKEN: ${{ github.token }}
@@ -50,52 +77,74 @@ jobs:
           # Create only when missing; never delete.  A delete here would take
           # the desktop installers with it.
           NOTES=$(cat <<'EOF'
-          Automated build of both applications for this tag.
+          Automated build of the desktop application for this tag.
 
           What is new in this release:
 
-          - A clip is no longer mirrored to the internet when the peer is on
-            this network.  Every frame went to the broker as well as over the
-            local link, so two machines on the same desk still put what you
-            copied on a public broker; the key changed who could read it, not
-            whether it left.  The relay is now what chat has always used it as
-            -- the route to a peer the local link cannot reach.  Each frame is
-            offered to every paired peer that is connected, one send apiece,
-            and the broker is handed only the ones it could not be delivered
-            to, which also means no receipt is waited on for a clip that
-            arrived locally.  The cost is the redundant copy that used to
-            cover a link dropping between the send and its arrival; a publish
-            that fails is still queued and retried exactly as before.
+          - **The previous Python application is discontinued.**  There is no
+            `clipsync-windows.zip`, `clipsync-macos-arm64.zip`,
+            `clipsync-linux.tar.gz` or `clipsync-linux-arm64.tar.gz` on this
+            release and there will not be one on any later release.  If you are
+            running the old Python build, its update check will still offer you
+            this version and then find nothing to download — that is expected,
+            not a broken download.  Install the desktop application from the
+            assets below instead; it is what this project builds and supports
+            now.
+
+          - The Python codebase dropped the old Tk interface entirely — the
+            window, the settings dialogs, the tray icon and the global hotkey
+            module.  The desktop shell has owned all of that for several
+            releases, and keeping a second interface meant every change had to
+            be made twice.
+
+          - Fixed: a shutdown could hang and be logged as "did not release
+            ownership within its budget".  The dial that was still connecting
+            had no socket registered for the stop to close, so the teardown
+            waited out its deadline on a thread that could not be interrupted.
+            It now returns in well under a second.
+
+          - Fixed: shutting down or removing a device while a connection to it
+            was still being established did not take effect — the dial finished
+            after the click and put the peer straight back.
+
+          - Hardened: a dial to a specific device advertised the platform's
+            ~250 public CA roots as trust anchors alongside that device's pinned
+            certificate, so a publicly-signed certificate could answer a call
+            meant for one machine.  Pinning now means the pin and nothing else.
+
+          - Hardened: a connection that completed without ever sending an
+            identity frame was accepted as the peer that was dialed, which let a
+            silent answer inherit that device's trust.
+
+          - Fixed: a received file could be lost if its name collided at the
+            moment it was finalized, and a file request could take over an
+            in-flight send.  A hostile transfer name could also land outside the
+            download directory.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
-          a macOS install on 1.0.7 has to be replaced by hand.  Windows and
-          Linux installs on 1.0.5 through 1.0.7 are unaffected and update
-          themselves.
+          a macOS install on 1.0.7 has to be replaced by hand.
 
-          Neither application is notarized, because that needs a paid Apple
-          Developer account.  Both macOS downloads are ad-hoc signed, which is
+          The application is not notarized, because that needs a paid Apple
+          Developer account.  The macOS downloads are ad-hoc signed, which is
           what lets them start at all on Apple Silicon.
 
-          macOS can still refuse either one on first launch, and the two
-          refusals need different answers.  If the dialog says the app "is
-          damaged and can't be opened", it has no Open button: that is
-          Gatekeeper rejecting an ad-hoc signature on a downloaded copy rather
-          than a damaged download, and clearing the download's quarantine flag
-          once is what gets past it.
+          macOS can still refuse one on first launch, and the two refusals need
+          different answers.  If the dialog says the app "is damaged and can't
+          be opened", it has no Open button: that is Gatekeeper rejecting an
+          ad-hoc signature on a downloaded copy rather than a damaged download,
+          and clearing the download's quarantine flag once is what gets past it.
 
                 xattr -dr com.apple.quarantine /Applications/ClipSync.app
 
-          Change the path if the app is not in /Applications.  For the older
-          `clipsync-macos-arm64.zip`, unzip it first and point the command at
-          the app you got.
+          Change the path if the app is not in /Applications.
 
           If instead it says the developer cannot be verified, right-click the
           app and choose Open, or allow it under System Settings > Privacy &
           Security.  That path stops working once macOS has shown the damaged
           dialog, which is why it is not the first thing to try.
 
-          The Tauri desktop:
+          The download names:
           - `ClipSync_<version>_x64-setup.exe` — Windows installer
           - `ClipSync_<version>_aarch64.dmg` — macOS Apple Silicon
           - `ClipSync_<version>_amd64.deb` / `.AppImage` — Linux x86_64
@@ -103,21 +152,15 @@ jobs:
             not something you download by hand
           - `latest.json` — the signed update manifest the app reads
 
-          The desktop applications update themselves: every release publishes a
+          The desktop application updates itself: every release publishes a
           `latest.json`, and the app reads it through a pointer that follows the
           newest release, so an installed desktop app is offered each new
           version and installs it without help — it downloads, installs and
           restarts, and on Linux the `.deb` asks for your password once.
-          Installing by hand is needed for the previous Python application
-          (1.0.2 and earlier), which has no updater in it at all, and for a
-          macOS install on 1.0.7, whose updater lives in the background process
-          that never starts.  Both are replaced by hand.
 
-          The previous Python application:
-          - `clipsync-windows.zip` — Windows `.exe`
-          - `clipsync-macos-arm64.zip` — macOS Apple Silicon `.app` bundle
-          - `clipsync-linux.tar.gz` — Linux x86_64 binary
-          - `clipsync-linux-arm64.tar.gz` — Linux ARM64 binary
+          Installing by hand is needed only for a macOS install on 1.0.7, whose
+          updater lives in the background process that never starts, and for the
+          discontinued Python application described at the top.
           EOF
           )
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
@@ -127,189 +170,23 @@ jobs:
               --notes "$NOTES" --draft
           fi
 
-  build:
-    # No test job runs in this workflow, deliberately.  The suite runs on the
-    # developer's machine, where it can be run in full; what a tag needs from
-    # CI is a built, signed, published release.  `tests/test_release_gate.py`
-    # holds the publishing graph to its shape instead -- that nothing here can
-    # publish from a branch, and that the uploader waits for the legs that
-    # produce what it uploads.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: clipsync-windows
-          # macOS: Apple Silicon (arm64) only — Intel Macs are not supported.
-          - os: macos-latest
-            artifact: clipsync-macos-arm64
-          - os: ubuntu-latest
-            artifact: clipsync-linux
-          - os: ubuntu-24.04-arm
-            artifact: clipsync-linux-arm64
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Verify tag matches internal version
-        if: startsWith(github.ref, 'refs/tags/v') && matrix.os == 'windows-latest'
-        shell: bash
-        run: |
-          # github.ref_name is the tag that triggered this run (guaranteed on a
-          # tag push); equivalent to `git describe --tags --exact-match HEAD`.
-          ACTUAL="${{ github.ref_name }}"
-          EXPECTED="v$(python -c 'from internal.version import __version__; print(__version__)')"
-          echo "Expected version tag: $EXPECTED"
-          echo "Actual tag at HEAD:   $ACTUAL"
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::Tag '$ACTUAL' does not match internal.version.__version__ ('$EXPECTED'). Bump internal/version.py before tagging."
-            exit 1
-          fi
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libx11-dev libxext-dev libxcb1 xclip
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Build with PyInstaller
-        run: |
-          pyinstaller clipsync.spec
-
-      - name: Re-sign macOS bundle (unified adhoc signature)
-        if: runner.os == 'macOS'
-        run: |
-          # PyInstaller adhoc-signs the bootloader, but the collected
-          # Python.framework keeps its original signature. On macOS 15+
-          # the Team-ID mismatch makes dyld refuse to load Python
-          # ("different Team IDs" -> "Failed to load Python shared library").
-          # Re-sign the whole bundle adhoc so the .app runs everywhere.
-          codesign --force --deep --sign - dist/clipsync.app
-          codesign --verify --strict --deep dist/clipsync.app
-
-      - name: Package for release (macOS ditto preserves symlinks)
-        if: runner.os == 'macOS'
-        run: |
-          ditto -c -k --keepParent dist/clipsync.app ${{ matrix.artifact }}.zip
-
-      - name: Package for release (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path dist/clipsync.exe -DestinationPath clipsync-windows.zip
-
-      - name: Package for release (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          cd dist && tar -czf ../${{ matrix.artifact }}.tar.gz *
-
-      - name: Smoke test (macOS bundle contains web UI)
-        if: runner.os == 'macOS'
-        run: |
-          if unzip -l ${{ matrix.artifact }}.zip | grep -q 'internal/web/static/index.html'; then
-            echo "OK: web UI bundled in ${{ matrix.artifact }}.zip"
-          else
-            echo "::error::Web UI (internal/web/static/index.html) missing from ${{ matrix.artifact }}.zip"
-            exit 1
-          fi
-
-      - name: Smoke test (Linux bundle contains web UI)
-        if: runner.os == 'Linux'
-        run: |
-          # Linux is a PyInstaller ONEFILE build: the static web UI is embedded
-          # inside the `clipsync` binary, so inspect the archive with
-          # pyi-archive-viewer rather than listing loose tar files.
-          cd dist
-          if python -m PyInstaller.utils.cliutils.archive_viewer -l clipsync \
-               | grep -q 'internal/web/static/index.html'; then
-            echo "OK: web UI bundled in clipsync binary"
-          else
-            echo "::error::Web UI (internal/web/static/index.html) missing from clipsync binary"
-            exit 1
-          fi
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}*.*
-          if-no-files-found: error
-
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     # `prepare` is named here because the first thing this job does is a
     # `gh release view` that fails outright when the release is not there yet,
     # and it is `prepare` that creates it.  Without this the two are ordered
     # only by `prepare` happening to be quick, which is a coincidence rather
-    # than a guarantee -- and `build` no longer waits on a test job, so it now
-    # starts sooner than it used to.
-    needs: [prepare, build]
+    # than a guarantee.
+    #
+    # This job no longer waits on a `build` job of its own: the PyInstaller legs
+    # that produced the previous Python application's binaries are gone with that
+    # application, and the desktop installers arrive from `desktop.yml`.  What is
+    # left here is the release itself -- created by `prepare` the moment the tag
+    # lands, published at the end of this job -- which is what the desktop
+    # workflow attaches its installers to and waits for.
+    needs: [prepare]
     runs-on: ubuntu-latest
     steps:
-      - name: Download Windows build
-        uses: actions/download-artifact@v4
-        with:
-          name: clipsync-windows
-          path: dist
-
-      - name: Download macOS arm64 build
-        uses: actions/download-artifact@v4
-        with:
-          name: clipsync-macos-arm64
-          path: dist
-
-      - name: Download Linux build
-        uses: actions/download-artifact@v4
-        with:
-          name: clipsync-linux
-          path: dist
-
-      - name: Download Linux ARM64 build
-        uses: actions/download-artifact@v4
-        with:
-          name: clipsync-linux-arm64
-          path: dist
-
-      - name: Upload the legacy builds
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${{ github.ref_name }}"
-          # --repo for the same reason as in `prepare`: this job has no
-          # checkout, so gh cannot infer the repository from the workspace.
-          REPO="$GITHUB_REPOSITORY"
-          # The release was created by the `prepare` job the moment the tag
-          # landed, so it is already there.  Uploads --clobber, so a re-pushed
-          # tag replaces its assets in place.
-          gh release view "$TAG" --repo "$REPO" >/dev/null
-          # Upload only the artifacts that actually exist, so a missing matrix
-          # leg doesn't fail the whole release.
-          for f in \
-            dist/clipsync-windows.zip \
-            dist/clipsync-macos-arm64.zip \
-            dist/clipsync-linux.tar.gz \
-            dist/clipsync-linux-arm64.tar.gz
-          do
-            if [ -f "$f" ]; then
-              gh release upload "$TAG" "$f" --repo "$REPO" --clobber
-            else
-              echo "Skipping missing artifact: $f"
-            fi
-          done
-
       - name: Publish the release once it carries its update manifest
         # The desktop workflow attaches `latest.json` and publishes on the back
         # of it; this is the backstop for a desktop build that fails or never

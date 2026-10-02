@@ -1,1 +1,5 @@
-"""ClipSync application entry package (src.main exposes the CLI entry point)."""
+"""ClipSync entry points.
+
+`src.sidecar_main` is the only one left: the stdio server the desktop shell
+launches.  `src.main` was the Tk application and is gone.
+"""

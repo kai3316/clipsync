@@ -34,28 +34,47 @@ pip install -e ".[dev]"
 ## Project structure
 
 ```
-src/main.py              # Application entry point
-internal/
-  clipboard/             # Platform-specific clipboard I/O
-  config/                # JSON config persistence
-  i18n/                  # Internationalization (EN, ZH)
-  platform/              # OS integration (autostart, notifications)
-  protocol/              # Wire format encoding/decoding
-  security/              # Encryption, pairing, identity
-  sync/                  # Sync orchestration and file transfer
-  transport/             # TLS connections and mDNS discovery
-  ui/                    # Dashboard (5 panels), settings, system tray
-  web/                   # Built-in HTTP server + mobile PWA
-tests/                   # pytest test suite
+desktop/                 # The desktop application (Rust + Tauri 2, Vue 3)
+  src/                   #   its interface; api/bridge.ts is the only invoke site
+  src-tauri/             #   the native host, which spawns the sidecar below
+src/sidecar_main.py      # The Python service that host runs
+src/main.py              # The previous Tk application's entry point
+internal/                # Business logic, shared by every front end
+  adapters/sidecar/      #   the IPC method table (rpc.py) and its favourites rows
+  application/           #   lifecycle, bootstrap, use cases, event journal
+  clipboard/             #   platform clipboard I/O, history store, dedup, filtering
+  config/                #   JSON config persistence, and the one field-rules table
+  data/                  #   export, backup, recovery, log files
+  diagnostics/           #   the seven report groups
+  i18n/                  #   strings for the Python front ends
+  infrastructure/        #   runtime wiring: LAN runtime, companion, persistence
+  platform/              #   OS integration (autostart, notifications, processes)
+  protocol/              #   wire format encoding/decoding
+  security/              #   encryption, pairing, identity
+  sync/                  #   sync orchestration, file transfer, chat, AI config
+  system/                #   updater, QR, archive, file manager, hotkeys (Tk only)
+  transport/             #   TLS connections, mDNS discovery, internet relay
+  ui/                    #   the previous Tk interface (not in the desktop bundle)
+  web/                   #   HTTP server, REST API and the mobile companion page
+contracts/               # The IPC table and legacy surface map, held by tests
+tests/                   # pytest suite (tests/sidecar/ for the IPC layer)
 ```
 
 ## Adding a new feature
 
 - Core logic goes in the appropriate `internal/` subpackage
-- UI for the feature goes in `internal/ui/dashboard.py` or `settings_window.py`
-- Config fields are defined in `internal/config/config.py`
+- A new capability is registered in `internal/adapters/sidecar/rpc.py` and
+  written into `contracts/rpc-v1.md`; the Tauri command beside it goes in
+  `desktop/src-tauri/src/main.rs` and `build.rs`. `tests/sidecar/test_rpc_contract.py`
+  fails if the two disagree
+- Desktop interface work goes in `desktop/src/` — the store in
+  `stores/application.ts`, the bridge wrapper in `api/bridge.ts`
+- The previous Tk interface is `internal/ui/dashboard.py` and
+  `settings_window.py`, wired in `src/main.py`. It is maintenance-only; new
+  features belong in the desktop application
+- Config fields are defined in `internal/config/config.py`, in the `FIELD_RULES`
+  table that the loader, the backup restore and the web settings API all read
 - Add tests in the `tests/` directory
-- Wire everything together in `src/main.py`
 
 ## Reporting issues
 

@@ -27,13 +27,10 @@ dependencies = [
     "ifaddr>=0.2.0",
     "cryptography>=42.0.0",
     "Pillow>=10.0.0",
-    "pystray>=0.19.0",
-    "customtkinter>=5.2.0",
     "qrcode>=7.4",
     "certifi>=2023.7.22",
     "paho-mqtt>=2.0; python_version < '4'",
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
-    "pynput>=1.7; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -46,16 +43,21 @@ dev = [
 ]
 
 [project.scripts]
-clipsync = "src.main:main"
+# The sidecar is the only Python entry point left.  It used to be `src.main:main`,
+# the Tk application; that application is gone, and this is what the desktop
+# shell actually launches (see clipsync-sidecar.spec and the Tauri sidecar
+# configuration), so the console script starts the same thing.
+clipsync = "src.sidecar_main:main"
 
 [tool.setuptools]
 # Explicit discovery: the top-level `internal/` package and the `src/` package.
-# Auto-discovery previously mis-detected a "src-layout" because of `src/main.py`
-# and dropped `internal` from the wheel entirely.
+# Auto-discovery once mis-detected a "src-layout" because of `src/main.py` and
+# dropped `internal` from the wheel entirely.  That file is gone, but the
+# explicit list stays: guessing is what broke it.
 packages = {find = {include = ["internal*", "src*"]}}
 
 [tool.setuptools.package-data]
-# Ship the web UI's static assets in the wheel, mirroring clipsync.spec's
+# Ship the web UI's static assets in the wheel, mirroring clipsync-sidecar.spec's
 # bundle. `static` is a data dir, not a package (no __init__.py), so glob from
 # the parent `internal.web` package or the wheel serves only the fallback page.
 "internal.web" = ["static/**/*"]

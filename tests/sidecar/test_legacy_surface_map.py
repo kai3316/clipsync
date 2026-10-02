@@ -4,7 +4,7 @@ The migration's obligation is that the new page can do everything the legacy
 desktop fronts could, and that claim was audited by hand three times -- twice
 wrongly (`migration-parity-audit.md` §十, §十二, where "the only gap is one" and
 "the gap is not in the backend" both had to be taken back).  A sweep is true of
-the tree it was done on; `notes/tauri/legacy-surface-map.md` is the same
+the tree it was done on; `contracts/legacy-surface-map.md` is the same
 enumeration written where a test can hold it.
 
 What is held here is the enumeration and the resolution of every target, not the
@@ -24,26 +24,13 @@ import os
 import re
 import sys
 
-import pytest
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _WEB = os.path.join(_ROOT, "internal", "web")
-_MAP = os.path.join(_ROOT, "notes", "tauri", "legacy-surface-map.md")
-
-# The document these tests hold lives in `notes/`, which is where the project
-# keeps its process record: `docs/` is the GitHub Pages root, so a file under it
-# is served to the public, and a migration ledger is not a thing to publish.
-# `notes/` is not committed, which means a checkout without it -- CI, anyone
-# else's clone -- has nothing to hold the code to.  The guard is skipped there
-# rather than deleted: the failure it catches (a routed method nobody wrote
-# down, a command that vanished from the table) is one that happens while
-# somebody is editing this tree with the notes open beside them.
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(_MAP),
-    reason="legacy-surface-map.md is in notes/, which is not committed",
-)
+# In the repository -- see the same note in test_rpc_contract.py.  The map is
+# the enumeration this file holds the tree to, so it has to travel with the tree.
+_MAP = os.path.join(_ROOT, "contracts", "legacy-surface-map.md")
 
 
 _MAIN_RS = os.path.join(_ROOT, "desktop", "src-tauri", "src", "main.rs")

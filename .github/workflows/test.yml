@@ -1,0 +1,112 @@
+name: Tests
+
+# The suite, on the events a tag build never sees.
+#
+# Both publishing workflows are deliberately tag-only (see `.github/workflows/
+# build.yml` and `desktop.yml`, and the reasoning in `tests/test_release_gate.py`):
+# a push to a branch must not build three platforms' installers.  The consequence
+# was that nothing ran the tests on a branch either -- the only thing checking a
+# commit before it was tagged was whoever pushed it.  This workflow is that check
+# and nothing else: no artifacts, no release, no tag.  It cannot publish, so it
+# needs none of the gates the publishers carry.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both ends of the support matrix: the app ships for Windows, macOS and
+        # Linux, and the clipboard backends behind them are three different
+        # modules, so a suite that only ever ran on one of them was not testing
+        # the others.
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # xclip backs the Linux clipboard backend; the X libraries are what
+          # importing it needs.
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxext-dev libxcb1 xclip
+
+      - name: Install the package and its test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # The same command CONTRIBUTING.md documents, so a contributor's
+          # local setup and this job cannot drift.
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest tests -q
+
+  contract:
+    name: Web contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Test the legacy panel
+        run: npm run test:web
+
+  desktop:
+    name: Desktop shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+
+      - name: Type check
+        # `npm test` strips types rather than checking them, so a change to the
+        # shape of an RPC reply can pass every unit test and still fail the
+        # release build.  This is the only thing that checks it.
+        working-directory: desktop
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: desktop
+        run: npm test
+
+      - name: Rust tests
+        working-directory: desktop/src-tauri
+        run: cargo test --locked

@@ -83,7 +83,7 @@ Eight pages. `Ctrl` / `Cmd` + `1`–`8` jumps straight to one:
 | **File Transfer** | Send files and folders, drag-and-drop, progress and resume, speed test, transfer history |
 | **Nearby Chat** | Conversations with nearby devices — text and files, paired or not |
 | **AI config** | AI tool configuration on this machine and on paired devices, diffs, a migration wizard |
-| **Settings** | Four groups, eleven cards, searchable |
+| **Settings** | Four groups, ten cards, searchable |
 
 <p align="center">
   <img src="docs/assets/en-history.png" alt="Clipboard history" width="410">
@@ -271,10 +271,13 @@ The previous Tk interface still runs: `python src/main.py` (Linux needs `xclip` 
 desktop/                      The desktop window (Rust + Tauri 2)
   src/                        Vue 3 + TypeScript interface
     App.vue                   Shell, sidebar, the eight pages, every dialog
-    components/               Overview / Favorites / Transfers / Chat views
-    stores/application.ts     Window state and RPC calls
+    components/               Overview / Favorites / Transfers / Chat views, menus, notices
+    api/bridge.ts             One wrapper per Tauri command (the only invoke site)
+    api/types.ts              The payload types both sides share
+    stores/application.ts     Window state, event subscription, use-case orchestration
+    lib/                      Device rows, pairing codes, clipboard, diff helpers
     i18n/                     Chinese and English string tables
-  src-tauri/                  Rust side: tray, notifications, autostart, window, drag-drop, bridge
+  src-tauri/                  Rust side: tray, autostart, window, drag-drop, bridge
     src/bridge.rs             Forwards interface calls to the Python service
   e2e/                        Playwright previews (renders the window on fixtures, no host)
 
@@ -326,10 +329,23 @@ cd desktop
 npm run build                      # typecheck + frontend build
 npm test                           # frontend unit tests
 npm run test:e2e                   # renders the window on fixtures and photographs it
-cargo test --locked                # Rust tests
+cargo test --manifest-path src-tauri/Cargo.toml --locked   # Rust tests
 ```
 
 `npm run test:e2e` renders all eight pages against the fixtures in `desktop/e2e/` and writes a screenshot of each to `desktop/test-results/`. Add `CLIPSYNC_E2E_LANG=en` for the English set.
+
+Packaging entry points:
+
+```powershell
+.\Start-ClipSync.bat -CheckOnly    # check the desktop's build prerequisites only
+pwsh -File scripts\build-sidecar.ps1 -SelfTest   # package the Python service and verify its stdio
+```
+
+The desktop installers are built on a tag by `.github/workflows/desktop.yml`;
+`.github/workflows/build.yml` creates and publishes the release (`prepare`
+creates it, `release` publishes), and is what the desktop workflow attaches its
+uploads to. The previous Tk application's `build.bat` / `scripts/build_exe.ps1` /
+`Makefile` went away with that application.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
@@ -342,9 +358,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 | [Landing page](https://kai3316.github.io/clipsync/index_en.html) | What it does, screenshots, downloads |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, and the conventions the code follows |
 | [`desktop/README.md`](desktop/README.md) | Building and debugging the desktop window itself |
+| [`contracts/`](contracts/) | The IPC method table and the legacy surface map: the two contracts a test holds the tree to |
 | [Releases](https://github.com/kai3316/clipsync/releases) | What changed in each version, and the installers |
 
-Every capability is registered in the method table at `internal/adapters/sidecar/rpc.py`, and the window's side of each one is the Tauri command table beside it; the correspondence is written in comments next to the code rather than in a second document.
+Every capability is registered in the method table at `internal/adapters/sidecar/rpc.py`, and the window's side of each one is a Tauri command. The correspondence lives in [`contracts/rpc-v1.md`](contracts/rpc-v1.md) (one row per method) and is held there by `tests/sidecar/test_rpc_contract.py`: a method the dispatcher routes and the table omits — or a command that is not registered — fails that test.
 
 ---
 
