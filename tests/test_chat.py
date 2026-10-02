@@ -1307,6 +1307,33 @@ class TestNearbyChatE2E:
             timeout=10,
         ), "B's rename never reached A over the handshake"
 
+    def test_a_rapid_reconnect_loop_keeps_completing_its_handshakes(self, rig):
+        """Reconnects in quick succession must all establish.
+
+        This is the same disconnect-then-dial the test above does once, run in a
+        loop with no pause, because that test fails on CI's Linux leg roughly one
+        run in three with `DECRYPTION_FAILED_OR_BAD_RECORD_MAC` on the *accepting*
+        side -- a MAC failure during the handshake, which is not a timeout and not
+        a name that arrived late.  It has never reproduced here (measured: 15
+        consecutive runs, Windows), so this exists to reproduce it from the other
+        direction: if the race is "a new connection arriving while the previous
+        one is still being torn down", more of those transitions per second is
+        what makes it show.
+        """
+        a, b = rig.a, rig.b
+        for round_number in range(12):
+            a.transport.disconnect_peer(DEV_B)
+            assert _deadline(
+                lambda: DEV_B not in a.transport.get_connected_peers(), timeout=5
+            ), f"A never let go of B on round {round_number}"
+            a.transport.connect_to_peer(DEV_B, NAME_B, "127.0.0.1", b.port)
+            assert _deadline(
+                lambda: DEV_B in a.transport.get_connected_peers(), timeout=10
+            ), f"A never reconnected on round {round_number}"
+            assert _deadline(
+                lambda: DEV_A in b.transport.get_connected_peers(), timeout=10
+            ), f"B never saw A again on round {round_number}"
+
     def test_chat_invite_text_file_roundtrip_over_tls(self, rig):
         a, b = rig.a, rig.b
 

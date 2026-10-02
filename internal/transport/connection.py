@@ -2414,7 +2414,39 @@ class TransportManager:
                 ssl_sock = self._wrap_socket(ssl_context, client_sock, server_side=True)
                 logger.info("TLS handshake OK with %s:%d", addr[0], addr[1])
             except (ssl.SSLError, TimeoutError) as e:
-                logger.warning("TLS handshake failed from %s:%d: %s", addr[0], addr[1], e)
+                # A MAC failure here is not a timeout and not a name that arrived
+                # late: it says the bytes being decrypted are not the ones this
+                # handshake's key state expects, which on a reconnect means the
+                # previous connection's traffic reached this socket or this socket
+                # was handed two handshakes.  The address alone cannot tell those
+                # apart -- it is the *same* address on every reconnect from one
+                # peer, which is the whole reason this case is hard to see.  The
+                # counters below are what a reader needs: how many handshakes are
+                # in flight, and whether something from this address is already
+                # established.
+                with self._lock:
+                    # `Connection` has no address of its own; the dial-side table
+                    # is where an address is remembered, so count from there.
+                    from_this_address = sum(
+                        1
+                        for entry in self._peer_addresses.values()
+                        if entry and entry[1] == addr[0]
+                    )
+                    active = len(self._peers)
+                    on_this_thread = len(
+                        self._pending_sockets.get(threading.current_thread(), ())
+                    )
+                logger.warning(
+                    "TLS handshake failed from %s:%d: %s "
+                    "(established peers=%d, dialed addresses from this host=%d, "
+                    "sockets on this thread=%d)",
+                    addr[0],
+                    addr[1],
+                    e,
+                    active,
+                    from_this_address,
+                    on_this_thread,
+                )
                 client_sock.close()
                 return
 
