@@ -81,57 +81,24 @@ jobs:
 
           What is new in this release:
 
-          - **Linux ARM64 is back.**  The Python build published
-            `clipsync-linux-arm64.tar.gz` up to 1.0.33 and the desktop build only
-            ever had x64, so an ARM64 Linux user lost their build in the move.
-            The release now carries `ClipSync_<version>_arm64.deb` and
-            `ClipSync_<version>_arm64.AppImage` again, built on a native ARM
-            runner, and the update manifest carries the `linux-aarch64` entries
-            for them.
+          - **Hardened: a copied certificate is no longer enough to be taken for
+            a paired device.**  Every device's certificate is public — it travels
+            in the clear during pairing and every peer that has ever connected to
+            you has seen it.  What is private is the key behind it, and until now
+            presenting someone else's certificate was enough to be treated as that
+            device: the receiving side took the device id, the name and the trust
+            decision from a certificate the peer merely claimed.  Devices now prove
+            they hold the key, by signing a value that is chosen fresh for each
+            connection and sent to nobody else, and a peer claiming a device you
+            have already paired with that cannot produce that signature is refused.
+            A device you have *not* paired with is unaffected — there is nothing to
+            impersonate before the first pairing, and the pairing code is what
+            establishes trust at that point.
 
-          - **You can now choose which devices get what you copy.**  A copy used
-            to go to every paired device — over the local network or the relay,
-            whichever could carry it.  That is right for two machines on one desk
-            and wrong the moment a third is paired: a laptop, a work desktop and
-            a machine at a relative's house are all paired, so a password copied
-            on the laptop lands in the history of all three, and nothing tells
-            you.  Each device on the devices page now has a 同步剪贴板 switch.
-            Turning one off stops both routes.  Devices paired before this
-            release keep syncing, so nothing changes unless you change it.
-
-          - **Linux: ClipSync now tells you when it cannot read the clipboard.**
-            Capture on Linux goes through `xclip` (X11) or `wl-clipboard`
-            (Wayland).  Without one the application started, paired, listed
-            devices and showed an empty history, because it never saw a copy —
-            the only trace was a line in a log file.  The status bar now says so
-            and the tooltip carries the install command.  The `.deb` also
-            declares `xclip` as a dependency again, so installing it brings the
-            tool; the AppImage cannot carry dependencies, so install one yourself
-            if you use that.
-
-          - Fixed: a shutdown could hang and be logged as "did not release
-            ownership within its budget".  The dial that was still connecting
-            had no socket registered for the stop to close, so the teardown
-            waited out its deadline on a thread that could not be interrupted.
-            It now returns in well under a second.
-
-          - Fixed: shutting down or removing a device while a connection to it
-            was still being established did not take effect — the dial finished
-            after the click and put the peer straight back.
-
-          - Hardened: a dial to a specific device advertised the platform's
-            ~250 public CA roots as trust anchors alongside that device's pinned
-            certificate, so a publicly-signed certificate could answer a call
-            meant for one machine.  Pinning now means the pin and nothing else.
-
-          - Hardened: a connection that completed without ever sending an
-            identity frame was accepted as the peer that was dialed, which let a
-            silent answer inherit that device's trust.
-
-          - Fixed: a received file could be lost if its name collided at the
-            moment it was finalized, and a file request could take over an
-            in-flight send.  A hostile transfer name could also land outside the
-            download directory.
+          - **The pairing code is easier to trust as a result.**  The comparison
+            you do by eye now covers a channel where the other end has proved it
+            holds the key it presented, rather than one where it merely named
+            itself.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
@@ -143,6 +110,10 @@ jobs:
             Python build, its update check will offer you this version and then
             find nothing to download — that is expected, not a broken download.
             Install the desktop application from the assets below instead.
+
+          1.0.36 carried: ARM64 Linux builds again, a per-device switch for what
+          your clipboard is shared with, and a warning on Linux when the system
+          cannot read the clipboard at all.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so
