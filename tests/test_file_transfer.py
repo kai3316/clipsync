@@ -889,12 +889,55 @@ class TestAHostileNameCannotLoseTheFileSilently:
             time.sleep(0.02)
         return manager, sent, history
 
-    def test_a_name_that_cannot_be_written_is_reported(self, tmp_path):
+    def test_a_move_that_fails_is_reported_rather_than_swallowed(self, tmp_path, monkeypatch):
+        """The exact step the defect was about: the payload moving into place.
+
+        The old order claimed the ending first, so a failure here escaped past the
+        method's own `except`: no history row, no `file_complete`, the sender
+        waiting out its 90 s timeout, and a `.part` left behind.
+
+        A name is used that fails on *every* platform rather than one that fails on
+        Windows alone.  The first version of this test passed `evil.txt:stream`,
+        which is illegal on Windows and perfectly ordinary on Linux -- it asserted
+        a write failure that only happened on the machine it was written on, and
+        CI's Ubuntu leg failed it.  Failing the move itself is the portable way to
+        reach the same code path, and it is closer to the defect.
+        """
+        moved = os.replace
+
+        def refuse_move(src, dst):
+            if str(src).endswith(".part"):
+                raise OSError(36, "File name too long")
+            return moved(src, dst)
+
+        monkeypatch.setattr(os, "replace", refuse_move)
+        manager, sent, history = self._receive_one(tmp_path, "photo.png")
+
+        completes = [f for f in sent if getattr(f, "msg_type", "") == "file_complete"]
+        assert completes, "the sender was never told the transfer ended"
+        assert completes[-1]._raw_payload["status"] != "success"
+        assert history, "the failure was not recorded in the transfers history"
+        # And the placeholder the reservation created is not left behind as a
+        # zero-byte "received" file the user would find and trust.
+        leftovers = [p.name for p in (tmp_path / "recv").iterdir()]
+        assert not [name for name in leftovers if name.endswith(".png")], (
+            f"a placeholder was left in the download folder: {leftovers}"
+        )
+
+    def test_a_name_that_is_illegal_on_this_platform_is_reported(self, tmp_path):
+        """Windows-only: a name with a character NTFS refuses.
+
+        Kept as its own case, skipped where it cannot mean anything, because it
+        covers the name that reaches `_sanitize_file_name` and survives it --
+        `:` is stripped on neither path (it is legal on Linux), so Windows is the
+        platform that has to report the write failure.
+        """
+        if os.name != "nt":
+            pytest.skip("':' in a file name is only refused by Windows")
         manager, sent, history = self._receive_one(tmp_path, "evil.txt:stream")
 
         completes = [f for f in sent if getattr(f, "msg_type", "") == "file_complete"]
         assert completes, "the sender was never told the transfer ended"
-        # Reported as a failure, and recorded, rather than vanishing.
         assert completes[-1]._raw_payload["status"] != "success"
         assert history, "the failure was not recorded in the transfers history"
 

@@ -1509,14 +1509,15 @@ class FileTransferManager:
             # The file goes into place BEFORE the ending is claimed, and that
             # order is the fix for a silent loss: `_finish_now` pops the transfer
             # out of `_transfers`, so anything that failed after it left a
-            # transfer nobody could report on.  A hostile name (`evil.txt:stream`,
-            # an over-long path) made `os.replace` raise, the placeholder was
-            # cleaned up, and the exception escaped past this method's own except
-            # because `_reserve_dest_name` sat outside the `try` -- so the
-            # verified file was discarded, no history row and no `file_complete`
-            # were written, the sender timed out 90 s later, and the `.part`
-            # stayed on disk.  Losing the bytes is one thing; losing them with
-            # nothing anywhere saying so is the part that made this hard to find.
+            # transfer nobody could report on.  A move that failed -- a name NTFS
+            # refuses, an over-long path, a directory that went read-only --
+            # raised, the placeholder was cleaned up, and the exception escaped
+            # past this method's own except because `_reserve_dest_name` sat
+            # outside the `try`: the verified file was discarded, no history row
+            # and no `file_complete` were written, the sender timed out 90 s
+            # later, and the `.part` stayed on disk.  Losing the bytes is one
+            # thing; losing them with nothing anywhere saying so is the part that
+            # made this hard to find.
             #
             # Claim the name atomically, then move the payload onto our own
             # placeholder (see _reserve_dest_name).  Both are inside the `try`,
