@@ -24,7 +24,11 @@ from internal.protocol.codec import (
     decode_message,
 )
 from internal.security.encryption import is_encrypted
-from internal.security.handshake import proof_state
+from internal.security.handshake import (
+    PROOF_VERSION,
+    proof_state,
+    should_refuse_unproven,
+)
 from internal.security.pairing import CertificateChangedError, PairingManager, fingerprint_pem
 from internal.transport.ids import peer_id_hash
 from internal.transport.ids import sanitize_peer_str as _sanitize_peer_str
@@ -130,6 +134,11 @@ NAME_PREFIX = "#clipsync-name="
 # signature over it cannot be a recording of an earlier handshake.
 NONCE_PREFIX = "#clipsync-nonce="
 PROOF_PREFIX = "#clipsync-proof="
+# The handshake version this frame was written by, so a peer can tell a build
+# that promises a proof from one that predates the field.  A gate keyed on
+# "did the proof arrive" is a gate an attacker opens by omitting it; a gate
+# keyed on the *claim* is not.  See `handshake.PROOF_VERSION`.
+HANDSHAKE_VERSION_PREFIX = "#clipsync-v="
 
 # The first release that reads the marker above, and therefore the floor for
 # every dial this build makes on a user's behalf: a call to an older peer is a
@@ -978,6 +987,7 @@ class TransportManager:
         device_name: str = "",
         nonce: str = "",
         proof: str = "",
+        version: int = 0,
     ):
         """Send our certificate PEM as an application-level frame.
 
@@ -1001,6 +1011,8 @@ class TransportManager:
         not expect.  See `internal/security/handshake.py`.
         """
         head = ""
+        if version:
+            head += f"{HANDSHAKE_VERSION_PREFIX}{int(version)}\n"
         if nonce:
             head += f"{NONCE_PREFIX}{nonce}\n"
         if proof:
@@ -1020,7 +1032,9 @@ class TransportManager:
         sock.sendall(frame)
 
     @staticmethod
-    def _identity_payload(data: bytes) -> tuple[str, bool, int, str]:
+    def _identity_payload(
+        data: bytes,
+    ) -> tuple[str, bool, int, str, str, str, int]:
         """Split an identity frame into its fields and the certificate.
 
         Returns ``(cert_pem, no_auto_pairing, listen_port, device_name, nonce,
@@ -1041,6 +1055,7 @@ class TransportManager:
         device_name = ""
         nonce = ""
         proof = ""
+        version = 0
         # The lines before the PEM, in whatever order a sender wrote them.  The
         # scan stops at the first line that is not one of ours — the PEM's own
         # BEGIN — so a certificate that contains text resembling a prefix
@@ -1052,7 +1067,10 @@ class TransportManager:
             # A line of ours whose value cannot be read is consumed like any
             # other: it is not the PEM's BEGIN line, so leaving it in place
             # would only put a comment in front of the certificate.
-            if head.startswith(NONCE_PREFIX):
+            if head.startswith(HANDSHAKE_VERSION_PREFIX):
+                with contextlib.suppress(ValueError):
+                    version = max(0, int(head[len(HANDSHAKE_VERSION_PREFIX) :]))
+            elif head.startswith(NONCE_PREFIX):
                 nonce = _sanitize_peer_str(head[len(NONCE_PREFIX) :], 128)
             elif head.startswith(PROOF_PREFIX):
                 proof = _sanitize_peer_str(head[len(PROOF_PREFIX) :], 512)
@@ -1064,7 +1082,7 @@ class TransportManager:
             else:
                 break
             text = rest
-        return text, no_auto_pairing, listen_port, device_name, nonce, proof
+        return text, no_auto_pairing, listen_port, device_name, nonce, proof, version
 
     @staticmethod
     def _restore_timeout(sock: ssl.SSLSocket, timeout: float | None) -> None:
@@ -1420,6 +1438,7 @@ class TransportManager:
                         server_device_name,
                         server_nonce,
                         _server_proof,
+                        _server_version,
                     ) = self._identity_payload(server_cert_data)
                     peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
                     our_nonce = self._pairing_mgr.make_handshake_nonce()
@@ -1431,6 +1450,7 @@ class TransportManager:
                         device_name=identity.device_name,
                         nonce=our_nonce,
                         proof=self._pairing_mgr.sign_handshake_nonce(server_nonce, our_nonce),
+                        version=PROOF_VERSION,
                     )
                     logger.info("[%s] sent identity frame", peer_name)
 
@@ -1446,6 +1466,7 @@ class TransportManager:
                             _name2,
                             _nonce2,
                             peer_proof,
+                            _version2,
                         ) = self._identity_payload(answer)
                     if not self._pairing_mgr.verify_handshake_nonce(
                         peer_cert_pem, server_nonce, our_nonce, peer_proof
@@ -2564,6 +2585,7 @@ class TransportManager:
                 identity.certificate_pem,
                 device_name=identity.device_name,
                 nonce=our_nonce,
+                version=PROOF_VERSION,
             )
 
             client_cert_data = self._recv_identity(ssl_sock)
@@ -2575,6 +2597,7 @@ class TransportManager:
                     client_device_name,
                     client_nonce,
                     client_proof,
+                    client_version,
                 ) = self._identity_payload(client_cert_data)
                 peer_cert = x509.load_pem_x509_certificate(peer_cert_pem.encode())
                 proved = self._pairing_mgr.verify_handshake_nonce(
@@ -2591,6 +2614,7 @@ class TransportManager:
                     device_name=identity.device_name,
                     nonce=our_nonce,
                     proof=self._pairing_mgr.sign_handshake_nonce(client_nonce, our_nonce),
+                    version=PROOF_VERSION,
                 )
 
                 # Bind the TLS-presented cert to the app-layer identity cert
@@ -2623,14 +2647,28 @@ class TransportManager:
                 # certificate is not the pinned one -- and a peer that *is* pinned
                 # and merely old keeps working, which is what stops one side
                 # upgrading from breaking every pairing it has.
-                if not proved and peer_id:
+                pinned = bool(peer_id and self._pairing_mgr.get_peer_certificate(peer_id))
+                if not proved:
                     logger.info(
-                        "[%s] handshake identity: %s (no proof of key possession)",
-                        peer_id[:12],
-                        proof_state(
-                            proved, peer_id, bool(self._pairing_mgr.get_peer_certificate(peer_id))
-                        ),
+                        "[%s] handshake identity: %s (version %d, no valid proof)",
+                        peer_id[:12] if peer_id else "?",
+                        proof_state(proved, peer_id, pinned, client_version),
+                        client_version,
                     )
+                if should_refuse_unproven(
+                    self._pairing_mgr, peer_id, proved, claimed_version=client_version
+                ):
+                    logger.warning(
+                        "Incoming connection from %s:%d claims %s at handshake version "
+                        "%d and did not produce the proof it promised — refusing",
+                        addr[0],
+                        addr[1],
+                        peer_id[:12],
+                        client_version,
+                    )
+                    self._send_rejection(ssl_sock)
+                    ssl_sock.close()
+                    return
 
                 try:
                     ou_attrs = peer_cert.subject.get_attributes_for_oid(

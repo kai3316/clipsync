@@ -81,29 +81,28 @@ jobs:
 
           What is new in this release:
 
-          - **The pairing code now covers a stronger claim.**  Each device signs a
-            value chosen fresh for the connection and sent to nobody else, so the
-            other end can tell that whoever is talking holds the private key behind
-            the certificate it presented — not merely that it knows a certificate.
-            A certificate is public: it travels in the clear, and any peer that has
-            ever connected to you has seen it.
+          - **The proof of key possession is now enforced, not just reported.**
+            A certificate is public — it travels in the clear, and any peer that has
+            ever connected to you has seen it.  What is private is the key behind
+            it.  Each device now signs a value chosen fresh for the connection and
+            sent to nobody else, and a device that claims a certificate it cannot
+            sign for is refused before anything downstream believes its frame.
 
-          - **What that does and does not mean, stated plainly.**  A device you
-            have already paired with is still held to its *pinned* certificate: a
-            different certificate presented for that device is refused, as before,
-            and that is the check that stops a copied certificate from working —
-            a copied certificate is not the pinned one.  The signature is checked
-            and reported, and a paired device that cannot produce one is logged as
-            `pinned-but-unproven`.  It is not refused, deliberately: a build from
-            before this release sends no signature, and refusing it would break
-            every pairing you have the moment one side upgrades.  The two are
-            indistinguishable from the receiving end, so the safe-and-usable
-            choice is to keep trusting the pin and to say so in the log.
+            The part that needed care is *which* peers to refuse.  1.0.38 checked
+            the signature but refused nothing, because a peer running a build from
+            before this feature sends no signature either, and the two are
+            indistinguishable — so refusing both would have taken every existing
+            pairing down the moment one side upgraded.  Frames now carry the
+            handshake version that wrote them.  A peer that claims this version has
+            promised a signature, and a claim it cannot back is refused; a peer
+            that does not claim it is an older build and keeps working, held to the
+            pinned certificate as before.  That distinction is what makes the proof
+            enforceable without breaking anyone's upgrade.
 
-            In short: this release makes the proof of key possession real and
-            checked, and it does **not** yet make it a gate for a device that is
-            already paired.  Both ends being on 1.0.38 or later is what would make
-            that gate safe to enforce, and that is the intended next step.
+          - **What this does not change.**  Your paired devices keep working, and a
+            device you have not paired with is still free to reach you: there is no
+            certificate to copy before the first pairing, and the pairing code is
+            what establishes trust at that point.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
@@ -116,9 +115,10 @@ jobs:
             find nothing to download — that is expected, not a broken download.
             Install the desktop application from the assets below instead.
 
-          1.0.36 and 1.0.37 carried: ARM64 Linux builds again, a per-device switch
-          for what your clipboard is shared with, and a warning on Linux when the
-          system cannot read the clipboard at all.
+          1.0.36 through 1.0.38 carried: ARM64 Linux builds again, a per-device
+          switch for what your clipboard is shared with, a warning on Linux when
+          the system cannot read the clipboard at all, and the proof exchange
+          itself.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so

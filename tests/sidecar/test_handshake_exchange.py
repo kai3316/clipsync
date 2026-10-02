@@ -21,6 +21,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from internal.security.handshake import (  # noqa: E402
+    PROOF_VERSION,
+    decode_identity,
     exchange_identity,
     proof_state,
     should_refuse_unproven,
@@ -132,63 +134,100 @@ class TestTheTwoHonestDevicesProveThemselves:
         assert accepted["peer_port"] == 45731
 
 
-class TestThePolicyDecidesAllThreeCases:
-    """The security decision: three cases, and one of them must *not* refuse.
+class TestThePolicyDecidesTheRightQuestion:
+    """The security decision: which case refuses, and which must not.
 
-    Tested apart from the accept path because getting it wrong in either direction
-    is silent.  The shaping of these assertions is itself the lesson: a first
-    version of this policy refused every unproven peer claiming a pinned device,
-    which would have broken every existing pairing the moment one side upgraded --
-    a user would have seen a paired device simply stop working.
+    Shaped by a mistake: the first version of this policy refused *every* unproven
+    peer claiming a pinned device, which would have taken down every existing
+    pairing the moment one side upgraded, because a peer running a build from
+    before this feature sends no proof either.  The version claim is what separates
+    the two situations without guessing.
     """
 
     def test_a_proved_peer_is_accepted(self, tmp_path):
         victim, _peer = paired_pair(tmp_path)
-        assert not should_refuse_unproven(victim, "peer-device", proved=True)
+        assert not should_refuse_unproven(victim, "peer-device", proved=True, claimed_version=1)
 
-    def test_an_unproven_pinned_peer_is_not_refused_here(self, tmp_path):
-        """The case that must not refuse, and the reason is indistinguishability.
+    def test_a_peer_that_promised_a_proof_and_omitted_it_is_refused(self, tmp_path):
+        """The case that makes this a gate rather than a report.
 
-        An attacker with a copied certificate and a peer running a build from
-        before this feature look identical from here: a certificate, no proof.
-        Refusing both breaks the upgrade; the *pin* is what refuses the attacker,
-        because a copied certificate is not the pinned one.  That check already
-        existed and raises CertificateChangedError, which is the refusal.
+        A peer claiming the proof version has promised a signature, and an attacker
+        holding a copied certificate produces none.  Keying the gate on the *claim*
+        rather than on the field's presence is what stops "say nothing" from being
+        a way through.
         """
         victim, _peer = paired_pair(tmp_path)
-        assert not should_refuse_unproven(victim, "peer-device", proved=False)
+        assert should_refuse_unproven(victim, "peer-device", proved=False, claimed_version=1)
+
+    def test_an_older_build_keeps_working(self, tmp_path):
+        """Version 0 is a build from before this feature, and it is not refused.
+
+        Refusing it would break every existing pairing on the first upgrade; the
+        pin is what refuses an impersonator in this case, because a copied
+        certificate is not the pinned one.
+        """
+        victim, _peer = paired_pair(tmp_path)
+        assert not should_refuse_unproven(victim, "peer-device", proved=False, claimed_version=0)
 
     def test_an_unproven_stranger_is_first_contact_not_an_attack(self, tmp_path):
-        """There is no pin to copy before the first pairing.
-
-        Refusing this would make pairing impossible: the two devices have nothing
-        to prove against yet, and the code comparison is what establishes trust.
-        """
+        """There is no pin to copy before the first pairing, so nothing to refuse."""
         victim, _peer = paired_pair(tmp_path)
-        assert not should_refuse_unproven(victim, "never-seen-device", proved=False)
+        assert not should_refuse_unproven(
+            victim, "never-seen-device", proved=False, claimed_version=1
+        )
 
     def test_a_peer_with_no_claimed_id_is_not_refused_on_the_proof(self, tmp_path):
-        """No id means no pin to compare against; the id checks handle that case."""
         victim, _peer = paired_pair(tmp_path)
-        assert not should_refuse_unproven(victim, "", proved=False)
+        assert not should_refuse_unproven(victim, "", proved=False, claimed_version=1)
 
     def test_the_log_says_which_kind_of_unproven_peer_this_is(self, tmp_path):
-        """The distinction the log draws, since the gate does not act on it."""
+        """Every case named, because two of them do not refuse and a reader needs
+        to be able to tell which happened."""
         assert proof_state(True, "peer-device", True) == "proved"
         assert proof_state(False, "peer-device", True) == "pinned-but-unproven"
-        assert proof_state(False, "new-device", False) == "new-device"
+        assert proof_state(False, "peer-device", False, claimed_version=0) == "older-build"
+        assert proof_state(False, "", False) == "new-device"
 
-    def test_the_accept_path_reports_the_state_it_computed(self):
-        """The value the exchange produced must reach the log.
 
-        Otherwise a pinned-but-unproven peer is indistinguishable from a proved one
-        in the only place an operator could ever see the difference.
+class TestTheVersionSurvivesTheExchange:
+    """The claim the policy reads must actually arrive, or the gate is blind."""
+
+    def test_both_sides_learn_the_other_version(self, tmp_path):
+        victim, peer = paired_pair(tmp_path)
+        accepted, dialed = run_exchange(victim, peer)
+        assert accepted["peer_version"] == PROOF_VERSION
+        assert dialed["peer_version"] == PROOF_VERSION
+
+    def test_a_frame_without_the_field_reads_as_version_zero(self, tmp_path):
+        """An older build sends no version line at all, and that is version 0."""
+        victim, _peer = paired_pair(tmp_path)
+        from internal.security.handshake import encode_identity
+
+        frame = encode_identity(
+            victim.get_identity().certificate_pem, nonce="n" * 64, version=0
+        )
+        assert decode_identity(frame)[6] == 0
+
+    def test_the_version_round_trips(self, tmp_path):
+        victim, _peer = paired_pair(tmp_path)
+        from internal.security.handshake import encode_identity
+
+        frame = encode_identity(
+            victim.get_identity().certificate_pem, nonce="n" * 64, version=7
+        )
+        assert decode_identity(frame)[6] == 7
+
+    def test_the_exchange_declares_the_version_it_implements(self):
+        """A build that sends a proof must also declare the version.
+
+        Without the declaration the peer cannot tell it apart from an older build,
+        and the gate would have nothing to act on.
         """
         source = (
-            Path(__file__).resolve().parents[2] / "internal" / "transport" / "connection.py"
+            Path(__file__).resolve().parents[2] / "internal" / "security" / "handshake.py"
         ).read_text(encoding="utf-8")
-        assert "proof_state(" in source, (
-            "the accept path no longer reports how well the peer proved itself"
+        assert source.count("version=PROOF_VERSION") >= 3, (
+            "not every frame the exchange sends declares the version"
         )
 
 

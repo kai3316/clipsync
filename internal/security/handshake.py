@@ -13,6 +13,7 @@ channel contract is two operations: ``send(bytes)`` and ``recv() -> bytes | None
 The connection layer passes sockets; the tests pass pairs of queues.
 """
 
+import contextlib
 import logging
 import struct
 
@@ -24,54 +25,72 @@ MAX_IDENTITY_FRAME = 1 << 20
 
 NONCE_PREFIX = "#clipsync-nonce="
 PROOF_PREFIX = "#clipsync-proof="
+VERSION_PREFIX = "#clipsync-v="
+
+# The first handshake version that promises a proof of key possession.
+#
+# A version number rather than "did the proof field arrive", and the difference is
+# the whole reason this constant exists: an attacker who has copied a certificate
+# simply omits the field, so a gate keyed on presence is a gate an attacker opens
+# by saying nothing.  A gate keyed on a *claim* cannot be dodged that way -- a peer
+# that claims this version has promised a signature, and silence is a refusal --
+# while a peer that does not claim it is a build from before the feature, which
+# keeps working.  That is what makes the proof enforceable without breaking every
+# existing pairing on the first upgrade.
+PROOF_VERSION = 1
 
 
-def should_refuse_unproven(pairing_mgr, claimed_device_id, proved):
+def should_refuse_unproven(pairing_mgr, claimed_device_id, proved, claimed_version=0):
     """Whether an incoming peer must be refused for failing to prove itself.
 
     The policy, in one place, because it is the security decision and it is one
     boolean away from being wrong in either direction:
 
     * a peer that *proved* possession is the device it claims -- accepted;
-    * a peer that did not, claiming a device this machine has pinned, is either an
-      impersonation attempt or a build old enough to have no proof to send;
-    * a peer that did not, claiming a device this machine has *not* pinned, is
-      first contact.  There is no pin to copy before the first pairing, so there
-      is nothing to impersonate yet, and refusing it would make pairing itself
-      impossible.  The code comparison is what establishes trust at that stage.
+    * a peer that claimed `PROOF_VERSION` or later and did **not** prove itself is
+      refused.  It promised a signature it did not produce, and the only peers that
+      do that are ones lying about who they are or about what they are running;
+    * a peer that did not claim that version is a build from before this feature.
+      It is accepted, because refusing it would take every existing pairing down on
+      the first upgrade, and because the *pin* is what refuses an impersonator in
+      that case: a copied certificate is not the pinned one, so `add_peer` raises
+      `CertificateChangedError` and the connection dies.  The residual risk lives
+      here, and the caller logs it (`pinned-but-unproven`).
 
-    The middle case is the one this function exists to be explicit about, and it is
-    **accepted, not refused**.  The two possibilities are indistinguishable from
-    here -- an attacker who copied a certificate and a peer running a build from
-    before this feature both present a certificate and no proof -- and refusing
-    both would break every existing pairing the moment one side upgrades.  A user
-    would see a device they had paired stop working, with nothing to explain it,
-    which is worse than the residual risk: the TLS layer above already refuses
-    anything that cannot chain to this device's pinned certificate, so the attacker
-    in that case must already hold the key it is copying, at which point it *is*
-    the device.  What is left is a peer that is trusted by pin and unproven by
-    signature, and the caller logs exactly that.
-
-    So: `proved` false is not a refusal.  The refusal this feature wants is the
-    one where a *pinned* peer presents a certificate whose key it cannot use --
-    which is the `CertificateChangedError` the pin check raises, and which was
-    already there.  Keeping this function is still worth it: it states which case
-    is which, and it is the place a future change to enforce the proof would go.
+    The middle case is what makes this a gate rather than a report, and the version
+    claim is what makes the middle case decidable.  An earlier version of this
+    function refused every unproven peer claiming a pinned device -- which is the
+    middle and bottom cases together -- and that would have broken every existing
+    pairing the moment one side upgraded.
     """
-    return False
+    if proved:
+        return False
+    if not claimed_device_id:
+        return False
+    if int(claimed_version or 0) < PROOF_VERSION:
+        return False
+    return bool(pairing_mgr.get_peer_certificate(claimed_device_id))
 
 
-def proof_state(proved, claimed_device_id, pinned):
+def proof_state(proved, claimed_device_id, pinned, claimed_version=0):
     """A word for the log: how well this peer established who it is."""
     if proved:
         return "proved"
     if pinned:
         return "pinned-but-unproven"
-    return "new-device"
+    if int(claimed_version or 0) >= PROOF_VERSION:
+        return "promised-a-proof-and-did-not"
+    return "older-build" if claimed_device_id else "new-device"
 
 
 def encode_identity(
-    cert_pem, nonce="", proof="", listen_port=0, device_name="", no_auto_pairing=False
+    cert_pem,
+    nonce="",
+    proof="",
+    listen_port=0,
+    device_name="",
+    no_auto_pairing=False,
+    version=PROOF_VERSION,
 ):
     """One identity frame: our certificate, plus what proves we hold its key.
 
@@ -83,6 +102,8 @@ def encode_identity(
     from internal.transport.connection import NO_PAIRING_MARKER, _sanitize_peer_str
 
     head = ""
+    if version:
+        head += f"{VERSION_PREFIX}{int(version)}\n"
     if nonce:
         head += f"{NONCE_PREFIX}{nonce}\n"
     if proof:
@@ -118,17 +139,19 @@ def decode_identity(data):
         text = text[: -len(NO_PAIRING_MARKER)]
     nonce = proof = name = ""
     listen_port = 0
+    version = 0
     while True:
         head, sep, rest = text.partition("\n")
         if not sep or not rest:
             break
-        if head.startswith(NONCE_PREFIX):
+        if head.startswith(VERSION_PREFIX):
+            with contextlib.suppress(ValueError):
+                version = max(0, int(head[len(VERSION_PREFIX) :]))
+        elif head.startswith(NONCE_PREFIX):
             nonce = _sanitize_peer_str(head[len(NONCE_PREFIX) :], 128)
         elif head.startswith(PROOF_PREFIX):
             proof = _sanitize_peer_str(head[len(PROOF_PREFIX) :], 512)
         elif head.startswith(LISTEN_PORT_PREFIX):
-            import contextlib
-
             with contextlib.suppress(ValueError):
                 listen_port = max(0, int(head[len(LISTEN_PORT_PREFIX) :]))
         elif head.startswith(NAME_PREFIX):
@@ -136,7 +159,7 @@ def decode_identity(data):
         else:
             break
         text = rest
-    return text, nonce, proof, listen_port, name, no_auto_pairing
+    return text, nonce, proof, listen_port, name, no_auto_pairing, version
 
 
 def send_frame(channel, payload):
@@ -192,14 +215,21 @@ def exchange_identity(channel, pairing_mgr, server_side, device_name="", listen_
                 identity.certificate_pem,
                 nonce=our_nonce,
                 device_name=device_name or identity.device_name,
+                version=PROOF_VERSION,
             ),
         )
         first = recv_frame(channel)
         if first is None:
             return None
-        peer_cert_pem, peer_nonce, peer_proof, peer_port, peer_name, peer_no_auto = decode_identity(
-            first
-        )
+        (
+            peer_cert_pem,
+            peer_nonce,
+            peer_proof,
+            peer_port,
+            peer_name,
+            peer_no_auto,
+            peer_version,
+        ) = decode_identity(first)
         # Their proof is already in hand, so ours can follow immediately.
         our_proof = pairing_mgr.sign_handshake_nonce(peer_nonce, our_nonce)
         send_frame(
@@ -209,15 +239,22 @@ def exchange_identity(channel, pairing_mgr, server_side, device_name="", listen_
                 nonce=our_nonce,
                 proof=our_proof,
                 device_name=device_name or identity.device_name,
+                version=PROOF_VERSION,
             ),
         )
     else:
         first = recv_frame(channel)
         if first is None:
             return None
-        peer_cert_pem, peer_nonce, peer_proof, peer_port, peer_name, peer_no_auto = decode_identity(
-            first
-        )
+        (
+            peer_cert_pem,
+            peer_nonce,
+            peer_proof,
+            peer_port,
+            peer_name,
+            peer_no_auto,
+            peer_version,
+        ) = decode_identity(first)
         # Their nonce is in hand, so our proof rides our very first frame.
         our_proof = pairing_mgr.sign_handshake_nonce(peer_nonce, our_nonce)
         send_frame(
@@ -229,12 +266,21 @@ def exchange_identity(channel, pairing_mgr, server_side, device_name="", listen_
                 listen_port=listen_port,
                 device_name=device_name or identity.device_name,
                 no_auto_pairing=no_auto_pairing,
+                version=PROOF_VERSION,
             ),
         )
         second = recv_frame(channel)
         if second is None:
             return None
-        _cert2, _nonce2, peer_proof, _port2, _name2, _noauto2 = decode_identity(second)
+        (
+            _cert2,
+            _nonce2,
+            peer_proof,
+            _port2,
+            _name2,
+            _noauto2,
+            _version2,
+        ) = decode_identity(second)
 
     proved = pairing_mgr.verify_handshake_nonce(
         peer_cert_pem, peer_nonce, our_nonce, peer_proof
@@ -245,6 +291,7 @@ def exchange_identity(channel, pairing_mgr, server_side, device_name="", listen_
         "peer_name": peer_name,
         "peer_port": peer_port,
         "peer_no_auto_pairing": peer_no_auto,
+        "peer_version": peer_version,
         "proved": proved,
         "our_nonce": our_nonce,
     }
