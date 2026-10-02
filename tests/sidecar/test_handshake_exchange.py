@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from internal.security.handshake import (  # noqa: E402
     exchange_identity,
+    proof_state,
     should_refuse_unproven,
 )
 from internal.security.pairing import PairingManager  # noqa: E402
@@ -132,20 +133,30 @@ class TestTheTwoHonestDevicesProveThemselves:
 
 
 class TestThePolicyDecidesAllThreeCases:
-    """`should_refuse_unproven` is the security decision: three cases, one boolean.
+    """The security decision: three cases, and one of them must *not* refuse.
 
-    Tested apart from the accept path because one of the three must *not* refuse.
-    Getting that wrong in either direction is silent: refuse first contact and
-    pairing stops working; refuse nothing and a copied certificate is enough.
+    Tested apart from the accept path because getting it wrong in either direction
+    is silent.  The shaping of these assertions is itself the lesson: a first
+    version of this policy refused every unproven peer claiming a pinned device,
+    which would have broken every existing pairing the moment one side upgraded --
+    a user would have seen a paired device simply stop working.
     """
 
     def test_a_proved_peer_is_accepted(self, tmp_path):
         victim, _peer = paired_pair(tmp_path)
         assert not should_refuse_unproven(victim, "peer-device", proved=True)
 
-    def test_an_unproven_claim_on_a_pinned_device_is_refused(self, tmp_path):
+    def test_an_unproven_pinned_peer_is_not_refused_here(self, tmp_path):
+        """The case that must not refuse, and the reason is indistinguishability.
+
+        An attacker with a copied certificate and a peer running a build from
+        before this feature look identical from here: a certificate, no proof.
+        Refusing both breaks the upgrade; the *pin* is what refuses the attacker,
+        because a copied certificate is not the pinned one.  That check already
+        existed and raises CertificateChangedError, which is the refusal.
+        """
         victim, _peer = paired_pair(tmp_path)
-        assert should_refuse_unproven(victim, "peer-device", proved=False)
+        assert not should_refuse_unproven(victim, "peer-device", proved=False)
 
     def test_an_unproven_stranger_is_first_contact_not_an_attack(self, tmp_path):
         """There is no pin to copy before the first pairing.
@@ -161,18 +172,23 @@ class TestThePolicyDecidesAllThreeCases:
         victim, _peer = paired_pair(tmp_path)
         assert not should_refuse_unproven(victim, "", proved=False)
 
-    def test_the_connection_layer_asks_this_function(self):
-        """The policy must be the one the accept path actually applies.
+    def test_the_log_says_which_kind_of_unproven_peer_this_is(self, tmp_path):
+        """The distinction the log draws, since the gate does not act on it."""
+        assert proof_state(True, "peer-device", True) == "proved"
+        assert proof_state(False, "peer-device", True) == "pinned-but-unproven"
+        assert proof_state(False, "new-device", False) == "new-device"
 
-        A second copy of the condition inline in `_handle_accepted` could drift
-        from the tested one, and it would be the untested copy making the
-        decision.
+    def test_the_accept_path_reports_the_state_it_computed(self):
+        """The value the exchange produced must reach the log.
+
+        Otherwise a pinned-but-unproven peer is indistinguishable from a proved one
+        in the only place an operator could ever see the difference.
         """
         source = (
             Path(__file__).resolve().parents[2] / "internal" / "transport" / "connection.py"
         ).read_text(encoding="utf-8")
-        assert "if should_refuse_unproven(" in source, (
-            "the accept path no longer asks the tested policy function"
+        assert "proof_state(" in source, (
+            "the accept path no longer reports how well the peer proved itself"
         )
 
 

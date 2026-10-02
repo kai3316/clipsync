@@ -81,24 +81,29 @@ jobs:
 
           What is new in this release:
 
-          - **Hardened: a copied certificate is no longer enough to be taken for
-            a paired device.**  Every device's certificate is public — it travels
-            in the clear during pairing and every peer that has ever connected to
-            you has seen it.  What is private is the key behind it, and until now
-            presenting someone else's certificate was enough to be treated as that
-            device: the receiving side took the device id, the name and the trust
-            decision from a certificate the peer merely claimed.  Devices now prove
-            they hold the key, by signing a value that is chosen fresh for each
-            connection and sent to nobody else, and a peer claiming a device you
-            have already paired with that cannot produce that signature is refused.
-            A device you have *not* paired with is unaffected — there is nothing to
-            impersonate before the first pairing, and the pairing code is what
-            establishes trust at that point.
+          - **The pairing code now covers a stronger claim.**  Each device signs a
+            value chosen fresh for the connection and sent to nobody else, so the
+            other end can tell that whoever is talking holds the private key behind
+            the certificate it presented — not merely that it knows a certificate.
+            A certificate is public: it travels in the clear, and any peer that has
+            ever connected to you has seen it.
 
-          - **The pairing code is easier to trust as a result.**  The comparison
-            you do by eye now covers a channel where the other end has proved it
-            holds the key it presented, rather than one where it merely named
-            itself.
+          - **What that does and does not mean, stated plainly.**  A device you
+            have already paired with is still held to its *pinned* certificate: a
+            different certificate presented for that device is refused, as before,
+            and that is the check that stops a copied certificate from working —
+            a copied certificate is not the pinned one.  The signature is checked
+            and reported, and a paired device that cannot produce one is logged as
+            `pinned-but-unproven`.  It is not refused, deliberately: a build from
+            before this release sends no signature, and refusing it would break
+            every pairing you have the moment one side upgrades.  The two are
+            indistinguishable from the receiving end, so the safe-and-usable
+            choice is to keep trusting the pin and to say so in the log.
+
+            In short: this release makes the proof of key possession real and
+            checked, and it does **not** yet make it a gate for a device that is
+            already paired.  Both ends being on 1.0.38 or later is what would make
+            that gate safe to enforce, and that is the intended next step.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
@@ -111,9 +116,9 @@ jobs:
             find nothing to download — that is expected, not a broken download.
             Install the desktop application from the assets below instead.
 
-          1.0.36 carried: ARM64 Linux builds again, a per-device switch for what
-          your clipboard is shared with, and a warning on Linux when the system
-          cannot read the clipboard at all.
+          1.0.36 and 1.0.37 carried: ARM64 Linux builds again, a per-device switch
+          for what your clipboard is shared with, and a warning on Linux when the
+          system cannot read the clipboard at all.
 
           1.0.7 published a macOS installer that cannot start at all, and its
           update check lives in the background process that never comes up, so

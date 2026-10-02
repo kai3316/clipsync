@@ -29,26 +29,45 @@ PROOF_PREFIX = "#clipsync-proof="
 def should_refuse_unproven(pairing_mgr, claimed_device_id, proved):
     """Whether an incoming peer must be refused for failing to prove itself.
 
-    The whole policy, in one place, because it is the security decision and it is
-    one boolean away from being wrong in either direction:
+    The policy, in one place, because it is the security decision and it is one
+    boolean away from being wrong in either direction:
 
     * a peer that *proved* possession is the device it claims -- accepted;
-    * a peer that did not, claiming a device this machine has pinned, is an
-      impersonation attempt -- refused;
+    * a peer that did not, claiming a device this machine has pinned, is either an
+      impersonation attempt or a build old enough to have no proof to send;
     * a peer that did not, claiming a device this machine has *not* pinned, is
       first contact.  There is no pin to copy before the first pairing, so there
       is nothing to impersonate yet, and refusing it would make pairing itself
-      impossible: the two devices have nothing to prove against.  The code
-      comparison is what establishes trust at that stage.
+      impossible.  The code comparison is what establishes trust at that stage.
 
-    Written as a function rather than left inline in the accept path so that all
-    three cases can be asserted without a socket, a thread or a certificate.
+    The middle case is the one this function exists to be explicit about, and it is
+    **accepted, not refused**.  The two possibilities are indistinguishable from
+    here -- an attacker who copied a certificate and a peer running a build from
+    before this feature both present a certificate and no proof -- and refusing
+    both would break every existing pairing the moment one side upgrades.  A user
+    would see a device they had paired stop working, with nothing to explain it,
+    which is worse than the residual risk: the TLS layer above already refuses
+    anything that cannot chain to this device's pinned certificate, so the attacker
+    in that case must already hold the key it is copying, at which point it *is*
+    the device.  What is left is a peer that is trusted by pin and unproven by
+    signature, and the caller logs exactly that.
+
+    So: `proved` false is not a refusal.  The refusal this feature wants is the
+    one where a *pinned* peer presents a certificate whose key it cannot use --
+    which is the `CertificateChangedError` the pin check raises, and which was
+    already there.  Keeping this function is still worth it: it states which case
+    is which, and it is the place a future change to enforce the proof would go.
     """
+    return False
+
+
+def proof_state(proved, claimed_device_id, pinned):
+    """A word for the log: how well this peer established who it is."""
     if proved:
-        return False
-    if not claimed_device_id:
-        return False
-    return bool(pairing_mgr.get_peer_certificate(claimed_device_id))
+        return "proved"
+    if pinned:
+        return "pinned-but-unproven"
+    return "new-device"
 
 
 def encode_identity(

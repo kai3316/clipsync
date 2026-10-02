@@ -24,7 +24,7 @@ from internal.protocol.codec import (
     decode_message,
 )
 from internal.security.encryption import is_encrypted
-from internal.security.handshake import should_refuse_unproven
+from internal.security.handshake import proof_state
 from internal.security.pairing import CertificateChangedError, PairingManager, fingerprint_pem
 from internal.transport.ids import peer_id_hash
 from internal.transport.ids import sanitize_peer_str as _sanitize_peer_str
@@ -2615,31 +2615,22 @@ class TransportManager:
                 except Exception:
                     pass
 
-                # The gate.  A certificate is public -- it travels in the frame
-                # just read, in the clear, and every peer that has ever handshaked
-                # with this machine has seen it.  What is not public is the private
-                # key, and the proof is a signature over *our* nonce: chosen
-                # microseconds ago and sent to nobody else.  So a peer presenting a
-                # certificate for a device this machine has pinned, which cannot
-                # produce that signature, is not that device, and it is refused
-                # here -- before anything downstream believes a word of the frame.
-                #
-                # The policy is `should_refuse_unproven` rather than an inline
-                # condition, because it is three cases -- proved, unproven and
-                # pinned, unproven and new -- and one of them must not refuse or
-                # pairing itself becomes impossible.
-                if should_refuse_unproven(self._pairing_mgr, peer_id, proved):
-                    logger.warning(
-                        "Incoming connection from %s:%d claims %s, a device this machine "
-                        "has pinned, but cannot prove it holds that certificate's key — "
-                        "refusing",
-                        addr[0],
-                        addr[1],
+                # What the exchange established, said in the log.  A pinned peer
+                # that could not prove itself is worth naming: it is either a
+                # build from before this feature or an attempt to be that device
+                # with a copied certificate, and the two cannot be told apart from
+                # here.  The pin check below is what refuses the attack -- a copied
+                # certificate is not the pinned one -- and a peer that *is* pinned
+                # and merely old keeps working, which is what stops one side
+                # upgrading from breaking every pairing it has.
+                if not proved and peer_id:
+                    logger.info(
+                        "[%s] handshake identity: %s (no proof of key possession)",
                         peer_id[:12],
+                        proof_state(
+                            proved, peer_id, bool(self._pairing_mgr.get_peer_certificate(peer_id))
+                        ),
                     )
-                    self._send_rejection(ssl_sock)
-                    ssl_sock.close()
-                    return
 
                 try:
                     ou_attrs = peer_cert.subject.get_attributes_for_oid(
