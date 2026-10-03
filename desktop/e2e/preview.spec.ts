@@ -541,3 +541,43 @@ test("the type scale resolves to the sizes it names", async ({ page }) => {
   }
   expect(failures).toEqual([]);
 });
+
+
+/** The overview is a dashboard, so the thing it is for has to be on the screen.
+ *
+ * It was five full-width bands -- 1027px of content in the 761px column a 1280x900
+ * window leaves -- and the activity card sat entirely below the fold at the default
+ * size.  The bands are now two columns, which is 924px, and the feed's own top is
+ * inside the viewport.
+ *
+ * Asserted as three relationships rather than as pixel counts, so a padding change
+ * does not fail it while a return to a single column does:
+ *   * at desktop width the body is two columns;
+ *   * the feed begins above the fold, which is the point of the change;
+ *   * the two columns are within a card's height of each other, which is what stops
+ *     one of them ending 500px above the other with bare page beneath it -- the
+ *     first attempt at this left exactly that.
+ */
+test("the overview keeps its activity above the fold", async ({ page }) => {
+  const failures = await open(page, 1280, 900);
+  const layout = await page.evaluate(() => {
+    const content = document.querySelector(".content") as HTMLElement;
+    const pair = document.querySelector(".overview-pair") as HTMLElement | null;
+    const cols = [...document.querySelectorAll(".overview-col")] as HTMLElement[];
+    const feed = document.querySelector(".overview-feed") as HTMLElement | null;
+    return {
+      columns: pair ? getComputedStyle(pair).gridTemplateColumns.split(" ").length : 0,
+      heights: cols.map((c) => Math.round(c.getBoundingClientRect().height)),
+      fold: content.getBoundingClientRect().top + content.clientHeight,
+      feedTop: feed ? Math.round(feed.getBoundingClientRect().top) : null,
+    };
+  });
+  expect(layout.columns, "the overview body is not two columns").toBe(2);
+  expect(layout.heights.length).toBe(2);
+  expect(layout.feedTop, "no feed").not.toBeNull();
+  // The whole point: the rows are on the screen without scrolling.
+  expect(layout.feedTop!, "the feed starts below the fold").toBeLessThan(layout.fold);
+  // And neither column is left holding a screenful of nothing.
+  expect(Math.abs(layout.heights[0] - layout.heights[1])).toBeLessThan(340);
+  expect(failures).toEqual([]);
+});
