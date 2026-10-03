@@ -346,6 +346,52 @@ test("every activity row's age reads across, not down", async ({ page }) => {
   expect(failures).toEqual([]);
 });
 
+/** The dark theme, which nothing above photographs.
+ *
+ * Every other shot in this file is taken under whatever the runner's colour
+ * scheme is — light, on CI — so half of this stylesheet has never been looked at.
+ * That matters most for the kind glyphs, which are four colours chosen to stay
+ * legible against the page in *both* themes and which are the only place in the
+ * window where a colour carries meaning rather than decoration.
+ *
+ * Asserted rather than merely photographed, because a token that was added to the
+ * light block and forgotten in the dark one does not look broken — it looks like
+ * a slightly dimmer glyph, which is exactly the kind of thing a screenshot review
+ * waves through.  So the check is that the row colours actually changed between
+ * the two themes, which is false the moment a dark block misses a token.
+ */
+test("the dark theme paints the kind glyphs and changes their colour", async ({ page }) => {
+  const failures = await open(page, 1280);
+  await page.getByRole("button", { name: T("剪贴板历史", "Clipboard History"), exact: true }).click();
+  await expect(page.locator(".history-kind").first()).toBeVisible();
+
+  const kindColours = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".history-kind")].map(
+        (node) => getComputedStyle(node).color,
+      ),
+    );
+
+  const light = await kindColours();
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.waitForTimeout(100);
+  const dark = await kindColours();
+
+  expect(light.length).toBeGreaterThan(0);
+  // A glyph painted in the inheriting text colour would mean the token never
+  // resolved, in either theme.
+  const pageColour = await page.evaluate(
+    () => getComputedStyle(document.body).color,
+  );
+  for (const colour of light) expect(colour).not.toBe(pageColour);
+  // And at least one glyph has to differ between the themes, or the dark tokens
+  // are missing and the light ones are being used on a dark page.
+  expect(dark).not.toEqual(light);
+
+  await page.screenshot({ path: `test-results/${LANGUAGE}/dark-history.png` });
+  expect(failures).toEqual([]);
+});
+
 test("the removed-device row fits a narrow window and keeps its own hairline", async ({ page }) => {
   const failures = await open(page, 390, 844);
   await page.getByRole("button", { name: "设备", exact: true }).click();

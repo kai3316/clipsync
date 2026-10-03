@@ -46,6 +46,21 @@
   --code: #f4f5f4;
   --line: #e5e9e8;
   --muted: #697371;
+  /* Text selection.  Tinted from the accent rather than left to the web
+     view's default blue, which is the one colour here that belongs to no
+     theme. */
+  --selection: #cfe4dc;
+  /* Clipboard kinds.  One accent per kind so a row's sort is legible without
+     reading it: four colours is as many as a list can carry before the colour
+     stops meaning anything, and the filter chips use the same four.
+     Chosen for contrast against both `--page` and `--surface`, because a row
+     sits on one and its glyph badge on the other. */
+  --kind-text: #4a6d8c;
+  --kind-code: #7d5a9c;
+  --kind-image: #b0763a;
+  --kind-file: #4f7f5c;
+  --kind-sheet: #5d7a4a;
+  --kind-link: #2f7d7d;
   /* The accent as text, as a background, and as the border of that background:
      the three are not one colour, and in dark mode they are not even close. */
   --accent: #087c6b;
@@ -134,6 +149,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; background: transparent; border: 1px solid var(--line); border-radius: var(--radius); min-height: var(--control); padding: 8px 14px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 button:hover:not(:disabled) { background: var(--surface); }
 button:disabled { opacity: .45; cursor: default; }
+::selection { background: var(--selection); }
+/* A preview and a history payload are the two places a user drags across
+   text, and both are inset from the page background. */
+.history-preview ::selection, .history-preview::selection { background: var(--selection); }
+
 button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 /* The browser's own margins belong to a document, and this is not one: every
@@ -246,6 +266,14 @@ header p { margin-top: 7px; font-size: 12px; }
    them keeps the controls at the height they have today, and keeps a line of
    them centred once the row has become two. */
 .toolbar { position: sticky; top: 0; z-index: 4; padding: 20px var(--page-gutter); display: flex; flex-wrap: wrap; align-items: center; gap: 12px; background: var(--page); }
+/* Only when sticky: the inset variant is not, and a border across the top of a
+   page that is not scrolling would be a line to nothing.  Drawn as a hairline
+   that sits just below the bar's background rather than as a `border-bottom`,
+   which would add a pixel to the layout and shift every page by one.  `:has()`
+   would have said "only while stuck" more directly and is not used anywhere else
+   in this file: WebKitGTK gained it in 2.42, and the Linux build runs on older
+   runtimes than that. */
+.toolbar:not(.toolbar--inset)::after { content: ""; position: absolute; inset: auto 0 -1px; height: 1px; background: var(--line); }
 /* The same row in its second placement: a page whose pinned row is its tab strip
    — the favorites page — puts its toolbar in the flow below the strip, where the
    sticky offset would land it on top of the strip.  One row, two placements. */
@@ -279,7 +307,34 @@ header p { margin-top: 7px; font-size: 12px; }
    its own flex rather than borrowing `.card-head`'s, so the two recipes cannot
    argue about the padding they disagree about. */
 .list-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
-.history-row { position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto auto; align-items: center; gap: var(--row-gap); padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
+.history-row { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto auto; align-items: center; gap: var(--row-gap); padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
+/* ── Kind and selection, one column ────────────────────────────────────────
+   The leading column used to be a bare checkbox, which told the reader nothing
+   about the row until they interacted with it.  It is now the clip's kind, in its
+   kind's colour, and the checkbox takes the same square on hover or focus — the
+   two never need to be on screen at once, because a pointer that can reach the
+   checkbox is already pointing at the row, and nothing is selected by accident
+   from a glyph that is not a control.
+   `:has()` is what keeps every checkbox visible while a selection is in progress,
+   which is the one case the pointer is somewhere else entirely.  WebKitGTK gained
+   `:has()` in 2.42 and the Linux build runs on older runtimes, so this degrades to
+   "checkbox appears on hover" there rather than breaking: a checked row already
+   shows its box, and an unchecked one in a selection the user is making is one
+   pointer-approach away. */
+.history-kind { display: grid; place-items: center; color: var(--kind-text); }
+.history-kind--code { color: var(--kind-code); }
+.history-kind--image { color: var(--kind-image); }
+.history-kind--file { color: var(--kind-file); }
+.history-kind--sheet { color: var(--kind-sheet); }
+.history-kind--link { color: var(--kind-link); }
+.history-row .history-selection { position: relative; z-index: 1; opacity: 0; transition: opacity 0.12s ease; }
+.history-row:hover .history-selection,
+.history-row:focus-within .history-selection,
+.history-row:has(input:checked) .history-selection,
+.history-list:has(input:checked) .history-selection { opacity: 1; }
+.history-row:has(.history-selection:focus-visible) .history-kind { opacity: 0; }
+/* Reduced motion is not about this fade, and the rule above still applies when it
+   is suppressed: the checkbox is present either way, only its opacity differs. */
 /* The full clip, for a row whose three clamped lines cut it off.  It overlays
    the rows below, which is why it is capped and scrollable: the card is inside
    the hovered row, so the pointer can move onto it and read to the end, and it
@@ -380,6 +435,12 @@ time { font-size: 12px; color: var(--muted); }
 .device-row .row-actions button, .peer-list--devices .row-actions button { border: 1px solid var(--line); }
 .history-selection { display: grid; place-items: center; width: 36px; height: 36px; }
 input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
+/* The kind glyph and the checkbox occupy the same square of the first column.
+   Stacked rather than side by side: the column is 40px, and two 36px targets in
+   it would either overlap on one line or push the row to two. */
+.history-leading { position: relative; display: grid; place-items: center; width: 40px; height: 36px; }
+.history-leading > * { grid-area: 1 / 1; }
+.history-kind { position: relative; z-index: 0; display: grid; place-items: center; color: var(--kind-text); }
 .select-visible { display: inline-flex; align-items: center; gap: 6px; }
 /* The row's two ends are the head's business: it already spreads its children,
    and a group that pushed itself right as well was the same edge placed twice,
@@ -1344,7 +1405,22 @@ button.danger-outline:hover:not(:disabled),
    preference.  Both leave the spinners alone: one that does not turn is how a
    hung window looks, and neither switch is asking for that. */
 .no-motion * { transition: none !important; }
-@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
+/* Reduced motion is about the transitions too.  The first version of this
+   query covered only the spinner, so a reader who asked for less movement
+   still got a switch that slid, a progress bar that eased and a chevron that
+   rotated.  The end states are unaffected -- this removes the journey. */
+@media (prefers-reduced-motion: reduce) {
+  /* The spinner keeps turning, for the reason the note above gives: one that
+     does not turn is how a hung window looks, and "less movement" is not a
+     request to make the interface look frozen. */
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+  .spinning { animation-duration: 1s !important; animation-iteration-count: infinite !important; }
+}
 /* Desktop-window scrollbars.  A web view's default is a wide light trough with
    stepper arrows — the one piece of chrome that gives away a page rendered in
    a frame.  These are thin, take the theme's line colour, and darken under the
@@ -1622,6 +1698,13 @@ button.danger-outline:hover:not(:disabled),
     --warn-soft: #3f3524;
     --state-paired: #4a8a74;
     --state-discovered: #4e5c56;
+    --selection: #2f5747;
+    --kind-text: #8fb4d0;
+    --kind-code: #c0a0dc;
+    --kind-image: #dfa96a;
+    --kind-file: #8cc09a;
+    --kind-sheet: #a8c48c;
+    --kind-link: #7cc4c4;
   }
 }
 :root[data-theme="dark"] {
@@ -1646,4 +1729,11 @@ button.danger-outline:hover:not(:disabled),
   --warn-soft: #3f3524;
   --state-paired: #4a8a74;
   --state-discovered: #4e5c56;
+  --selection: #2f5747;
+  --kind-text: #8fb4d0;
+  --kind-code: #c0a0dc;
+  --kind-image: #dfa96a;
+  --kind-file: #8cc09a;
+  --kind-sheet: #a8c48c;
+  --kind-link: #7cc4c4;
 }

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   History, Monitor, Search, RefreshCw, Pin, Trash2, ChevronLeft, ChevronRight, Eraser, FileDown, Download,
+  AlignLeft, Code2, FileImage, FileText, Sheet, FileArchive,
   ShieldCheck, ShieldOff, LockKeyhole, AlertCircle, X, LogOut, Circle, Copy, Check, Link, CloudOff, Laptop, PinOff, Star, Settings as SettingsIcon, Save, FileUp, FolderOpen, MessageCircle, Plug, PlugZap, RotateCcw, Activity, Fingerprint, Globe, SendHorizontal, Stethoscope, Wrench, Info, QrCode, ExternalLink, Wand2, Sparkles, Clock, Smartphone, Pencil,
 } from "@lucide/vue";
 import logo from "../../assets/icon.svg";
@@ -1037,6 +1038,49 @@ function routeIcon(transport: string) {
   return Plug;
 }
 
+/** A clip's kind, as a stable key the row and the chips can both switch on.
+ *
+ * The sidecar's `content_type` is a protocol label, not a category: `HTML`,
+ * `RTF`, `IMAGE_EMF` and `FILE_REMOTE` are all real values, and two of them are
+ * image formats while one is a file that lives on another machine.  Folding
+ * them here keeps that knowledge in one place instead of in a template that
+ * would have to grow a `v-if` per label.
+ *
+ * The order matters: `IMAGE_EMF` starts with `IMAGE`, and `FILE_REMOTE` starts
+ * with `FILE`, so the prefixes are tested before the exact matches they contain.
+ */
+function kindKey(item: HistoryItem) {
+  const kind = String(item.content_type || "").toUpperCase();
+  if (kind.startsWith("IMAGE")) return "image";
+  if (kind.startsWith("FILE")) return "file";
+  if (kind === "URL" || kind === "LINK") return "link";
+  if (kind === "HTML" || kind === "RTF") return "code";
+  return "text";
+}
+
+/** The glyph for a kind.  A spreadsheet and an archive are still files, so they
+ * share the file *colour* while getting the glyph that says which they are: the
+ * colour is the sort key and the glyph is the detail. */
+function kindIcon(item: HistoryItem) {
+  const kind = String(item.content_type || "").toUpperCase();
+  if (kind === "FILE_REMOTE") return FileDown;
+  switch (kindKey(item)) {
+    case "image": return FileImage;
+    case "file": return /SHEET|XLS|CSV/.test(kind) ? Sheet : FileArchive;
+    case "link": return Link;
+    case "code": return Code2;
+    default: return AlignLeft;
+  }
+}
+
+const KIND_CLASS = {
+  text: "history-kind--text",
+  code: "history-kind--code",
+  image: "history-kind--image",
+  file: "history-kind--file",
+  link: "history-kind--link",
+};
+
 /** The history page's kind chips, in the panel's own order and with its icons.
  *
  * The icons are kept here and not on the rows, where the leading column is a
@@ -1044,11 +1088,11 @@ function routeIcon(transport: string) {
  * beside it already say the kind.
  */
 const kindChips = computed(() => [
-  { id: "all", label: t("全部"), icon: "" },
-  { id: "text", label: t("文本"), icon: "📝" },
-  { id: "image", label: t("图片"), icon: "🖼" },
-  { id: "file", label: t("文件"), icon: "📄" },
-  { id: "link", label: t("链接"), icon: "🔗" },
+  { id: "all", label: t("全部"), icon: null },
+  { id: "text", label: t("文本"), icon: AlignLeft },
+  { id: "image", label: t("图片"), icon: FileImage },
+  { id: "file", label: t("文件"), icon: FileArchive },
+  { id: "link", label: t("链接"), icon: Link },
 ]);
 /** A chip's badge: the sidecar counts each kind under the current search. */
 function kindCount(id: string) {
@@ -4479,7 +4523,7 @@ async function translateText() {
               :disabled="historyBusy || kindUnavailable(chip.id)"
               :title="kindUnavailable(chip.id) ? t('该类型暂无内容') : ''"
               @click="store.setKind(chip.id)">
-              <span v-if="chip.icon" aria-hidden="true">{{ chip.icon }}</span>{{ chip.label }}<span class="chip-count">{{ kindCount(chip.id) }}</span>
+              <component :is="chip.icon" v-if="chip.icon" :size="13" aria-hidden="true" />{{ chip.label }}<span class="chip-count">{{ kindCount(chip.id) }}</span>
             </button>
             <button class="chip chip--sort" :title="t('切换历史排序（最新 / 最旧）')" :disabled="historyBusy" @click="store.toggleSort">
               {{ state.sort === "newest" ? "↓ " : "↑ " }}{{ state.sort === "newest" ? t("最新优先") : t("最旧优先") }}
@@ -4516,10 +4560,15 @@ async function translateText() {
               @contextmenu.prevent="historyMenu($event, item)"
               @mouseenter="showPreview(item)" @mouseleave="hidePreview(item)"
               @focusin="showPreview(item)" @focusout="hidePreview(item)">
-              <label class="history-selection"><input type="checkbox" :aria-label="t('选择记录 {id}', { id: item.id })"
-                :checked="state.selectedIds.includes(item.id)"
-                :disabled="historyBusy || !item.id.trim() || (!state.selectedIds.includes(item.id) && state.selectedIds.length >= 100)"
-                @change="store.select(item.id, ($event.target as HTMLInputElement).checked)" /></label>
+              <div class="history-leading">
+                <span class="history-kind" :class="KIND_CLASS[kindKey(item)]" aria-hidden="true">
+                  <component :is="kindIcon(item)" :size="18" />
+                </span>
+                <label class="history-selection"><input type="checkbox" :aria-label="t('选择记录 {id}', { id: item.id })"
+                  :checked="state.selectedIds.includes(item.id)"
+                  :disabled="historyBusy || !item.id.trim() || (!state.selectedIds.includes(item.id) && state.selectedIds.length >= 100)"
+                  @change="store.select(item.id, ($event.target as HTMLInputElement).checked)" /></label>
+              </div>
               <div class="history-content"><p>{{ previewLabel(item) }}</p>
                 <span v-if="typeLine(item)" class="note">{{ typeLine(item) }}</span>
                 <span class="history-meta">
