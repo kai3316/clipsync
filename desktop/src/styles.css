@@ -127,6 +127,10 @@
      32px in a narrow one while the list beneath it dropped to 18px.  A narrow
      window now moves this one number, and everything placed by it follows. */
   --page-gutter: 32px;
+  /* How wide a row of content may get before it stops reading as a row.  At a
+     maximised 1920 the content column is 1708px, which puts a device row's name
+     and its buttons about 900px apart with nothing between them. */
+  --content-width: 1280px;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; }
@@ -1647,3 +1651,36 @@ button.danger-outline:hover:not(:disabled),
   --state-paired: #4a8a74;
   --state-discovered: #4e5c56;
 }
+
+/* ── The reading width ────────────────────────────────────────────────────────
+   Declared at the end of the file on purpose.  The blocks below each set a gutter
+   margin of their own (`margin: 0 var(--page-gutter)` on `.device-list`,
+   `.history-list` and the rest), and a shorthand at the same specificity wins over
+   `margin-inline: auto` simply by being declared later -- which is how the first
+   attempt at this silently did nothing on six of the eight pages.
+
+   `width: 100%` as well as the ceiling, because `.content` is a column flex
+   container: an item with `auto` margins in the cross axis shrink-wraps rather than
+   stretching, so without it the device list would size itself to its widest row. */
+/* The page containers -- the flex children of `.content` that stretch -- plus the
+   row blocks whose own margins would otherwise let them run the full window. */
+.transfers-view,
+.chat-view,
+.overview-view,
+.favorites-view,
+.ai-page,
+.settings-panel,
+.device-list,
+.history-list,
+.history-filters,
+.pagination {
+  width: 100%;
+  max-width: var(--content-width);
+  /* Left, not centred.  Centring puts 364px of page on each side at a maximised 1920
+     and leaves a blank band under the header, where the title's left edge and the
+     content's no longer meet -- the alignment to the window's own chrome matters more
+     than the symmetry. */
+  margin-inline: 0 auto;
+}
+/* The bands ride the window, so they get no ceiling and no centring. */
+.toolbar, header, .error-band, .bottom-status, .notice-stack { max-width: none; margin-inline: 0; }

@@ -370,3 +370,58 @@ test("the removed-device row fits a narrow window and keeps its own hairline", a
   expect(failures).toEqual([]);
   await page.screenshot({ path: "test-results/narrow-devices-removed.png" });
 });
+
+
+/** The row pages stop stretching, which is what a maximised window showed.
+ *
+ * Nothing in this file rendered above 1280, and 1920 is where the fault is: the
+ * content column is 1708px there, so a device row's name sits in the left quarter and
+ * its buttons against the far right with ~900px of nothing between, and a note field
+ * draws a 1550px box around a four-word note.  A page that never gets that wide cannot
+ * show it, which is why every screenshot this was reviewed against looked fine.
+ */
+test("the row pages stop stretching at a maximised width", async ({ page }) => {
+  const failures = await open(page, 1920, 1040);
+  const rows: string[] = [];
+  for (const [id, label] of [
+    ["devices", T("设备", "Devices")],
+    ["settings", T("设置", "Settings")],
+    ["favorites", T("收藏库", "Favorites")],
+    ["history", T("剪贴板历史", "Clipboard History")],
+    ["transfers", T("文件传输", "File Transfer")],
+  ] as [string, string][]) {
+    await page.getByRole("button", { name: label, exact: true }).click();
+    await page.waitForTimeout(120);
+    const m = await page.evaluate(() => {
+      const content = document.querySelector(".content") as HTMLElement;
+      const header = document.querySelector("header") as HTMLElement;
+      const root = getComputedStyle(document.documentElement);
+      // The widest element that is a page container rather than a full-bleed band.
+      const bands = ["toolbar", "error-band", "bottom-status", "notice-stack"];
+      let widest = 0;
+      for (const child of [...content.children]) {
+        const cls = (child.className || "").toString();
+        if (bands.some((b) => cls.includes(b))) continue;
+        if (!(child as HTMLElement).offsetParent) continue;
+        widest = Math.max(widest, Math.round(child.getBoundingClientRect().width));
+      }
+      return {
+        contentW: Math.round(content.getBoundingClientRect().width),
+        widest,
+        ceiling: parseFloat(root.getPropertyValue("--content-width")),
+        contentLeft: Math.round(content.getBoundingClientRect().left),
+        headerLeft: Math.round(header.getBoundingClientRect().left),
+      };
+    });
+    // The window is wider than the ceiling, so the ceiling is what is being tested.
+    expect(m.contentW, id).toBeGreaterThan(m.ceiling);
+    if (m.widest > m.ceiling + 1) {
+      rows.push(`${id}: ${m.widest}px > ceiling ${m.ceiling}`);
+    }
+    // Left-aligned to the header, not centred: a centred cap leaves a blank band
+    // under the header where the two edges part company.
+    expect(Math.abs(m.contentLeft - m.headerLeft), `${id} alignment`).toBeLessThanOrEqual(2);
+  }
+  expect(rows).toEqual([]);
+  expect(failures).toEqual([]);
+});
