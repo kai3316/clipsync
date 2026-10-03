@@ -1427,7 +1427,17 @@ button.danger-outline:hover:not(:disabled),
 /* A test that ended without a measurement is the panel's failure line, in the
    panel's failure colour — not a speed of zero presented as a reading. */
 .speed-failed { color: var(--danger-text); }
-.transfer-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 240px) auto auto auto; gap: 12px; align-items: center; padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
+/* The name hugs and the progress bar takes the slack, which is the opposite of the
+   first shape of this: `minmax(0, 1fr)` on the name column meant the *name* absorbed
+   every spare pixel, so on a 958px row the bar began around the middle and its
+   percentage and cancel button sat against the far right edge with about 500px
+   between them and the filename they belong to.  The eye had to cross the row to
+   pair a control with its file.
+   `max-content` on the name would be the literal fix and is wrong for a long name:
+   it would push the bar and the buttons off the row instead of ellipsising.  So the
+   name keeps a bounded track and the bar gets the flexible one, which puts the slack
+   where there is nothing to lose by stretching. */
+.transfer-row { display: grid; grid-template-columns: minmax(0, max-content) minmax(120px, 1fr) auto auto auto; gap: 12px; align-items: center; padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
 .transfer-main { min-width: 0; display: grid; gap: 5px; overflow-wrap: anywhere; }
 .transfer-row progress { width: 100%; accent-color: var(--accent); }
 /* The history card's rows are not the running card's rows.  A running row has a
