@@ -811,7 +811,13 @@ button.danger-outline:hover:not(:disabled),
    once.  The strip is the same one the devices page and the AI page carry, so
    "pick a section along the top, the content below is what you picked" is the
    shape of every long page in the window. */
-.settings-layout { display: grid; grid-template-columns: minmax(0, 1fr); max-width: 1060px; padding: 22px 0 0; }
+/* 715, not 1060, and the number comes from the form rather than from the window: a row
+   is a 168px label, a 22px gap and a field column, and every field is capped at 340px of
+   it.  At 1060 the card was twice the width of anything it held -- a row measured 1014px
+   for 530px of content -- and the save bar was the plainest case of it: a 111px button
+   alone in a 1060px bar, 87% empty.  At 715 the field column is 525px, which is the 340px
+   field, its hint, and nothing that is only ever blank. */
+.settings-layout { display: grid; grid-template-columns: minmax(0, 1fr); max-width: 715px; padding: 22px 0 0; }
 /* The settings page's strip holds groups of tabs rather than one run of them,
    so it is the only strip with a second level in it.  The upper row is the
    groups, spaced out so four of them read as four choices rather than one

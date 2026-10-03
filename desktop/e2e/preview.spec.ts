@@ -427,45 +427,49 @@ test("the row pages stop stretching at a maximised width", async ({ page }) => {
 });
 
 
-/** A device row's stacked blocks share one left edge.
+/** The settings card is the size of the form in it, not the size of the window.
  *
- * They are placed explicitly because the row is a three-column grid -- icon, content,
- * actions -- and anything left to auto-placement lands in the *first* column.  That is
- * what happened to the "sync clipboard" checkbox: its left edge was the icon's, 89px
- * left of the name and the note field above it, so the row read as two ragged columns
- * with a checkbox floating under the glyph.
- *
- * Asserted as alignment rather than as coordinates, and at three window widths,
- * because the narrow layout places the same blocks in a single column.
+ * It was 1060px wide holding 530px of form: a row measured 1014px for its 168px label,
+ * 22px gap and 340px field, and the save bar was the plainest case -- a 111px button
+ * alone in a 1060px bar, 87% of it empty.  This is the "row with one small component"
+ * shape, and it only shows on a window wider than the 1280 the suite rendered at.
  */
-test("a device row's blocks share one left edge", async ({ page }) => {
-  const misaligned: string[] = [];
-  for (const [w, h] of [[1920, 1040], [1280, 900], [390, 844]] as [number, number][]) {
-    const failures = await open(page, w, h);
-    await page.getByRole("button", { name: T("设备", "Devices"), exact: true }).click();
-    await expect(page.locator(".device-row").first()).toBeVisible();
-    const edges = await page.evaluate(() => {
-      const row = document.querySelector(".device-row") as HTMLElement;
-      const left = (sel: string) => {
-        const node = row.querySelector(sel) as HTMLElement | null;
-        return node ? Math.round(node.getBoundingClientRect().left) : null;
-      };
-      return {
-        identity: left(".device-identity"),
-        channels: left(".device-channels"),
-        sync: left(".device-sync"),
-      };
-    });
-    const known = Object.entries(edges).filter(([, v]) => v !== null) as [string, number][];
-    if (known.length > 1) {
-      const first = known[0][1];
-      for (const [what, x] of known) {
-        if (Math.abs(x - first) > 1) {
-          misaligned.push(`${w}px: ${what} at ${x}, expected ${first}`);
-        }
-      }
-    }
-    expect(failures).toEqual([]);
-  }
-  expect(misaligned).toEqual([]);
+test("the settings card holds its form rather than the window", async ({ page }) => {
+  const failures = await open(page, 1920, 1040);
+  await page.getByRole("button", { name: T("设置", "Settings"), exact: true }).click();
+  await page.waitForTimeout(150);
+  const m = await page.evaluate(() => {
+    const box = (sel: string) => {
+      const n = document.querySelector(sel) as HTMLElement | null;
+      if (!n) return null;
+      const r = n.getBoundingClientRect();
+      return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) };
+    };
+    const save = document.querySelector(".settings-save") as HTMLElement | null;
+    const button = save?.querySelector("button") as HTMLElement | null;
+    const row = document.querySelector(".setting") as HTMLElement | null;
+    const input = row?.querySelector(".setting-control > input") as HTMLElement | null;
+    const content = document.querySelector(".content") as HTMLElement;
+    return {
+      contentWidth: Math.round(content.getBoundingClientRect().width),
+      card: box(".settings-section"),
+      save: box(".settings-save"),
+      buttonWidth: button ? Math.round(button.getBoundingClientRect().width) : 0,
+      rowWidth: row ? Math.round(row.getBoundingClientRect().width) : 0,
+      inputRight: input ? Math.round(input.getBoundingClientRect().right) : 0,
+      rowLeft: row ? Math.round(row.getBoundingClientRect().left) : 0,
+    };
+  });
+  // The window is wider than the card, so the card is a choice and not a constraint.
+  expect(m.contentWidth).toBeGreaterThan(1400);
+  expect(m.card).not.toBeNull();
+  // The card is not more than about half again the content of one of its rows.
+  const used = m.inputRight - m.rowLeft;
+  expect(used / m.rowWidth, `a row uses ${Math.round((used / m.rowWidth) * 100)}% of itself`)
+    .toBeGreaterThan(0.6);
+  // And the save bar is not a wide box around one button.
+  expect(m.buttonWidth / m.save!.width, "the save bar is mostly empty")
+    .toBeGreaterThan(0.1);
+  expect(m.save!.width).toBeLessThanOrEqual(m.card!.width + 1);
+  expect(failures).toEqual([]);
 });
