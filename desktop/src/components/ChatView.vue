@@ -646,7 +646,14 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
   .chat-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   /* The rail on top, and taller than it was: it carries the device list too,
      and a 220px window onto both sections shows the devices and nothing of the
-     conversations they were meant to introduce. */
-  .chat-sessions { border-right: 0; border-bottom: 1px solid var(--line); max-height: 46vh; }
+     conversations they were meant to introduce.
+     
+     38vh rather than 46, measured: at 390x844 the rail is 388px of a 634px
+     content column, which leaves the conversation 255px for its heading, its
+     invite band and its composer -- and the message list came out **95px**,
+     about two lines of a conversation.  The rail is a list you scroll and pick
+     from; the conversation is the thing you came to read.  38vh gives the list
+     155px, which is four or five messages, and still shows both sections. */
+  .chat-sessions { border-right: 0; border-bottom: 1px solid var(--line); max-height: 38vh; }
 }
 </style>

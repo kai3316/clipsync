@@ -581,3 +581,34 @@ test("the overview keeps its activity above the fold", async ({ page }) => {
   expect(Math.abs(layout.heights[0] - layout.heights[1])).toBeLessThan(340);
   expect(failures).toEqual([]);
 });
+
+
+/** The conversation has to be readable in the narrow window, not merely reachable.
+ *
+ * The existing narrow checks are about the composer and the last message being in
+ * view, and a message list 95px tall satisfies all of them -- so a rail taking 46vh
+ * of a 634px column left about two lines of conversation and nothing noticed.  This
+ * asserts the list is a usable share of the pane rather than a sliver.
+ */
+test("the narrow chat window keeps a readable conversation", async ({ page }) => {
+  const failures = await open(page, 390, 844);
+  await page.getByRole("button", { name: T("附近聊天", "Nearby Chat"), exact: true }).click();
+  await expect(page.locator(".chat-messages")).toBeVisible();
+  const share = await page.evaluate(() => {
+    const list = document.querySelector(".chat-messages") as HTMLElement;
+    const pane = document.querySelector(".chat-conversation") as HTMLElement;
+    const rail = document.querySelector(".chat-sessions") as HTMLElement;
+    return {
+      list: Math.round(list.clientHeight),
+      pane: Math.round(pane.clientHeight),
+      rail: Math.round(rail.clientHeight),
+      // A row is about 34px, so this is how many fit.
+      rows: Math.round(list.clientHeight / 34),
+    };
+  });
+  // At least four messages' worth, against the two it was.
+  expect(share.rows, `only ${share.rows} rows in ${share.list}px`).toBeGreaterThanOrEqual(4);
+  // And the list is a real share of the pane it sits in, not the leftover.
+  expect(share.list / share.pane).toBeGreaterThan(0.4);
+  expect(failures).toEqual([]);
+});
