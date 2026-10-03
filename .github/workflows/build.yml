@@ -81,30 +81,43 @@ jobs:
 
           What is new in this release:
 
-          - **Upgrading both devices matters now, and this is the release where
-            that is true.**  A device that has already been paired must prove it
-            holds the key behind the certificate it presents.  A device that cannot
-            — because it is running a build older than 1.0.38 — is refused, and both
-            ends say so: the device that was refused shows "«name» could not prove
-            its identity — pair again with it from the Devices page", and the device
-            doing the refusing offers the usual fingerprint prompt.  Re-pairing (or
-            updating the older device) restores the connection.  This is a real
-            interruption for anyone whose other machine is on an older build, and it
-            is deliberate: the check that used to stand in for it looked at the
-            certificate a device *named*, which a copy of that certificate satisfied.
+          - **The overview fits its window.**  It was five full-width bands, and the
+            recent-activity list — the reason to open the page at all — sat entirely
+            below the fold at the default window size.  It is two columns now: this
+            machine, the sync switches and the connected devices down the left, and
+            the counters, the network map and the activity list down the right.  At
+            1280×900 that is 163px of scrolling instead of 266, and a maximised window
+            shows all of it.
 
-          - **The clipboard history now shows what each clip is at a glance.**  Every
-            row leads with its kind — text, rich text, image, file, link — as a
-            coloured glyph, and the filter chips use the same glyphs, so a chip and
-            the rows it filters finally look like the same thing.  Pressing the
-            pointer on a row turns its glyph into the selection box, so selecting
-            still works exactly as before.
+          - **Wide windows stop stretching.**  On a large monitor the pages ran edge
+            to edge, so a device row put its name and state in the left quarter and
+            its buttons against the far right with about 900px of nothing between: the
+            row stopped reading as a row.  Every page now has a reading width and
+            centres within it, while the toolbars and status bars still span the
+            window.  This fixed a bug in itself — the first attempt was overridden by
+            later rules and did nothing on six of the eight pages.
 
-          - Smaller fixes: selected text is no longer the browser's default blue;
-            the toolbar draws a hairline so a row scrolling under it reads as a
-            scroll position rather than a clipped row; and the system's
-            "reduce motion" setting, which previously only stopped the spinner, now
-            covers the transitions too.
+          - **The settings page is the size of its form.**  Its card was 1060px wide
+            holding 530px of form, so the fields sat in the left third of a card with
+            half of every row empty.  It is 720px now, which is room for the widest
+            field and its hint.
+
+          - **A transfer's progress bar sits beside its filename.**  The filename used
+            to absorb the whole spare width, so the bar began mid-row and its
+            percentage and cancel button were about 500px from the file they belonged
+            to.
+
+          - **The type scale is written down.**  Every size in the interface now comes
+            from one named set, and one role that had two sizes by accident (the ring's
+            number was 21px where a stat's was 22px) is one size.  Nothing looks
+            different by design.
+
+          Still true from 1.0.40: a device you have already paired with must prove it
+          holds the key behind the certificate it presents, and a device running a
+          build older than 1.0.38 is refused with a message on both ends — update it,
+          or pair again from the Devices page.  Also from 1.0.40: each history row
+          leads with its clip's kind as a coloured glyph, and the filter chips use the
+          same ones.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
