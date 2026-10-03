@@ -416,3 +416,66 @@ test("the removed-device row fits a narrow window and keeps its own hairline", a
   expect(failures).toEqual([]);
   await page.screenshot({ path: "test-results/narrow-devices-removed.png" });
 });
+
+
+/** The reading width, which nothing asserted and which only shows up wide.
+ *
+ * Every screenshot above is taken at 1280, where the content column is already
+ * narrower than the ceiling and the ceiling therefore does nothing.  The bug it
+ * fixes only exists at 1800 and up: with no ceiling, a device row put its name and
+ * state in the left quarter and its buttons against the far right edge with about
+ * 900px of nothing between, so the row stopped reading as a row.
+ *
+ * Asserted at 1800 rather than 1280 for exactly that reason, and asserted as a
+ * *relationship* rather than as a pixel count: the row must be no wider than the
+ * ceiling, it must be centred in the content column, and the toolbar above it must
+ * still reach the window's edge.  That last one is the mistake the first attempt
+ * made -- capping the full-bleed bands left a bare strip of page colour beside
+ * them -- so it is the assertion most worth having.
+ */
+test("the row pages stop growing at a reading width", async ({ page }) => {
+  const failures = await open(page, 1800, 1000);
+  for (const label of [T("设备", "Devices"), T("文件传输", "File Transfer"), T("收藏库", "Favorites")]) {
+    await page.getByRole("button", { name: label, exact: true }).click();
+    await page.waitForTimeout(120);
+    const geometry = await page.evaluate(() => {
+      const ceiling = parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue("--content-width"),
+      );
+      const content = document.querySelector(".content")!.getBoundingClientRect();
+      // The capped block, whichever of the row pages this is.  Named rather than
+      // guessed at with a bare `!`: a selector that matches nothing should fail
+      // with the page it was looking at, not with "cannot read properties of null".
+      const capped = document.querySelector(
+        ".device-list, .transfers-view .card, .favorites-view, .history-list",
+      );
+      if (!capped) throw new Error("no capped block on this page: " + location.hash);
+      const row = capped.getBoundingClientRect();
+      // The sticky band, when the page has one.  Settings does not, so this is
+      // read as "the widest band present" rather than assumed to exist.
+      const band = document.querySelector(".toolbar, header");
+      const toolbar = band!.getBoundingClientRect();
+      return {
+        ceiling,
+        rowWidth: Math.round(row.width),
+        contentWidth: Math.round(content.width),
+        // Distance from each edge of the content column to the row.
+        leftGap: Math.round(row.left - content.left),
+        rightGap: Math.round(content.right - row.right),
+        toolbarWidth: Math.round(toolbar.width),
+        window: window.innerWidth,
+      };
+    });
+    // The ceiling holds, and it is what the row is sized to when it applies.
+    expect(geometry.ceiling, label).toBeGreaterThan(0);
+    expect(geometry.rowWidth, label).toBeLessThanOrEqual(geometry.ceiling + 1);
+    // Wide enough that the ceiling is actually doing something.
+    expect(geometry.contentWidth, label).toBeGreaterThan(geometry.ceiling);
+    // Centred, not pinned left with the slack on one side.
+    expect(Math.abs(geometry.leftGap - geometry.rightGap), label).toBeLessThanOrEqual(2);
+    // And the bands still reach the window's edge, which is what the first
+    // attempt at this got wrong.
+    expect(geometry.toolbarWidth, label).toBeGreaterThan(geometry.ceiling);
+  }
+  expect(failures).toEqual([]);
+});

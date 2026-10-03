@@ -275,8 +275,14 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .ai-page,
 .settings-panel {
   max-width: var(--content-width);
-  margin-inline: auto;
 }
+/* The centring is declared at the end of this file, not here, and that is not
+   tidiness: the blocks above each set their own gutter margins
+   (`margin: 0 var(--page-gutter)` on `.device-list`, `.history-list` and the
+   rest), several hundred lines below this rule and at the same specificity, so a
+   `margin-inline: auto` written here lost and the capped column sat pinned to the
+   left with all the slack on the right -- 32px against 316px, measured.  See the
+   note at the end of the file. */
 /* The bands, named so the intent survives: these reach the window's edge. */
 .toolbar, header, .error-band, .bottom-status, .notice-stack { max-width: none; }
 header { display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-shrink: 0; padding: 26px var(--page-gutter) 20px; border-bottom: 1px solid var(--line); }
@@ -1514,7 +1520,14 @@ button.danger-outline:hover:not(:disabled),
    different heights and whose bottom edges never lined up — the raggedness a
    reader calls 乱 without being able to name it.  Equal columns and one shared
    height put every card title on its row's own line. */
-.overview-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--card-gap); align-items: stretch; }
+/* `start` rather than `stretch`, and the difference is 88px of nothing.
+   With `stretch` the shorter card of the pair was stretched to the taller one's
+   height, so "此设备" — five lines of facts — was padded out to "快速控制"'s
+   height and the blank space read as a missing section rather than as a short
+   card.  Sized to its own content, the row is as tall as the taller card and the
+   shorter one simply ends: the uneven bottoms are honest about the uneven content
+   instead of a border drawn around empty space. */
+.overview-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--card-gap); align-items: start; }
 /* The overview's cards are the window's cards — `.card` in the template supplies
    the fill, the border, the radius and the padding, and `.card > h2` (or
    `.card-head` where the title shares its line with a way out of the card) the
@@ -1776,3 +1789,37 @@ button.danger-outline:hover:not(:disabled),
   --kind-sheet: #a8c48c;
   --kind-link: #7cc4c4;
 }
+
+/* ── The reading column, centred ─────────────────────────────────────────────
+   Last in the file on purpose.  The blocks this caps each declare their own
+   gutter margins further up (`margin: 0 var(--page-gutter)`), and a shorthand
+   margin at the same specificity wins over `margin-inline: auto` simply by being
+   declared later.  So the centring has to come after all of them, and it is kept
+   as one list here rather than repeated as `margin-inline` on each of the eight
+   rules above -- which is what the first attempt did, and it silently did
+   nothing on six of them.
+
+   `auto` on both sides only has an effect once the block has hit the ceiling;
+   below it the two auto margins resolve to 0 and the gutter margins above are
+   what position it, so a narrow window is unchanged. */
+.history-list,
+.device-list,
+.history-filters,
+.history-list + .pagination,
+.device-list + .pagination,
+.overview-view,
+.favorites-view,
+.transfers-view > *:not(.toolbar):not(.error-band),
+.ai-page,
+.settings-panel {
+  /* `width: 100%` as well as the ceiling, and it is load-bearing: `.content` is a
+     column flex container, and an item with `auto` margins in the cross axis does
+     not stretch -- it shrink-wraps.  Without this the device list came out 663px
+     wide inside a 1588px column, centred, which looks deliberate and is not: the
+     list was sizing itself to its widest row's content instead of using the room
+     the ceiling allows. */
+  width: 100%;
+  margin-inline: auto;
+}
+/* The bands ride the window, so they get no centring and no ceiling. */
+.toolbar, header, .error-band, .bottom-status, .notice-stack { margin-inline: 0; }
