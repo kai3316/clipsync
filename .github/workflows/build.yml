@@ -81,28 +81,30 @@ jobs:
 
           What is new in this release:
 
-          - **The proof of key possession is now enforced, not just reported.**
-            A certificate is public — it travels in the clear, and any peer that has
-            ever connected to you has seen it.  What is private is the key behind
-            it.  Each device now signs a value chosen fresh for the connection and
-            sent to nobody else, and a device that claims a certificate it cannot
-            sign for is refused before anything downstream believes its frame.
+          - **Upgrading both devices matters now, and this is the release where
+            that is true.**  A device that has already been paired must prove it
+            holds the key behind the certificate it presents.  A device that cannot
+            — because it is running a build older than 1.0.38 — is refused, and both
+            ends say so: the device that was refused shows "«name» could not prove
+            its identity — pair again with it from the Devices page", and the device
+            doing the refusing offers the usual fingerprint prompt.  Re-pairing (or
+            updating the older device) restores the connection.  This is a real
+            interruption for anyone whose other machine is on an older build, and it
+            is deliberate: the check that used to stand in for it looked at the
+            certificate a device *named*, which a copy of that certificate satisfied.
 
-            The part that needed care is *which* peers to refuse.  1.0.38 checked
-            the signature but refused nothing, because a peer running a build from
-            before this feature sends no signature either, and the two are
-            indistinguishable — so refusing both would have taken every existing
-            pairing down the moment one side upgraded.  Frames now carry the
-            handshake version that wrote them.  A peer that claims this version has
-            promised a signature, and a claim it cannot back is refused; a peer
-            that does not claim it is an older build and keeps working, held to the
-            pinned certificate as before.  That distinction is what makes the proof
-            enforceable without breaking anyone's upgrade.
+          - **The clipboard history now shows what each clip is at a glance.**  Every
+            row leads with its kind — text, rich text, image, file, link — as a
+            coloured glyph, and the filter chips use the same glyphs, so a chip and
+            the rows it filters finally look like the same thing.  Pressing the
+            pointer on a row turns its glyph into the selection box, so selecting
+            still works exactly as before.
 
-          - **What this does not change.**  Your paired devices keep working, and a
-            device you have not paired with is still free to reach you: there is no
-            certificate to copy before the first pairing, and the pairing code is
-            what establishes trust at that point.
+          - Smaller fixes: selected text is no longer the browser's default blue;
+            the toolbar draws a hairline so a row scrolling under it reads as a
+            scroll position rather than a clipped row; and the system's
+            "reduce motion" setting, which previously only stopped the spinner, now
+            covers the transitions too.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
@@ -115,9 +117,9 @@ jobs:
             find nothing to download — that is expected, not a broken download.
             Install the desktop application from the assets below instead.
 
-          1.0.36 through 1.0.38 carried: ARM64 Linux builds again, a per-device
+          1.0.36 through 1.0.39 carried: ARM64 Linux builds again, a per-device
           switch for what your clipboard is shared with, a warning on Linux when
-          the system cannot read the clipboard at all, and the proof exchange
+          the system cannot read the clipboard at all, and the identity proof
           itself.
 
           1.0.7 published a macOS installer that cannot start at all, and its
