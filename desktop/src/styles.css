@@ -492,7 +492,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 /* The second line of the row: the chips, the note and a pairing's own controls.
    They start where the name starts and run to the row's right edge, so one
    vertical line holds the identity, the chips and the note field together. */
-.device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2 / -1; }
+.device-channels, .device-note, .device-sync, .device-full, .device-row > .pairing-controls { grid-column: 2 / -1; }
 .device-channels { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 /* One chip is one answer about one route.  A glyph and a word carry it — the
    colour only repeats what the word already says — because the two routes are
@@ -1541,7 +1541,7 @@ button.danger-outline:hover:not(:disabled),
      letter a line and a UUID down the page in three-character pieces. */
   .device-row { grid-template-columns: auto minmax(0, 1fr); }
   .device-row .row-actions { grid-row: 3; grid-column: 2; justify-self: start; }
-  .device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2; }
+  .device-channels, .device-note, .device-sync, .device-full, .device-row > .pairing-controls { grid-column: 2; }
   .pagination { padding: 14px var(--page-gutter); }
   .bottom-status { flex-wrap: wrap; }
   .bottom-status span:first-of-type { margin-left: 0; width: 100%; }

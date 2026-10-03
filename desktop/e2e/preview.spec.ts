@@ -425,3 +425,47 @@ test("the row pages stop stretching at a maximised width", async ({ page }) => {
   expect(rows).toEqual([]);
   expect(failures).toEqual([]);
 });
+
+
+/** A device row's stacked blocks share one left edge.
+ *
+ * They are placed explicitly because the row is a three-column grid -- icon, content,
+ * actions -- and anything left to auto-placement lands in the *first* column.  That is
+ * what happened to the "sync clipboard" checkbox: its left edge was the icon's, 89px
+ * left of the name and the note field above it, so the row read as two ragged columns
+ * with a checkbox floating under the glyph.
+ *
+ * Asserted as alignment rather than as coordinates, and at three window widths,
+ * because the narrow layout places the same blocks in a single column.
+ */
+test("a device row's blocks share one left edge", async ({ page }) => {
+  const misaligned: string[] = [];
+  for (const [w, h] of [[1920, 1040], [1280, 900], [390, 844]] as [number, number][]) {
+    const failures = await open(page, w, h);
+    await page.getByRole("button", { name: T("设备", "Devices"), exact: true }).click();
+    await expect(page.locator(".device-row").first()).toBeVisible();
+    const edges = await page.evaluate(() => {
+      const row = document.querySelector(".device-row") as HTMLElement;
+      const left = (sel: string) => {
+        const node = row.querySelector(sel) as HTMLElement | null;
+        return node ? Math.round(node.getBoundingClientRect().left) : null;
+      };
+      return {
+        identity: left(".device-identity"),
+        channels: left(".device-channels"),
+        sync: left(".device-sync"),
+      };
+    });
+    const known = Object.entries(edges).filter(([, v]) => v !== null) as [string, number][];
+    if (known.length > 1) {
+      const first = known[0][1];
+      for (const [what, x] of known) {
+        if (Math.abs(x - first) > 1) {
+          misaligned.push(`${w}px: ${what} at ${x}, expected ${first}`);
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+  }
+  expect(misaligned).toEqual([]);
+});
