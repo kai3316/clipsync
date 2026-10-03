@@ -81,6 +81,13 @@ jobs:
 
           What is new in this release:
 
+          - **The narrow window's chat is readable again.**  In a window narrower than
+            700px the conversation list took 46% of the height for itself, which left
+            the messages about **two lines** tall — the page knew it scrolled and that
+            the newest message was reachable, which is all its tests asked, and two
+            lines is technically both.  38% gives the messages four or five lines and
+            still shows the device list and the conversations above them.
+
           - **The overview fits its window.**  It was five full-width bands, and the
             recent-activity list — the reason to open the page at all — sat entirely
             below the fold at the default window size.  It is two columns now: this
@@ -99,25 +106,21 @@ jobs:
 
           - **The settings page is the size of its form.**  Its card was 1060px wide
             holding 530px of form, so the fields sat in the left third of a card with
-            half of every row empty.  It is 720px now, which is room for the widest
-            field and its hint.
+            half of every row empty.  It is 720px now.
 
-          - **A transfer's progress bar sits beside its filename.**  The filename used
-            to absorb the whole spare width, so the bar began mid-row and its
-            percentage and cancel button were about 500px from the file they belonged
-            to.
+          - **A transfer's progress bar sits beside its filename**, rather than
+            beginning mid-row with its percentage and cancel button about 500px from
+            the file they belonged to.
 
-          - **The type scale is written down.**  Every size in the interface now comes
-            from one named set, and one role that had two sizes by accident (the ring's
-            number was 21px where a stat's was 22px) is one size.  Nothing looks
-            different by design.
+          - **The type scale is written down.**  Every size in the interface comes from
+            one named set, and one role that had two sizes by accident is one size.
+            Nothing looks different by design.
 
           Still true from 1.0.40: a device you have already paired with must prove it
           holds the key behind the certificate it presents, and a device running a
           build older than 1.0.38 is refused with a message on both ends — update it,
           or pair again from the Devices page.  Also from 1.0.40: each history row
-          leads with its clip's kind as a coloured glyph, and the filter chips use the
-          same ones.
+          leads with its clip's kind as a coloured glyph.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
