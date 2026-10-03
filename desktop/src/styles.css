@@ -382,7 +382,23 @@ time { font-size: 12px; color: var(--muted); }
    are inert for them and only the gap and the borders are what the two share. */
 .device-row .row-actions, .peer-list--devices .row-actions { grid-row: 1; grid-column: 3; justify-self: end; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
 .device-row .row-actions button, .peer-list--devices .row-actions button { border: 1px solid var(--line); }
-.history-selection { display: grid; place-items: center; width: 36px; height: 36px; }
+/* The selection box belongs against the clip's first line, not against the row's
+   middle.  `.history-row` is `align-items: center`, which is right for the timestamp
+   and the action buttons -- they are about the row -- but it left the checkbox centred
+   in a row whose text starts at the top: on a one-line clip that is 38px below the
+   text's top, and on the three-line HTML clip it was 60px below the text it selects.
+   `align-self` takes this one cell out of the row's alignment without touching the two
+   that should keep it. */
+.history-selection {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  align-self: start;
+  /* Half the box's own height less half a line, so the box's centre lands on the
+     first line's centre rather than on its top edge. */
+  margin-top: -4px;
+}
 input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
 .select-visible { display: inline-flex; align-items: center; gap: 6px; }
 /* The row's two ends are the head's business: it already spreads its children,
@@ -492,7 +508,13 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 /* The second line of the row: the chips, the note and a pairing's own controls.
    They start where the name starts and run to the row's right edge, so one
    vertical line holds the identity, the chips and the note field together. */
-.device-channels, .device-note, .device-sync, .device-full, .device-row > .pairing-controls { grid-column: 2 / -1; }
+.device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2 / -1; }
+/* The sync switch rides the chip's line, against the row's right edge.  It used to be the
+   last block in the stack, so on a paired device it sat below the note field at the bottom
+   of the row -- four lines from the device it applies to -- while the state chip that says
+   whether that device is being synced sat at the top.  Those two are one statement. */
+.device-channels { grid-column: 2; }
+.device-sync { grid-column: 3; grid-row: 2; align-self: center; justify-self: end; }
 .device-channels { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 /* One chip is one answer about one route.  A glyph and a word carry it — the
    colour only repeats what the word already says — because the two routes are
@@ -1547,7 +1569,8 @@ button.danger-outline:hover:not(:disabled),
      letter a line and a UUID down the page in three-character pieces. */
   .device-row { grid-template-columns: auto minmax(0, 1fr); }
   .device-row .row-actions { grid-row: 3; grid-column: 2; justify-self: start; }
-  .device-channels, .device-note, .device-sync, .device-full, .device-row > .pairing-controls { grid-column: 2; }
+  .device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2; }
+  .device-sync { grid-column: 2; grid-row: auto; justify-self: start; }
   .pagination { padding: 14px var(--page-gutter); }
   .bottom-status { flex-wrap: wrap; }
   .bottom-status span:first-of-type { margin-left: 0; width: 100%; }

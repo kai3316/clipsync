@@ -473,3 +473,75 @@ test("the settings card holds its form rather than the window", async ({ page })
   expect(m.save!.width).toBeLessThanOrEqual(m.card!.width + 1);
   expect(failures).toEqual([]);
 });
+
+
+/** A history row's selection box sits on its clip's first line, not in the row's middle.
+ *
+ * `.history-row` is `align-items: center` -- right for the timestamp and the buttons,
+ * which are about the row -- and that put the checkbox at the row's centre while the
+ * text started at the top.  On a one-line clip the two are 5px apart and it looks fine;
+ * on the three-line HTML clip the box was **60px below the text it selects**.
+ */
+test("a history row's checkbox sits on its clip", async ({ page }) => {
+  const failures = await open(page, 1280, 900);
+  await page.getByRole("button", { name: T("剪贴板历史", "Clipboard History"), exact: true }).click();
+  await expect(page.locator(".history-row").first()).toBeVisible();
+  const drift = await page.evaluate(() => {
+    const out: number[] = [];
+    for (const row of [...document.querySelectorAll(".history-row")]) {
+      const text = row.querySelector(".history-content p") as HTMLElement | null;
+      const box = row.querySelector('input[type="checkbox"]') as HTMLElement | null;
+      if (!text || !box) continue;
+      const t = text.getBoundingClientRect();
+      const b = box.getBoundingClientRect();
+      // How far the box's centre is from the first line's centre.
+      const firstLine = t.top + Math.min(22, t.height) / 2;
+      out.push(Math.round(Math.abs(b.top + b.height / 2 - firstLine)));
+    }
+    return out;
+  });
+  expect(drift.length).toBeGreaterThan(3);
+  // Two lines of text tall, the fault; a few pixels is a baseline.
+  expect(Math.max(...drift), `a checkbox is ${Math.max(...drift)}px off its line`).toBeLessThan(12);
+  expect(failures).toEqual([]);
+});
+
+
+/** The device row's sync switch rides the state chip's line, not the row's bottom.
+ *
+ * It was the last block in the row's stack, so on a paired device it sat below the note
+ * field -- four lines from the device it applies to -- while the chip saying whether that
+ * device was being synced sat at the top.  The two are one statement about one device.
+ *
+ * Asserted as "on the same line as the chip, and against the same right edge as the row's
+ * buttons", which is what makes it read as part of that line rather than as another row.
+ */
+test("the device sync switch sits with the state it belongs to", async ({ page }) => {
+  const failures = await open(page, 1280, 900);
+  await page.getByRole("button", { name: T("设备", "Devices"), exact: true }).click();
+  await expect(page.locator(".device-row").first()).toBeVisible();
+  const where = await page.evaluate(() => {
+    const row = document.querySelector(".device-row") as HTMLElement;
+    const box = (sel: string) => {
+      const n = row.querySelector(sel) as HTMLElement | null;
+      return n ? n.getBoundingClientRect() : null;
+    };
+    const chips = box(".device-channels");
+    const sync = box(".device-sync");
+    const actions = box(".row-actions");
+    const note = box(".device-note");
+    if (!chips || !sync) return null;
+    return {
+      sameLine: Math.abs(sync.top - chips.top) < 30,
+      // The switch's right edge against the buttons', which is the row's own right edge.
+      rightAligned: actions ? Math.abs(sync.right - actions.right) < 20 : true,
+      // And it is no longer below the note field.
+      aboveNote: note ? sync.bottom <= note.top + 2 : true,
+    };
+  });
+  expect(where).not.toBeNull();
+  expect(where!.sameLine, "the switch is not on the chip's line").toBe(true);
+  expect(where!.rightAligned, "the switch is not against the row's right edge").toBe(true);
+  expect(where!.aboveNote, "the switch is still below the note field").toBe(true);
+  expect(failures).toEqual([]);
+});
