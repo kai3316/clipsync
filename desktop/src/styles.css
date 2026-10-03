@@ -142,6 +142,11 @@
      32px in a narrow one while the list beneath it dropped to 18px.  A narrow
      window now moves this one number, and everything placed by it follows. */
   --page-gutter: 32px;
+  /* How wide the reading column is allowed to get.  Chosen against the pages
+     that already had a ceiling: the settings form caps at 1060px and looks right
+     there, and a row page needs room for a name, its metadata and its actions on
+     one line, which is why this is a little wider. */
+  --content-width: 1240px;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; }
@@ -245,6 +250,35 @@ nav .nav-count { margin-left: auto; background: var(--accent-soft); color: var(-
 main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 /* Everything above and below this scrolls the window; this scrolls the page. */
 .content { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+/* A ceiling on the reading width, and the one layout value that was missing.
+   The settings page had one (1060px) and the row-based pages had none, so at
+   1800px wide a device row put its name, id and state chip in the left quarter
+   and its six buttons against the far right edge with ~900px of nothing between:
+   the row did not read as a row, and the eye had to travel the whole window to
+   pair an action with the thing it acts on.  A clipboard row and a transfer row
+   have the same problem for the same reason.
+
+   Applied to the content blocks and *not* to `.content > *`, which was the first
+   shape of this and wrong: the toolbar, the error band and the bottom status bar
+   are full-bleed by design -- they carry a background and a border that have to
+   reach the window's edge -- and capping them left a bare strip of page colour
+   beside them that read as a rendering fault.  Everything that is a *column* of
+   content is capped; everything that is a *band* across the page is not. */
+.history-list,
+.device-list,
+.history-filters,
+.history-list + .pagination,
+.device-list + .pagination,
+.overview-view,
+.favorites-view,
+.transfers-view > *:not(.toolbar):not(.error-band),
+.ai-page,
+.settings-panel {
+  max-width: var(--content-width);
+  margin-inline: auto;
+}
+/* The bands, named so the intent survives: these reach the window's edge. */
+.toolbar, header, .error-band, .bottom-status, .notice-stack { max-width: none; }
 header { display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-shrink: 0; padding: 26px var(--page-gutter) 20px; border-bottom: 1px solid var(--line); }
 header p { margin-top: 7px; font-size: 12px; }
 .connection { display: flex; align-items: center; gap: 7px; font-size: 12px; white-space: nowrap; color: var(--muted); }
@@ -540,7 +574,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    belonging to the device below.  A grid puts the identity in a track that
    absorbs the slack and the controls at a fixed edge, so the buttons sit on the
    same vertical line down the whole list whatever the window is. */
-.device-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px var(--row-gap); padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
+.device-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px var(--row-gap); padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
 /* Rows 1 and 2, so the glyph is centred against the name and its chips rather
    than against the name alone — the note and the pairing fields start below it. */
 .device-icon { grid-area: 1 / 1 / 3 / 2; color: var(--muted); }
@@ -599,6 +633,11 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    the same right edge the controls above it do, and wears the same control
    chrome as every field elsewhere. */
 .device-note { min-width: 0; min-height: var(--control); padding: 6px 10px; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+/* A note is a short annotation, and it was stretching to the full width of
+   whatever was left of the row — 908px on the default window, which reads as a
+   form field asking for a paragraph rather than for "which desk is this".  Capped
+   at a width that fits a sentence, so the field's size says what it is for. */
+.device-row > .device-note { max-width: 420px; width: 100%; }
 /* Removed devices are kept but set apart: a rule and a heading, rather than
    more rows of the same list. */
 .archived-devices { margin-top: 26px; border-top: 1px solid var(--line); }
