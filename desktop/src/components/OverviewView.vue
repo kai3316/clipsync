@@ -384,173 +384,166 @@ const connectedNames = computed(() => (overview.value?.connected_names || []).sl
         <span v-if="overview.local_ip" class="note">{{ overview.local_ip }}:{{ overview.port }}</span>
       </div>
 
-      <div class="overview-pair">
-        <div class="overview-col">
-          <div class="overview-row">
-            <section class="overview-card card">
-              <h2>{{ t("此设备") }}</h2>
-              <div class="overview-name">
-                <Monitor :size="17" aria-hidden="true" />
-                <template v-if="!renaming">
-                  <span class="overview-name-text">{{ deviceName }}</span>
-                  <button class="icon-button icon-button--sm" :aria-label="t('编辑设备名称')" :title="t('编辑设备名称')"
-                    :disabled="busy" @click="startRename"><Pencil :size="15" /></button>
-                </template>
-                <input v-else ref="nameInput" class="overview-name-input" :aria-label="t('编辑设备名称')"
-                  :value="nameValue" maxlength="128"
-                  @input="nameValue = ($event.target as HTMLInputElement).value"
-                  @keydown.enter="saveName" @keydown.escape="cancelRename" @blur="saveName" />
-              </div>
-              <dl class="overview-facts">
-                <dt>{{ t("设备 ID") }}</dt>
-                <dd class="overview-mono overview-id">
-                  <span>{{ deviceId }}</span>
-                  <button class="icon-button icon-button--sm" :aria-label="t('复制设备 ID')"
-                    :title="t('复制设备 ID')" :disabled="!deviceId" @click="copyDeviceId">
-                    <Copy :size="13" /></button>
-                </dd>
-                <dt>{{ t("平台") }}</dt>
-                <dd>{{ overview.platform }} · v{{ overview.version }}</dd>
-              </dl>
-              <p class="overview-chips">
-                <span class="overview-chip"><span class="overview-dot"
-                  :class="stats.connected ? 'overview-dot--on' : 'overview-dot--off'" aria-hidden="true"></span>
-                  {{ t("已连接 {count} 台", { count: stats.connected }) }}</span>
-                <span class="overview-chip">{{ t("运行时间") }} {{ uptime(overview.uptime_seconds) }}</span>
-              </p>
-              <p v-if="overview.web_enabled && overview.local_ip" class="overview-address">
-                <span class="note">{{ t("本地地址") }}</span>
-                <code>{{ address }}</code>
-                <button class="overview-button" :disabled="busy" @click="copyAddress"><Copy :size="15" />{{ t("复制地址") }}</button>
-              </p>
-            </section>
-
-            <section class="overview-card card">
-              <h2>{{ t("快速控制") }}</h2>
-              <label class="overview-switch">
-                <span>{{ t("剪贴板同步") }}</span>
-                <input type="checkbox" role="switch" :aria-label="t('剪贴板同步')" :checked="syncRunning"
-                  :disabled="busy" @change="toggleSync" />
-              </label>
-              <label class="overview-switch">
-                <span>{{ t("发现") }}</span>
-                <input type="checkbox" role="switch" :aria-label="t('发现')" :checked="!!overview.discovering"
-                  :disabled="busy || !overview" @change="toggleDiscovery" />
-              </label>
-              <label class="overview-switch">
-                <span>{{ t("可见性") }}</span>
-                <input type="checkbox" role="switch" :aria-label="t('可见性')" :checked="!!overview.visible"
-                  :disabled="busy || !overview" @change="toggleVisibility" />
-              </label>
-              <label class="overview-switch">
-                <span>{{ t("远程访问") }}</span>
-                <input type="checkbox" role="switch" :aria-label="t('远程访问')" :checked="companionOn"
-                  :disabled="busy" @change="toggleCompanion" />
-              </label>
-              <p v-if="pauseLeftMs > 0" class="overview-pause">
-                <span class="note">{{ t("已暂停 · 剩余 {minutes} 分钟", { minutes: pauseLeftMinutes }) }}</span>
-                <button class="overview-button" :disabled="pauseBusy" @click="emit('resume')">{{ t("立即恢复") }}</button>
-              </p>
-              <p v-else-if="syncRunning" class="overview-pause">
-                <span class="note">{{ t("定时暂停同步") }}</span>
-                <button v-for="preset in pausePresets" :key="preset.minutes" class="overview-button"
-                  :disabled="pauseBusy" @click="emit('pause', preset.minutes)">{{ preset.label }}</button>
-              </p>
-              <p v-else class="overview-pause">
-                <button class="overview-button" :disabled="pauseBusy" @click="emit('resume')">{{ t("恢复同步") }}</button>
-              </p>
-            </section>
+      <div class="overview-row">
+        <section class="overview-card card">
+          <h2>{{ t("此设备") }}</h2>
+          <div class="overview-name">
+            <Monitor :size="17" aria-hidden="true" />
+            <template v-if="!renaming">
+              <span class="overview-name-text">{{ deviceName }}</span>
+              <button class="icon-button icon-button--sm" :aria-label="t('编辑设备名称')" :title="t('编辑设备名称')"
+                :disabled="busy" @click="startRename"><Pencil :size="15" /></button>
+            </template>
+            <input v-else ref="nameInput" class="overview-name-input" :aria-label="t('编辑设备名称')"
+              :value="nameValue" maxlength="128"
+              @input="nameValue = ($event.target as HTMLInputElement).value"
+              @keydown.enter="saveName" @keydown.escape="cancelRename" @blur="saveName" />
           </div>
+          <dl class="overview-facts">
+            <dt>{{ t("设备 ID") }}</dt>
+            <dd class="overview-mono overview-id">
+              <span>{{ deviceId }}</span>
+              <button class="icon-button icon-button--sm" :aria-label="t('复制设备 ID')"
+                :title="t('复制设备 ID')" :disabled="!deviceId" @click="copyDeviceId">
+                <Copy :size="13" /></button>
+            </dd>
+            <dt>{{ t("平台") }}</dt>
+            <dd>{{ overview.platform }} · v{{ overview.version }}</dd>
+          </dl>
+          <p class="overview-chips">
+            <span class="overview-chip"><span class="overview-dot"
+              :class="stats.connected ? 'overview-dot--on' : 'overview-dot--off'" aria-hidden="true"></span>
+              {{ t("已连接 {count} 台", { count: stats.connected }) }}</span>
+            <span class="overview-chip">{{ t("运行时间") }} {{ uptime(overview.uptime_seconds) }}</span>
+          </p>
+          <p v-if="overview.web_enabled && overview.local_ip" class="overview-address">
+            <span class="note">{{ t("本地地址") }}</span>
+            <code>{{ address }}</code>
+            <button class="overview-button" :disabled="busy" @click="copyAddress"><Copy :size="15" />{{ t("复制地址") }}</button>
+          </p>
+        </section>
 
-          <div class="overview-row">
-
-            <section class="overview-card card">
-              <h2>{{ t("已连接设备") }}<span v-if="connectedNames.length" class="badge badge--count">{{ connectedNames.length }}</span></h2>
-              <div v-if="connectedNames.length" class="overview-chips">
-                <button v-for="name in connectedNames" :key="name" class="overview-chip overview-chip--link"
-                  :title="t('设备')" @click="emit('devices')">
-                  <span class="overview-dot overview-dot--on" aria-hidden="true"></span>{{ name }}
-                </button>
-              </div>
-              <p v-else class="note">{{ t("还没有已连接的设备——复制内容并配对一台设备即可开始同步。") }}</p>
-              <div class="overview-actions">
-                <button class="overview-button" :disabled="busy" @click="emit('qr')"><QrCode :size="16" />{{ t("显示二维码") }}</button>
-                <button class="overview-button" :disabled="busy" @click="emit('send-url')"><SendHorizontal :size="16" />{{ t("发送链接到设备") }}</button>
-              </div>
-            </section>
-          </div>
-
-          <section class="overview-card card">
-            <!-- The way into the history is on the card, not on its rows.  A row
-                 used to be a link to the history page, which cost the reader a page
-                 change for the thing they most often wanted — the clip itself —
-                 and left the right-click doing nothing at all.  The row copies
-                 now, and 查看全部 is the route it gave up. -->
-            <div class="overview-card-head card-head">
-              <h2>{{ t("最近活动") }}</h2>
-              <button class="overview-button" @click="emit('history')">{{ t("查看全部") }}</button>
-            </div>
-            <ul v-if="overview.recent_items.length" class="overview-feed">
-              <li v-for="item in overview.recent_items" :key="item.id">
-                <button class="overview-feed-row" type="button" :title="t('复制到剪贴板')"
-                  @click="copyRecent(item)" @contextmenu.prevent="emit('row-menu', $event, item)">
-                  <component :is="typeIcon(item.content_type)" :size="15" aria-hidden="true" />
-                  <span class="overview-feed-text">{{ previewText(item.preview) || t("（无内容）") }}</span>
-                  <!-- The mark's box is here whether or not there is a mark in it.  A
-                       `v-if` with no `v-else` leaves no element behind, and the grid
-                       hands that column to the next child — the age — which is how
-                       the age ended up 14px wide and standing on end. -->
-                  <span class="overview-feed-mark">
-                    <Check v-if="state.copiedId === item.id" :size="13" class="overview-feed-copied" :aria-label="t('已复制')" />
-                    <Pin v-else-if="item.pinned" :size="13" :aria-label="t('已置顶')" />
-                  </span>
-                  <span class="note overview-feed-age">{{ ago(item.timestamp) }}</span>
-                </button>
-              </li>
-            </ul>
-            <p v-else class="note">{{ t("复制文本、图片和文件时，剪贴板活动将显示在这里。") }}</p>
-          </section>
-        </div>
-
-        <div class="overview-col">
-          <div class="overview-stats">
-            <article class="overview-stat">
-              <Activity :size="16" aria-hidden="true" /><strong>{{ stats.connected }}</strong>
-              <span>{{ t("已连接") }}</span><small>{{ stats.paired }} {{ t("已信任") }}</small>
-            </article>
-            <article class="overview-stat">
-              <ClipboardType :size="16" aria-hidden="true" /><strong>{{ stats.history }}</strong>
-              <span>{{ t("历史记录") }}</span><small>+{{ stats.today }} {{ t("今天") }}</small>
-            </article>
-            <article class="overview-stat">
-              <ImageIcon :size="16" aria-hidden="true" /><strong>{{ stats.images }}</strong>
-              <span>{{ t("图片") }}</span><small>{{ stats.pinned }} {{ t("已置顶") }}</small>
-            </article>
-            <article class="overview-stat">
-              <FileUp :size="16" aria-hidden="true" /><strong>{{ stats.transfers }}</strong>
-              <span>{{ t("传输") }}</span><small>{{ stats.completed }} {{ t("已完成") }}</small>
-            </article>
-
-<section class="overview-card card">
-<h2>{{ t("网络地图") }}</h2>
-<div class="overview-ring-wrap">
-<!-- The legend is the drawing's own text: it carries all three
-numbers, so the ring itself is decoration and says nothing. -->
-<div class="overview-ring" :style="ringStyle" aria-hidden="true">
-<span class="overview-ring-center">
-<strong>{{ ring.connected }}</strong><small>{{ t("已连接") }}</small>
-</span>
-</div>
-<ul class="overview-legend">
-<li><span class="overview-swatch overview-swatch--connected" aria-hidden="true"></span>{{ ring.connected }} {{ t("已连接") }}</li>
-<li><span class="overview-swatch overview-swatch--paired" aria-hidden="true"></span>{{ ring.paired }} {{ t("已配对（离线）") }}</li>
-<li><span class="overview-swatch overview-swatch--discovered" aria-hidden="true"></span>{{ ring.discovered }} {{ t("已发现") }}</li>
-</ul>
-</div>
-</section>
-          </div>
-        </div>
+        <section class="overview-card card">
+          <h2>{{ t("快速控制") }}</h2>
+          <label class="overview-switch">
+            <span>{{ t("剪贴板同步") }}</span>
+            <input type="checkbox" role="switch" :aria-label="t('剪贴板同步')" :checked="syncRunning"
+              :disabled="busy" @change="toggleSync" />
+          </label>
+          <label class="overview-switch">
+            <span>{{ t("发现") }}</span>
+            <input type="checkbox" role="switch" :aria-label="t('发现')" :checked="!!overview.discovering"
+              :disabled="busy || !overview" @change="toggleDiscovery" />
+          </label>
+          <label class="overview-switch">
+            <span>{{ t("可见性") }}</span>
+            <input type="checkbox" role="switch" :aria-label="t('可见性')" :checked="!!overview.visible"
+              :disabled="busy || !overview" @change="toggleVisibility" />
+          </label>
+          <label class="overview-switch">
+            <span>{{ t("远程访问") }}</span>
+            <input type="checkbox" role="switch" :aria-label="t('远程访问')" :checked="companionOn"
+              :disabled="busy" @change="toggleCompanion" />
+          </label>
+          <p v-if="pauseLeftMs > 0" class="overview-pause">
+            <span class="note">{{ t("已暂停 · 剩余 {minutes} 分钟", { minutes: pauseLeftMinutes }) }}</span>
+            <button class="overview-button" :disabled="pauseBusy" @click="emit('resume')">{{ t("立即恢复") }}</button>
+          </p>
+          <p v-else-if="syncRunning" class="overview-pause">
+            <span class="note">{{ t("定时暂停同步") }}</span>
+            <button v-for="preset in pausePresets" :key="preset.minutes" class="overview-button"
+              :disabled="pauseBusy" @click="emit('pause', preset.minutes)">{{ preset.label }}</button>
+          </p>
+          <p v-else class="overview-pause">
+            <button class="overview-button" :disabled="pauseBusy" @click="emit('resume')">{{ t("恢复同步") }}</button>
+          </p>
+        </section>
       </div>
+
+      <div class="overview-stats">
+        <article class="overview-stat">
+          <Activity :size="16" aria-hidden="true" /><strong>{{ stats.connected }}</strong>
+          <span>{{ t("已连接") }}</span><small>{{ stats.paired }} {{ t("已信任") }}</small>
+        </article>
+        <article class="overview-stat">
+          <ClipboardType :size="16" aria-hidden="true" /><strong>{{ stats.history }}</strong>
+          <span>{{ t("历史记录") }}</span><small>+{{ stats.today }} {{ t("今天") }}</small>
+        </article>
+        <article class="overview-stat">
+          <ImageIcon :size="16" aria-hidden="true" /><strong>{{ stats.images }}</strong>
+          <span>{{ t("图片") }}</span><small>{{ stats.pinned }} {{ t("已置顶") }}</small>
+        </article>
+        <article class="overview-stat">
+          <FileUp :size="16" aria-hidden="true" /><strong>{{ stats.transfers }}</strong>
+          <span>{{ t("传输") }}</span><small>{{ stats.completed }} {{ t("已完成") }}</small>
+        </article>
+      </div>
+
+      <div class="overview-row">
+        <section class="overview-card card">
+          <h2>{{ t("网络地图") }}</h2>
+          <div class="overview-ring-wrap">
+            <!-- The legend is the drawing's own text: it carries all three
+                 numbers, so the ring itself is decoration and says nothing. -->
+            <div class="overview-ring" :style="ringStyle" aria-hidden="true">
+              <span class="overview-ring-center">
+                <strong>{{ ring.connected }}</strong><small>{{ t("已连接") }}</small>
+              </span>
+            </div>
+            <ul class="overview-legend">
+              <li><span class="overview-swatch overview-swatch--connected" aria-hidden="true"></span>{{ ring.connected }} {{ t("已连接") }}</li>
+              <li><span class="overview-swatch overview-swatch--paired" aria-hidden="true"></span>{{ ring.paired }} {{ t("已配对（离线）") }}</li>
+              <li><span class="overview-swatch overview-swatch--discovered" aria-hidden="true"></span>{{ ring.discovered }} {{ t("已发现") }}</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="overview-card card">
+          <h2>{{ t("已连接设备") }}<span v-if="connectedNames.length" class="badge badge--count">{{ connectedNames.length }}</span></h2>
+          <div v-if="connectedNames.length" class="overview-chips">
+            <button v-for="name in connectedNames" :key="name" class="overview-chip overview-chip--link"
+              :title="t('设备')" @click="emit('devices')">
+              <span class="overview-dot overview-dot--on" aria-hidden="true"></span>{{ name }}
+            </button>
+          </div>
+          <p v-else class="note">{{ t("还没有已连接的设备——复制内容并配对一台设备即可开始同步。") }}</p>
+          <div class="overview-actions">
+            <button class="overview-button" :disabled="busy" @click="emit('qr')"><QrCode :size="16" />{{ t("显示二维码") }}</button>
+            <button class="overview-button" :disabled="busy" @click="emit('send-url')"><SendHorizontal :size="16" />{{ t("发送链接到设备") }}</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="overview-card card">
+        <!-- The way into the history is on the card, not on its rows.  A row
+             used to be a link to the history page, which cost the reader a page
+             change for the thing they most often wanted — the clip itself —
+             and left the right-click doing nothing at all.  The row copies
+             now, and 查看全部 is the route it gave up. -->
+        <div class="overview-card-head card-head">
+          <h2>{{ t("最近活动") }}</h2>
+          <button class="overview-button" @click="emit('history')">{{ t("查看全部") }}</button>
+        </div>
+        <ul v-if="overview.recent_items.length" class="overview-feed">
+          <li v-for="item in overview.recent_items" :key="item.id">
+            <button class="overview-feed-row" type="button" :title="t('复制到剪贴板')"
+              @click="copyRecent(item)" @contextmenu.prevent="emit('row-menu', $event, item)">
+              <component :is="typeIcon(item.content_type)" :size="15" aria-hidden="true" />
+              <span class="overview-feed-text">{{ previewText(item.preview) || t("（无内容）") }}</span>
+              <!-- The mark's box is here whether or not there is a mark in it.  A
+                   `v-if` with no `v-else` leaves no element behind, and the grid
+                   hands that column to the next child — the age — which is how
+                   the age ended up 14px wide and standing on end. -->
+              <span class="overview-feed-mark">
+                <Check v-if="state.copiedId === item.id" :size="13" class="overview-feed-copied" :aria-label="t('已复制')" />
+                <Pin v-else-if="item.pinned" :size="13" :aria-label="t('已置顶')" />
+              </span>
+              <span class="note overview-feed-age">{{ ago(item.timestamp) }}</span>
+            </button>
+          </li>
+        </ul>
+        <p v-else class="note">{{ t("复制文本、图片和文件时，剪贴板活动将显示在这里。") }}</p>
+      </section>
     </template>
   </section>
 </template>
