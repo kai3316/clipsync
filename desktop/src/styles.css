@@ -26,7 +26,7 @@
   font-family: var(--font-ui);
   color: #262b2c;
   background: #fff;
-  font-size: 14px;
+  font-size: var(--text-base);
   letter-spacing: 0;
   /* Surfaces, from the window down to the quietest fill: the page itself, the
      sidebar beside it, anything raised over it, a resting fill (inputs, chips,
@@ -147,6 +147,27 @@
      there, and a row page needs room for a name, its metadata and its actions on
      one line, which is why this is a little wider. */
   --content-width: 1240px;
+  /* ── The type scale ──────────────────────────────────────────────────────
+     Named rather than written where it is used, because the sizes below *are* a
+     scale and answering "is this heading the same as that one" otherwise meant
+     opening every rule that mentioned a font-size.
+
+     Four sizes carry almost all the text in the window.  The three at the top are
+     each one role -- a modal title, a page title, the product name -- and are
+     deliberately unlike their neighbours.  The rest step by one pixel, which is
+     enough: 13/12/11 are always adjacent and always differ in colour as well. */
+  --text-display: 26px;
+  --text-title: 23px;
+  --text-brand: 22px;
+  --text-stat: 22px;
+  --text-pair-code: 19px;
+  --text-section: 17px;
+  --text-pair-input: 16px;
+  --text-heading: 15px;
+  --text-base: 14px;
+  --text-body: 13px;
+  --text-quiet: 12px;
+  --text-meta: 11px;
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; }
@@ -172,8 +193,8 @@ select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent);
    the ones that did not were lists inside a card, whose margins came from
    whichever rule happened to match them first. */
 h1, h2, h3, h4, p, ul, ol, dl, fieldset { margin: 0; }
-h1 { font-size: 23px; font-weight: 650; }
-h2 { font-size: 17px; font-weight: 600; }
+h1 { font-size: var(--text-title); font-weight: 650; }
+h2 { font-size: var(--text-section); font-weight: 600; }
 /* The window's third heading level, and the only one it has: a part of a card, a
    group inside a dialog.  It needs a rule of its own for the same reason `h3`'s
    margins did — the browser's own is `1.17em`, which inside this 14px page is
@@ -185,9 +206,9 @@ h2 { font-size: 17px; font-weight: 600; }
    putting a button inside a heading.  Written without it, the one in the
    template fell back to the page's own 13px/400 and every `h3` beside it in the
    same card was heavier than it was. */
-h3, h4, .card-sub { font-size: 12px; font-weight: 600; letter-spacing: .02em; }
+h3, h4, .card-sub { font-size: var(--text-quiet); font-weight: 600; letter-spacing: .02em; }
 .muted { color: var(--muted); }
-.small { font-size: 12px; }
+.small { font-size: var(--text-quiet); }
 /* A sentence that is part of a page's furniture rather than part of its content:
    a hint under a list, a panel's relay line, the count under a card, the note
    under a field.  Every one of those was spelled `class="muted small"` — one
@@ -196,7 +217,7 @@ h3, h4, .card-sub { font-size: 12px; font-weight: 600; letter-spacing: .02em; }
    only thing a page adds to it is its own margin (`.setting-note`,
    `.setting-block`).  `--muted` on its own is still the colour utility, for the
    places that take their size from somewhere else. */
-.note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.note { margin: 0; font-size: var(--text-quiet); color: var(--muted); line-height: 1.5; }
 /* The same sentence given a band of its own, for the ones that stand between two
    blocks instead of inside one — a file staged for sending, a toast, a speed
    test's verdict.  A fill, a hairline and a bar down the left edge naming its
@@ -227,9 +248,9 @@ h3, h4, .card-sub { font-size: 12px; font-weight: 600; letter-spacing: .02em; }
 .drop-veil { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; pointer-events: none; padding: 24px; background: #0004; }
 .drop-veil-card { display: grid; justify-items: center; gap: 7px; padding: 24px 30px; text-align: center; background: var(--raised); border: 2px dashed var(--accent); border-radius: var(--radius-lg); box-shadow: var(--shadow); }
 .drop-veil-card svg { color: var(--accent-text); }
-.drop-veil-card strong { font-size: 15px; }
+.drop-veil-card strong { font-size: var(--text-heading); }
 .sidebar { background: var(--chrome); border-right: 1px solid var(--line); padding: 24px 14px 16px; display: flex; flex-direction: column; min-width: 0; overflow-y: auto; }
-.brand { display: flex; align-items: center; gap: 10px; padding: 0 10px 32px; font-size: 22px; font-weight: 650; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 10px 32px; font-size: var(--text-brand); font-weight: 650; }
 .brand img { width: 31px; height: 31px; object-fit: contain; }
 nav { display: grid; gap: 5px; }
 nav button { width: 100%; justify-content: flex-start; border-color: transparent; min-height: 43px; }
@@ -286,8 +307,8 @@ main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 /* The bands, named so the intent survives: these reach the window's edge. */
 .toolbar, header, .error-band, .bottom-status, .notice-stack { max-width: none; }
 header { display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-shrink: 0; padding: 26px var(--page-gutter) 20px; border-bottom: 1px solid var(--line); }
-header p { margin-top: 7px; font-size: 12px; }
-.connection { display: flex; align-items: center; gap: 7px; font-size: 12px; white-space: nowrap; color: var(--muted); }
+header p { margin-top: 7px; font-size: var(--text-quiet); }
+.connection { display: flex; align-items: center; gap: 7px; font-size: var(--text-quiet); white-space: nowrap; color: var(--muted); }
 .connected { color: var(--accent-text); }
 /* Search, refresh and the page's own controls ride the top of the scrolling
    region: on a long history the search box is the one control worth never
@@ -333,7 +354,7 @@ header p { margin-top: 7px; font-size: 12px; }
    each a little different from the next.  One smaller control now, and the same
    one wherever a row needs its buttons to sit inside the row's own height. */
 .icon-button--sm { width: var(--control-sm); height: var(--control-sm); min-width: var(--control-sm); }
-.button--sm, .overview-button { min-height: var(--control-sm); padding: 4px 11px; gap: 6px; font-size: 12px; }
+.button--sm, .overview-button { min-height: var(--control-sm); padding: 4px 11px; gap: 6px; font-size: var(--text-quiet); }
 .history-list { margin: 0 var(--page-gutter); flex: 1; }
 /* The devices page is a list of rows and nothing else, so it carries the space
    under its own last row: the archived list ends where the scroll does, and a
@@ -346,7 +367,7 @@ header p { margin-top: 7px; font-size: 12px; }
    print rather than a 15px heading, and 10px of air rather than 17.  It carries
    its own flex rather than borrowing `.card-head`'s, so the two recipes cannot
    argue about the padding they disagree about. */
-.list-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.list-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: var(--text-quiet); color: var(--muted); }
 .history-row { position: relative; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto auto; align-items: center; gap: var(--row-gap); padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
 /* ── Kind and selection, one column ────────────────────────────────────────
    The leading column used to be a bare checkbox, which told the reader nothing
@@ -379,7 +400,7 @@ header p { margin-top: 7px; font-size: 12px; }
    the rows below, which is why it is capped and scrollable: the card is inside
    the hovered row, so the pointer can move onto it and read to the end, and it
    closes the moment the pointer reaches another row. */
-.history-preview { position: absolute; z-index: 6; left: 36px; top: calc(100% - 8px); max-width: min(620px, calc(100vw - 96px)); max-height: 42vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--raised); box-shadow: var(--shadow); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.history-preview { position: absolute; z-index: 6; left: 36px; top: calc(100% - 8px); max-width: min(620px, calc(100vw - 96px)); max-height: 42vh; overflow: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--raised); box-shadow: var(--shadow); font-size: var(--text-quiet); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 /* The three things a card can hold besides words.  The picture is capped by
    the card's own width and never upscaled past it: a card shown larger than the
    image would be a blurry claim about a size the row does not have. */
@@ -408,7 +429,7 @@ header p { margin-top: 7px; font-size: 12px; }
 .badge, .ai-version, .speed-quality, .channel, .overview-chip, .nav-count, .overview-health {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px;
-  background: var(--surface); color: var(--muted); font-size: 12px;
+  background: var(--surface); color: var(--muted); font-size: var(--text-quiet);
   line-height: 1.35; white-space: nowrap;
 }
 .badge { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
@@ -421,14 +442,14 @@ header p { margin-top: 7px; font-size: 12px; }
 .badge--count, .badge--accent, .speed-quality--fast, .channel--paired, .channel--online, .nav-count { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
 .badge--warn, .speed-quality--good { background: var(--warn-soft); color: var(--warn-text); }
 .badge--danger, .ai-version--missing, .speed-quality--slow { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger-text); }
-.history-source-title { font-size: 11px; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-source-title { font-size: var(--text-meta); color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The route a record arrived on, beside the device it came from.  It wears the
    device list's own chip for the same two links, at the size of the metadata
    line it sits in rather than that list's, so one vocabulary covers both
    pages.  Neither route is the exception — a clip that came over the relay is
    not a fault — so the two differ by their glyph and never by a warning
    colour. */
-.history-route { font-size: 11px; }
+.history-route { font-size: var(--text-meta); }
 /* The chip row under the search toolbar. */
 .history-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 var(--page-gutter) 10px; }
 /* The chip is the *interactive* pill — a page's own filter row — so it is the
@@ -437,13 +458,13 @@ header p { margin-top: 7px; font-size: 12px; }
    clickable (the dashboard's device chips) stay labels: the row they sit in is
    read rather than operated, and a card's worth of 36px pills would be the
    loudest thing on a page whose subject is numbers. */
-.chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control); padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control); padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: var(--text-quiet); }
 .chip:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
 .chip:disabled { opacity: 0.45; }
 .chip--active, .chip--active:hover:not(:disabled) { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
-.chip-count { font-size: 11px; color: inherit; opacity: 0.75; }
+.chip-count { font-size: var(--text-meta); color: inherit; opacity: 0.75; }
 .chip--sort { margin-left: auto; }
-time { font-size: 12px; color: var(--muted); }
+time { font-size: var(--text-quiet); color: var(--muted); }
 .row-actions { display: flex; align-items: center; gap: 2px; }
 /* Five buttons on every row is a page of buttons before a single clip is read,
    so a history row keeps them until the row is pointed at or tabbed into — the
@@ -505,9 +526,9 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
    `h2`'s 17px it was the largest type on three pages whose subject was a list
    that happened to be empty — louder than the page's own title.  It is the size
    every other title row in the window uses. */
-.empty h2 { font-size: 15px; }
+.empty h2 { font-size: var(--text-heading); }
 .empty p { max-width: 350px; line-height: 1.6; }
-.pagination { padding: 18px var(--page-gutter); display: flex; justify-content: flex-end; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.pagination { padding: 18px var(--page-gutter); display: flex; justify-content: flex-end; align-items: center; gap: 8px; font-size: var(--text-quiet); color: var(--muted); }
 /* Except inside a list that carries the gutter itself, where the strip is the
    last row of that list rather than another band of the page: the favorites
    footer sits inside `.favorites-workspace`, so its own gutter was a second one
@@ -523,7 +544,7 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
    measured from: a notice sits one gap over this bar's top edge, and the only
    element that knows where that edge is is the bar itself.  `position: relative`
    is what makes it that box. */
-.bottom-status { position: relative; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 11px var(--page-gutter); border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.bottom-status { position: relative; flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 11px var(--page-gutter); border-top: 1px solid var(--line); color: var(--muted); font-size: var(--text-meta); }
 /* The label stays at the left and the runtime status takes the free space, so
    the state sits against the right edge the way a status bar's does; the pause
    countdown and the notice that follow it must not each claim a share of that
@@ -540,7 +561,7 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
   display: inline-flex;
   gap: 6px;
   align-items: center;
-  font-size: 12px;
+  font-size: var(--text-quiet);
   white-space: nowrap;
   cursor: pointer;
   color: var(--muted, inherit);
@@ -685,8 +706,8 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    the same underline, one above the other, would read as two sets of siblings.
    In a strip with one row there is nothing to tell apart, and it keeps the
    rule. */
-.page-tabs button, .settings-nav-groups button { padding: 7px 11px 9px; border-bottom: 2px solid transparent; border-radius: 0; font-size: 13px; }
-.settings-nav-groups button { padding: 7px 2px 9px; font-size: 14px; font-weight: 550; }
+.page-tabs button, .settings-nav-groups button { padding: 7px 11px 9px; border-bottom: 2px solid transparent; border-radius: 0; font-size: var(--text-body); }
+.settings-nav-groups button { padding: 7px 2px 9px; font-size: var(--text-base); font-weight: 550; }
 .page-tabs button:hover:not(:disabled), .settings-nav button:hover:not(:disabled) { color: inherit; background: none; }
 /* The third rule undone from the sidebar's `nav button`: its *active* state
    fills the row with `--accent-soft`, and `.settings-nav` is a `<nav>` too, so
@@ -740,7 +761,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 /* The log level switch sits directly above the log it filters, so it carries no
    spacing of its own on the bottom — the log's own top margin is the gap. */
 .log-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 14px 0 0; }
-.log-view { max-height: 46vh; overflow: auto; margin: 12px 0 20px; padding: 10px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-view { max-height: 46vh; overflow: auto; margin: 12px 0 20px; padding: 10px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; font-family: var(--font-mono); font-size: var(--text-quiet); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A clip's own text, read-only and selectable. It scrolls rather than growing
    the dialog: a clip is not bounded by the dialog's height, and the text is the
    reason the dialog is open, so it must not push the controls off the screen. */
@@ -749,14 +770,14 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 .translate-truncated { margin: 0 0 16px; }
 /* White in both themes on purpose: a QR code has to be dark-on-light to scan. */
 .qr-image { display: block; margin: 16px auto 12px; background: #fff; border: 1px solid var(--line); border-radius: 4px; }
-.about-version { font-size: 15px; font-weight: 600; }
+.about-version { font-size: var(--text-heading); font-weight: 600; }
 .modal-wide { width: min(560px, calc(100% - 36px)); }
 /* A field in a dialog: its name on one line and its control under it, both the
    dialog's full width.  The cards put a name beside its control because a card is
    over 700px wide; a dialog is 420, and a 168px name column beside a box leaves
    both too narrow to read.  The `<label>` wraps the control, so the whole block
    is a target and the name focuses the field it belongs to. */
-.modal label { display: grid; gap: 6px; margin: 14px 0 0; font-size: 13px; }
+.modal label { display: grid; gap: 6px; margin: 14px 0 0; font-size: var(--text-body); }
 /* The chrome the cards give their fields, restated for dialogs because a dialog
    is not inside one.  The URL, the pushed text, the two language pickers and the
    log line count were drawn with no border, no fill and no padding: each was a
@@ -777,14 +798,14 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 .modal .setting { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 0; }
 .modal .setting-name, .modal .setting-control { grid-column: 1; padding-top: 0; }
 .language-picker { text-align: center; }
-.language-picker h2 { font-size: 26px; }
-.language-picker-lead { margin: 6px 0 4px; font-size: 17px; font-weight: 600; }
+.language-picker h2 { font-size: var(--text-display); }
+.language-picker-lead { margin: 6px 0 4px; font-size: var(--text-section); font-weight: 600; }
 .language-picker > .muted { margin: 0 0 20px; }
 .language-choices { display: grid; gap: 10px; }
 .language-choice { display: grid; gap: 2px; padding: 14px 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .language-choice:hover, .language-choice:focus-visible { border-color: var(--accent); }
 .diag-list { max-height: 46vh; overflow: auto; margin: 12px 0 20px; padding: 0; list-style: none; display: grid; gap: 14px; }
-.diag-list h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.diag-list h3 { margin: 0 0 8px; font-size: var(--text-body); color: var(--muted); }
 .diag-list ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .diag-list ul li { display: grid; gap: 3px; padding-left: 10px; border-left: 3px solid var(--line); line-height: 1.55; overflow-wrap: anywhere; }
 .diag-list ul li.diag-ok { border-left-color: var(--accent); }
@@ -865,7 +886,7 @@ button.danger-outline:hover:not(:disabled),
    marked by more than a hover tint. */
 .group-row.active { background: var(--surface); font-weight: 600; }
 .group-row .group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.group-row .group-count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+.group-row .group-count { color: var(--muted); font-variant-numeric: tabular-nums; font-size: var(--text-quiet); }
 .group-input { width: 100%; min-width: 0; padding: 5px 8px; font: inherit; border-radius: var(--radius-lg); }
 .favorite-row { padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: var(--row-gap); align-items: center; }
 .favorite-row.selected { border-left: 3px solid var(--accent); padding-left: 10px; }
@@ -880,7 +901,7 @@ button.danger-outline:hover:not(:disabled),
 .drag-handle:active { cursor: grabbing; }
 .row-step { display: flex; flex-direction: column; gap: 2px; }
 .favorite-summary { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
-.favorite-summary h2 { font-size: 15px; margin-bottom: 8px; }
+.favorite-summary h2 { font-size: var(--text-heading); margin-bottom: 8px; }
 .favorite-summary p { white-space: pre-wrap; line-height: 1.6; margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 /* The editor has the page to itself now, and a textarea as wide as the window
    is a line no one can read: the form takes a measure and leaves the rest.  It
@@ -937,7 +958,7 @@ button.danger-outline:hover:not(:disabled),
 .settings-search { display: grid; gap: 6px; padding: 0 0 12px; }
 .settings-search input { width: 100%; }
 .settings-search-clear { justify-self: start; }
-.settings-search-status { margin: 0; font-size: 12px; color: var(--muted); }
+.settings-search-status { margin: 0; font-size: var(--text-quiet); color: var(--muted); }
 .settings-nav button.has-match { color: var(--accent-text); }
 .settings-nav button.dimmed { opacity: 0.5; }
 .settings-match-count { color: var(--accent-text); }
@@ -987,11 +1008,11 @@ button.danger-outline:hover:not(:disabled),
    internet card's title came to sit on the border with the refresh button and
    the switch drawn across it.  Anything that wraps a card's title wears this
    class, and nothing writes the title's padding out a second time. */
-.settings-section > h2, .card > h2, .card-head { font-size: 15px; padding: 17px 0 11px; border-bottom: 1px solid var(--line); }
+.settings-section > h2, .card > h2, .card-head { font-size: var(--text-heading); padding: 17px 0 11px; border-bottom: 1px solid var(--line); }
 .card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
 /* The heading takes the room and its controls keep their own size, so a long
    title is what gives way rather than the switch beside it. */
-.card-head h2 { flex: 1 1 auto; min-width: 0; font-size: 15px; }
+.card-head h2 { flex: 1 1 auto; min-width: 0; font-size: var(--text-heading); }
 .card-head-actions { display: flex; align-items: center; gap: 10px; }
 /* A heading for the blocks inside a card that are not settings of their own —
    the danger zone, the available-backups list, the paired devices under the
@@ -1024,7 +1045,7 @@ button.danger-outline:hover:not(:disabled),
    middle of its box.  A row whose control carries a hint under it is taller than
    its control, and a name centred in that height floats halfway between the two
    — which is what every hinted row in this page did. */
-.setting { display: grid; grid-template-columns: minmax(0, var(--setting-name)) minmax(0, 1fr); gap: 2px var(--setting-gap); align-items: start; min-height: 44px; padding: 6px 0; font-size: 13px; }
+.setting { display: grid; grid-template-columns: minmax(0, var(--setting-name)) minmax(0, 1fr); gap: 2px var(--setting-gap); align-items: start; min-height: 44px; padding: 6px 0; font-size: var(--text-body); }
 /* A 36px control holding one 13px line leaves 9px above that line: the label's
    first line sits on the same line as the control's. */
 .setting-name { grid-column: 1; padding-top: 9px; line-height: 1.45; }
@@ -1060,7 +1081,7 @@ button.danger-outline:hover:not(:disabled),
 .relay-test-block { display: grid; gap: 8px; justify-items: start; }
 .relay-test { display: grid; gap: 6px; }
 .relay-test-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
-.relay-test-list > li { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.relay-test-list > li { display: flex; align-items: baseline; gap: 8px; font-size: var(--text-quiet); }
 .relay-test-mark { font-weight: 700; }
 /* The same two colours the diagnostics report marks its own checks with, so
    "reachable" reads the same in both places.  Both take them from the tokens now
@@ -1097,7 +1118,7 @@ button.danger-outline:hover:not(:disabled),
 .backup-name { min-width: 0; overflow-wrap: anywhere; }
 .backup-list > li .muted { flex: 1; min-width: 140px; }
 .peer-line { display: flex; align-items: center; gap: 8px; }
-.peer-line .muted { flex: 1; font-size: 12px; }
+.peer-line .muted { flex: 1; font-size: var(--text-quiet); }
 /* How the last delivery to a device ended: a receipt's glyph and its word, on the
    line under the peer's name.  It wears the pill's own shape (the template gives
    it `channel`), and the two endings differ by colour — the accent for one that
@@ -1111,7 +1132,7 @@ button.danger-outline:hover:not(:disabled),
    whether they are away or we are.  The state is carried in colour for the same
    reason the delivery rows carry theirs: it is one word, and it is the word the
    rest of the card is read against. */
-.relay-state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+.relay-state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--text-body); }
 .relay-state--online { color: var(--accent-text); }
 .relay-state--connecting { color: var(--muted); }
 .relay-state--off, .relay-state--error { color: var(--danger-text); }
@@ -1124,7 +1145,7 @@ button.danger-outline:hover:not(:disabled),
 /* Why a pairing code was refused.  It belongs to the form, not to the window:
    a mistyped code and an offline relay are both answered at the box they came
    from, rather than in the band at the top of the window in English. */
-.pairing-message { margin: 0; font-size: 13px; }
+.pairing-message { margin: 0; font-size: var(--text-body); }
 .pairing-message--failed { color: var(--danger-text); }
 
 /* ── The internet pairing card ─────────────────────────────────────────────
@@ -1158,7 +1179,7 @@ button.danger-outline:hover:not(:disabled),
    It is the same ring as everything else's; the track is just where this control
    paints it. */
 .switch-input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 3px; }
-.switch-text { font-size: 13px; color: var(--muted); }
+.switch-text { font-size: var(--text-body); color: var(--muted); }
 .switch--on .switch-text { color: var(--accent-text); }
 
 /* The exchange, both directions.  Two columns while there is room for two —
@@ -1168,15 +1189,15 @@ button.danger-outline:hover:not(:disabled),
 .pair-half .setting-actions { margin: 0; }
 /* A panel's own title: a size up from a card's sub-heading, because a half is a
    panel inside a card rather than a part of one. */
-.pair-half-title { display: flex; align-items: center; gap: 7px; font-size: 14px; }
+.pair-half-title { display: flex; align-items: center; gap: 7px; font-size: var(--text-base); }
 /* The code itself: monospace and letter-spaced, because it is read aloud to
    another person and typed from their screen, and every glyph that can be
    mistaken for its neighbour costs a pairing.  The generator already leaves the
    confusable letters out; the spacing is what makes the groups findable. */
 .pair-code { display: flex; align-items: center; gap: 8px; margin: 0; }
-.pair-code code { font-size: 19px; letter-spacing: .14em; font-family: var(--font-mono); overflow-wrap: anywhere; }
-.pair-code--empty { color: var(--muted); font-size: 13px; }
-.pair-input { font-size: 16px; letter-spacing: .12em; text-transform: uppercase; font-family: var(--font-mono); }
+.pair-code code { font-size: var(--text-pair-code); letter-spacing: .14em; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.pair-code--empty { color: var(--muted); font-size: var(--text-body); }
+.pair-input { font-size: var(--text-pair-input); letter-spacing: .12em; text-transform: uppercase; font-family: var(--font-mono); }
 
 /* The paired devices, in the shape the other tab's rows use — the same icon,
    the same identity block, the same chips and the same trailing actions, so a
@@ -1244,7 +1265,7 @@ button.danger-outline:hover:not(:disabled),
 .settings-panel fieldset { border: 0; border-top: 1px solid var(--line); margin: 14px 0 0; padding: 0; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
 /* The group's name reads as a sub-heading of the card, like the card's own `h3`
    — same size, same colour — rather than as a row's label. */
-.settings-panel fieldset > legend { padding: 15px 0 2px; font-size: 12px; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
+.settings-panel fieldset > legend { padding: 15px 0 2px; font-size: var(--text-quiet); font-weight: 600; letter-spacing: .02em; color: var(--muted); }
 /* A row that follows a group but belongs to none — 网络与高级's data directory,
    which the legacy window never grouped.  It gets the same rule, so it reads as
    a thing of its own rather than as the last row of the group above it. */
@@ -1255,7 +1276,7 @@ button.danger-outline:hover:not(:disabled),
 /* What the bar has to say about the form: that something is pending, or that
    nothing is.  It sits after the button, so the bar reads "save — and by the
    way, there is something to save". */
-.settings-save-status { font-size: 12px; color: var(--muted); }
+.settings-save-status { font-size: var(--text-quiet); color: var(--muted); }
 .settings-section p { overflow-wrap: anywhere; line-height: 1.6; }
 /* A list inside a card starts at the card's own left edge, and its bullets are
    the card's own indent.  The `margin` is a shorthand on purpose: several of
@@ -1266,7 +1287,7 @@ button.danger-outline:hover:not(:disabled),
    is its opposite, and the block classes are where the indent is granted. */
 .settings-section ul { margin: 10px 0 0; padding-left: 20px; }
 /* Live password checklist: each rule turns green as the typed value meets it. */
-.password-rules { list-style: none; padding-left: 0; display: grid; gap: 4px; font-size: 12px; }
+.password-rules { list-style: none; padding-left: 0; display: grid; gap: 4px; font-size: var(--text-quiet); }
 /* The list variants inside a card carry no marks of their own, so the section's
    general `ul` rule must not put the bullet's indent back. */
 .settings-section .password-rules, .settings-section .ai-local-list { padding-left: 0; }
@@ -1277,10 +1298,10 @@ button.danger-outline:hover:not(:disabled),
 .update-failed { color: var(--danger-text); }
 .update-progress { position: relative; margin-top: 12px; height: 22px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); overflow: hidden; }
 .update-progress__bar { height: 100%; background: var(--accent); transition: width .2s linear; }
-.update-progress__label { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; }
+.update-progress__label { position: absolute; inset: 0; display: grid; place-items: center; font-size: var(--text-quiet); }
 /* An installer's full path: one long machine-made string the reader checks, or
    copies, a segment at a time. */
-.update-ready-path { font-family: var(--font-mono); font-size: 12px; user-select: text; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
+.update-ready-path { font-family: var(--font-mono); font-size: var(--text-quiet); user-select: text; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
 /* A value whose only purpose is to be copied out — a path, a token, a code.
    Selection is the point, so it is granted here rather than left to chance. */
 .selectable { user-select: text; }
@@ -1288,14 +1309,14 @@ button.danger-outline:hover:not(:disabled),
 .text-button { border-color: transparent; padding: 2px 5px; min-height: 0; color: var(--accent-text); }
 .text-button:hover:not(:disabled) { background: var(--accent-soft); }
 /* Translated text: read and copied, so it gets the block a clip is read in. */
-.translation-result { user-select: text; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; background: var(--code); border: 1px solid var(--line); border-radius: 4px; padding: 9px 11px; }
+.translation-result { user-select: text; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-body); background: var(--code); border: 1px solid var(--line); border-radius: 4px; padding: 9px 11px; }
 /* The AI card's two inventories.  Each row is one file with its actions at the
    right edge; without a row of its own the name and its three buttons ran
    together into one unbroken line. */
 /* A bounded, self-scrolling list.  A tool-profile inventory runs to dozens of
    files and each half of the AI card has one, so without a ceiling the second
    half starts below a screenful of rows the reader is not looking at. */
-.ai-local-list { list-style: none; display: grid; gap: 0; font-size: 13px; max-height: 340px; overflow: auto; }
+.ai-local-list { list-style: none; display: grid; gap: 0; font-size: var(--text-body); max-height: 340px; overflow: auto; }
 .ai-local-list li { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--line); }
 /* The last row's rule would sit in the card's own bottom padding, reading as a
    rule under nothing — the same reason the transfer rows drop theirs. */
@@ -1309,7 +1330,7 @@ button.danger-outline:hover:not(:disabled),
 /* A tool's name over its own rows.  The rows are paged and the groups are not, so
    a page that begins inside a group still has to say which tool those rows
    belong to — hence a header wherever the tool changes, not one per page. */
-.ai-local-list li.ai-group-head { gap: 6px; padding: 10px 0 4px; font-size: 12px; font-weight: 600; }
+.ai-local-list li.ai-group-head { gap: 6px; padding: 10px 0 4px; font-size: var(--text-quiet); font-weight: 600; }
 .ai-local-list li.ai-group-head > span { flex: 0 0 auto; }
 /* A tool's own count beside its name, in the page's small print: it is a
    parenthetical on the label rather than a status of its own, which is why it is
@@ -1324,10 +1345,10 @@ button.danger-outline:hover:not(:disabled),
 .ai-local-list li > .ai-tree-chevron--open { transform: rotate(90deg); }
 /* A folder's name folds it too, which is what a reader tries first.  Plain text
    so a file's name and a folder's are told apart without a colour to learn. */
-.ai-local-list li > .ai-path-btn { flex: 1; min-width: 0; justify-content: flex-start; gap: 0; min-height: 0; padding: 0; border: 0; background: none; font-size: 13px; text-align: left; overflow-wrap: anywhere; }
+.ai-local-list li > .ai-path-btn { flex: 1; min-width: 0; justify-content: flex-start; gap: 0; min-height: 0; padding: 0; border: 0; background: none; font-size: var(--text-body); text-align: left; overflow-wrap: anywhere; }
 /* Which root a row is under, where one tool watches more than one: two roots can
    hold the same relative path, so without it the row is ambiguous. */
-.ai-root-hint { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+.ai-root-hint { flex: 0 0 auto; color: var(--muted); font-size: var(--text-quiet); }
 /* The row's own buttons are the window's small control, worn as
    `.icon-button--sm` in the template.  They used to have a 30px rule here, which
    was the same 30px under a name of its own — and the 28px beside the local
@@ -1335,7 +1356,7 @@ button.danger-outline:hover:not(:disabled),
 /* The editor a picked file opens into: a panel inside the card, not another row,
    so it spans the card and stands on a surface of its own. */
 .ai-editor { margin: 14px 0 0; }
-.ai-editor strong { overflow-wrap: anywhere; font-size: 13px; }
+.ai-editor strong { overflow-wrap: anywhere; font-size: var(--text-body); }
 .ai-editor textarea { background: var(--page); }
 .ai-editor button { justify-self: start; }
 /* The filter spans the list it narrows, so which list is being filtered is
@@ -1388,7 +1409,7 @@ button.danger-outline:hover:not(:disabled),
 /* The names are one line however many were dropped: the count is already said,
    and the row's height is the answer's, not the list's. */
 .staged-drop-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.speed-test { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.speed-test { display: flex; align-items: center; gap: 8px; font-size: var(--text-quiet); color: var(--muted); }
 /* The panel's word for how good the measurement is.  Its three colours are the
    panel's three readings — a fast link is the accent's own green, a middling one
    the warning amber, a slow one the failure red — which is also why this is the
@@ -1497,7 +1518,7 @@ button.danger-outline:hover:not(:disabled),
    whether anything is wrong and how long it has been up.  The health chip is
    a button because a verdict that is not "normal" is the start of a question,
    and the diagnostics card is the answer to it. */
-.overview-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 40px; padding: 6px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); font-size: 13px; }
+.overview-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 40px; padding: 6px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); font-size: var(--text-body); }
 .overview-sep { width: 1px; align-self: stretch; margin: 2px 1px; background: var(--line); }
 .overview-gap { flex: 1; }
 .overview-health { min-height: 26px; padding: 3px 10px; background: transparent; }
@@ -1536,19 +1557,19 @@ button.danger-outline:hover:not(:disabled),
    column rather than a list, so they are spaced by one gap instead of by rules. */
 .overview-card { display: grid; gap: 12px; align-content: start; }
 /* ── This machine ── */
-.overview-name { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600; }
+.overview-name { display: flex; align-items: center; gap: 9px; font-size: var(--text-heading); font-weight: 600; }
 .overview-name > svg { flex-shrink: 0; color: var(--accent-text); }
 .overview-name-text { min-width: 0; overflow-wrap: anywhere; }
 /* The box the name is corrected in keeps the line's own height, which is the
    window's small control: this is a name being edited in place, not a form being
    opened.  The pencil beside it is `.icon-button--sm` in the template. */
-.overview-name-input { flex: 1; min-width: 0; min-height: var(--control-sm); padding: 3px 8px; font: inherit; font-size: 15px; font-weight: 600; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
-.overview-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: 12px; }
+.overview-name-input { flex: 1; min-width: 0; min-height: var(--control-sm); padding: 3px 8px; font: inherit; font-size: var(--text-heading); font-weight: 600; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.overview-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: var(--text-quiet); }
 .overview-facts dt { color: var(--muted); }
 .overview-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 /* The device ID is read back on the other screen to prove these are the same
    two machines, so it is set in the face that makes a hex string comparable. */
-.overview-facts .overview-mono { font-family: var(--font-mono); font-size: 11px; }
+.overview-facts .overview-mono { font-family: var(--font-mono); font-size: var(--text-meta); }
 .overview-facts .overview-id { display: flex; align-items: center; gap: 6px; }
 .overview-facts .overview-id span { min-width: 0; overflow-wrap: anywhere; }
 .overview-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
@@ -1560,14 +1581,14 @@ button.danger-outline:hover:not(:disabled),
 .overview-chip--link { cursor: pointer; }
 .overview-chip--link:hover { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
 .overview-address { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin: 0; }
-.overview-address code { min-width: 0; padding: 3px 8px; font-family: var(--font-mono); font-size: 12px; background: var(--code); border: 1px solid var(--line); border-radius: var(--radius); overflow-wrap: anywhere; }
+.overview-address code { min-width: 0; padding: 3px 8px; font-family: var(--font-mono); font-size: var(--text-quiet); background: var(--code); border: 1px solid var(--line); border-radius: var(--radius); overflow-wrap: anywhere; }
 /* The page's own buttons are the height of the strip they sit in rather than the
    window's 36px control: five of them at full height would be the loudest thing
    on a page whose subject is numbers.  That is the window's small button — the
    page's own name for it rides on that rule's selector group, so `.overview-button`
    still means what it always meant at the eight places the template wears it. */
 /* ── The switches ── */
-.overview-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13px; }
+.overview-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: var(--text-body); }
 .overview-pause { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding-top: 10px; border-top: 1px solid var(--line); }
 /* ── The counters ── */
 .overview-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
@@ -1575,18 +1596,18 @@ button.danger-outline:hover:not(:disabled),
 .overview-stat > svg { color: var(--muted); }
 /* Digits that line up: four counters read side by side are compared by their
    numbers, and a proportional face shifts each one off the column above it. */
-.overview-stat strong { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.overview-stat span { grid-column: 1 / -1; margin-top: 5px; font-size: 12px; color: var(--muted); }
-.overview-stat small { grid-column: 1 / -1; margin-top: 1px; font-size: 11px; color: var(--muted); }
+.overview-stat strong { font-size: var(--text-stat); font-weight: 650; font-variant-numeric: tabular-nums; }
+.overview-stat span { grid-column: 1 / -1; margin-top: 5px; font-size: var(--text-quiet); color: var(--muted); }
+.overview-stat small { grid-column: 1 / -1; margin-top: 1px; font-size: var(--text-meta); color: var(--muted); }
 /* ── The network map ── */
 .overview-ring-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
 /* The ring is the three counts drawn to scale and the legend beside it writes
    all three out, so the drawing is never the only place a number lives. */
 .overview-ring { position: relative; width: 108px; height: 108px; flex-shrink: 0; border-radius: 50%; }
 .overview-ring-center { position: absolute; inset: 20px; display: grid; place-content: center; gap: 1px; text-align: center; background: var(--raised); border-radius: 50%; }
-.overview-ring-center strong { font-size: 21px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.overview-ring-center small { font-size: 11px; color: var(--muted); }
-.overview-legend { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; min-width: 0; font-size: 12px; }
+.overview-ring-center strong { font-size: var(--text-stat); font-weight: 650; font-variant-numeric: tabular-nums; }
+.overview-ring-center small { font-size: var(--text-meta); color: var(--muted); }
+.overview-legend { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; min-width: 0; font-size: var(--text-quiet); }
 .overview-legend li { display: flex; align-items: center; gap: 8px; }
 .overview-swatch { width: 10px; height: 10px; flex-shrink: 0; border-radius: 3px; }
 .overview-swatch--connected { background: var(--accent); }
@@ -1605,7 +1626,7 @@ button.danger-outline:hover:not(:disabled),
    in is a track the next element slides into — which is how the age came to sit
    in this 14px column, one character wide, on every row with neither a tick nor
    a pin. */
-.overview-feed-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 14px max-content; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 6px 8px; font-size: 13px; text-align: left; border: 1px solid transparent; }
+.overview-feed-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 14px max-content; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 6px 8px; font-size: var(--text-body); text-align: left; border: 1px solid transparent; }
 .overview-feed-row:hover:not(:disabled) { background: var(--surface); border-color: var(--line); }
 .overview-feed-row > svg { flex-shrink: 0; color: var(--muted); }
 /* The mark's box: the tick, or the pin, or nothing — but a box either way. */

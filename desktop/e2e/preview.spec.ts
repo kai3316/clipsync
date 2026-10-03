@@ -479,3 +479,65 @@ test("the row pages stop growing at a reading width", async ({ page }) => {
   }
   expect(failures).toEqual([]);
 });
+
+
+/** The type scale, which is only real if the names resolve.
+ *
+ * Every font-size in the stylesheet now goes through a token.  A token that was
+ * never defined is not a parse error: the declaration is dropped and the element
+ * inherits, which leaves text at a plausible size and a screenshot that looks fine.
+ * So each rung is compared against the value the token claims, read from the same
+ * custom property the stylesheet uses.
+ */
+test("the type scale resolves to the sizes it names", async ({ page }) => {
+  const failures = await open(page, 1280);
+  await page.getByRole("button", { name: T("概览", "Overview"), exact: true }).click();
+  await page.waitForTimeout(120);
+
+  const resolved = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const token = (name: string) => root.getPropertyValue(name).trim();
+    const computed = (selector: string) => {
+      const node = document.querySelector(selector);
+      return node ? getComputedStyle(node).fontSize : null;
+    };
+    return {
+      // token name -> the value it declares
+      tokens: {
+        "--text-title": token("--text-title"),
+        "--text-brand": token("--text-brand"),
+        "--text-stat": token("--text-stat"),
+        "--text-section": token("--text-section"),
+        "--text-heading": token("--text-heading"),
+        "--text-quiet": token("--text-quiet"),
+        "--text-meta": token("--text-meta"),
+        // The root's own size, which everything else inherits from.
+        "--text-base": token("--text-base"),
+      },
+      // A rung of the scale, and an element that should be on it.
+      checks: [
+        ["--text-title", computed("h1")],
+        ["--text-brand", computed(".brand")],
+        ["--text-stat", computed(".overview-stat strong")],
+        ["--text-heading", computed(".card > h2, .settings-section > h2, .card-head")],
+        ["--text-quiet", computed(".note")],
+        ["--text-meta", computed(".bottom-status")],
+        ["--text-base", computed("body")],
+      ] as [string, string | null][],
+    };
+  });
+
+  // Every token is defined at all -- the failure this test exists for.
+  for (const [name, value] of Object.entries(resolved.tokens)) {
+    expect(value, `${name} is not defined`).not.toBe("");
+  }
+  // And the elements that ask for a rung are actually on it.
+  for (const [name, size] of resolved.checks) {
+    const expected = resolved.tokens[name as keyof typeof resolved.tokens];
+    expect(size, `${name}: expected ${expected}`).toBe(
+      // A token declared in `px` reads back as px; both sides normalised.
+      expected.replace(/px$/, "px"),
+    );
+  }
+  expect(failures).toEqual([]);
+});
