@@ -81,46 +81,41 @@ jobs:
 
           What is new in this release:
 
-          - **The narrow window's chat is readable again.**  In a window narrower than
-            700px the conversation list took 46% of the height for itself, which left
-            the messages about **two lines** tall — the page knew it scrolled and that
-            the newest message was reachable, which is all its tests asked, and two
-            lines is technically both.  38% gives the messages four or five lines and
-            still shows the device list and the conversations above them.
+          - **The layout is the one from 1.0.39, with four fixes measured against a
+            maximised window.**  A round of interface changes in 1.0.40–1.0.42 was
+            reported as worse than what it replaced, and it was: it restructured the
+            overview into two columns that only looked right at one window width, and it
+            was checked at that width only.  All of it is reverted here.  What follows is
+            what was left after measuring the real window rather than the one the
+            screenshots happened to use.
 
-          - **The overview fits its window.**  It was five full-width bands, and the
-            recent-activity list — the reason to open the page at all — sat entirely
-            below the fold at the default window size.  It is two columns now: this
-            machine, the sync switches and the connected devices down the left, and
-            the counters, the network map and the activity list down the right.  At
-            1280×900 that is 163px of scrolling instead of 266, and a maximised window
-            shows all of it.
+          - **Rows stop stretching across a wide window.**  At 1920 the content column is
+            1708px, which put a device row's name in the left ~400px and its six buttons
+            against the far right edge with about **900px of nothing between them** — the
+            row stopped reading as a row — and drew a **1550px** box around a four-word
+            note.  The row pages now cap at a readable width and stay left-aligned to the
+            header, so the extra room goes to the right instead of into the middle of
+            every row.
 
-          - **Wide windows stop stretching.**  On a large monitor the pages ran edge
-            to edge, so a device row put its name and state in the left quarter and
-            its buttons against the far right with about 900px of nothing between: the
-            row stopped reading as a row.  Every page now has a reading width and
-            centres within it, while the toolbars and status bars still span the
-            window.  This fixed a bug in itself — the first attempt was overridden by
-            later rules and did nothing on six of the eight pages.
+          - **The "sync clipboard" checkbox is on the right line.**  It is placed into the
+            row's content column now (it had fallen into the icon column, so it sat under
+            the device glyph, 89px left of the name above it), and it rides the state
+            chip's line rather than trailing at the bottom of the row — "正在同步 …
+            同步剪贴板" is one statement about one device.
 
-          - **The settings page is the size of its form.**  Its card was 1060px wide
-            holding 530px of form, so the fields sat in the left third of a card with
-            half of every row empty.  It is 720px now.
+          - **A history row's checkbox sits on its clip.**  It was centred in the row
+            while the clip's text starts at the top, so on a three-line clip it was
+            **60px below the text it selects**.  It is on the first line now, within 3px
+            of it on every row.
 
-          - **A transfer's progress bar sits beside its filename**, rather than
-            beginning mid-row with its percentage and cancel button about 500px from
-            the file they belonged to.
+          - **The settings card is the size of its form.**  It was 1060px wide holding
+            530px of form: a row measured 1014px for its label, gap and field, and the
+            save bar was the plainest case — **a 111px button alone in a 1060px bar, 87%
+            of it empty**.  It is 715px now, which is what the form needs.
 
-          - **The type scale is written down.**  Every size in the interface comes from
-            one named set, and one role that had two sizes by accident is one size.
-            Nothing looks different by design.
-
-          Still true from 1.0.40: a device you have already paired with must prove it
-          holds the key behind the certificate it presents, and a device running a
-          build older than 1.0.38 is refused with a message on both ends — update it,
-          or pair again from the Devices page.  Also from 1.0.40: each history row
-          leads with its clip's kind as a coloured glyph.
+          For anyone on 1.0.42: this release changes the layout back and then fixes the
+          four things above, so it will look different from what you have — closer to
+          1.0.39, with the wide-window stretching gone.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
