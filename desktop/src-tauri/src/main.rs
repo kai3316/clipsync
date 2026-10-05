@@ -2124,9 +2124,21 @@ async fn run_staged_installer(
         // relaunch at the end — which is the restart the user is promised, and
         // it comes from the installer rather than from here.
         //
-        // Started before the sidecar is stopped, so a file that cannot be run at
-        // all is an error the card can show over a working app, rather than the
-        // last thing a half-torn-down one did.
+        // **The sidecar is stopped first, and that order is the fix for "error
+        // opening file for writing".**  It runs from the install directory in the
+        // directory shape, and Windows locks a running process's image and every
+        // DLL it loaded — 191 files inside `sidecar/`.  NSIS starts writing that
+        // directory the moment it is spawned, so spawning it first meant writing
+        // over files a live process held open for as long as `stop` took: up to
+        // two seconds asking, twelve waiting, then a kill.
+        //
+        // The reason the old order existed still holds — a file that cannot be run
+        // at all should be an error the card can show rather than the last thing a
+        // half-torn-down app did — and it is still satisfied, because the process
+        // that draws the card is this one.  What has been stopped is the sidecar,
+        // and the card's message is about the installer.
+        bridge.stop().await;
+        emit_update_state(app, json!({"phase": "installing", "version": version}));
         let child = std::process::Command::new(path)
             .args(["/P", "/UPDATE", "/R"])
             .spawn();
@@ -2138,8 +2150,6 @@ async fn run_staged_installer(
             }
         };
         drop(child);
-        bridge.stop().await;
-        emit_update_state(app, json!({"phase": "installing", "version": version}));
         // Unreachable in practice, and for the reason the plugin exits here too:
         // the installer replaces the running executable and brings the new
         // version back up itself, and the file it is replacing is this one.
