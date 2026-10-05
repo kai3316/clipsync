@@ -1705,11 +1705,12 @@ button.danger-outline:hover:not(:disabled),
 .pagination {
   width: 100%;
   max-width: var(--content-width);
-  /* Left, not centred.  Centring puts 364px of page on each side at a maximised 1920
-     and leaves a blank band under the header, where the title's left edge and the
-     content's no longer meet -- the alignment to the window's own chrome matters more
-     than the symmetry. */
-  margin-inline: 0 auto;
+  /* Centred, so the room a wide window leaves is split evenly.  Pinned left -- the
+     first shape of this -- it put all 428px of slack at 1920 on the right, which reads
+     as content shoved against the sidebar: rows hugging the left, checkboxes on the very
+     edge, and a column of empty page beside them.  Below the ceiling both autos resolve
+     to nothing and the column fills, so a 1366 window is unchanged. */
+  margin-inline: auto;
 }
 /* The bands ride the window, so they get no ceiling and no centring. */
 .toolbar, header, .error-band, .bottom-status, .notice-stack { max-width: none; margin-inline: 0; }

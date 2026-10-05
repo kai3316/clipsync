@@ -545,3 +545,57 @@ test("the device sync switch sits with the state it belongs to", async ({ page }
   expect(where!.aboveNote, "the switch is still below the note field").toBe(true);
   expect(failures).toEqual([]);
 });
+
+
+/** A wide window's spare room is split evenly, not left entirely on the right.
+ *
+ * Measured at 1920 before: every page's content block sat at the content column's left
+ * edge with 428px of slack on the right -- rows hugging the sidebar and checkboxes on the
+ * very edge.  At 1366 there is no slack at all, so this is a fault a 1280 screenshot
+ * cannot show, which is how it survived the round that introduced the cap.
+ *
+ * Asserted at two widths: above the ceiling the gaps must be equal, and below it both must
+ * be ~0 with the column filling, because that is what a narrower window has always done.
+ */
+test("the spare room of a wide window is split evenly", async ({ page }) => {
+  const wrong: string[] = [];
+  for (const [w, h, expectSlack] of [[1920, 1040, true], [1366, 768, false]] as [number, number, boolean][]) {
+    const failures = await open(page, w, h);
+    for (const [id, label] of [
+      ["devices", T("设备", "Devices")],
+      ["history", T("剪贴板历史", "Clipboard History")],
+      ["settings", T("设置", "Settings")],
+      ["overview", T("概览", "Overview")],
+    ] as [string, string][]) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      await page.waitForTimeout(120);
+      const gaps = await page.evaluate(() => {
+        const content = document.querySelector(".content") as HTMLElement;
+        const cr = content.getBoundingClientRect();
+        const bands = ["toolbar", "error-band", "bottom-status", "notice-stack"];
+        let widest: { l: number; r: number } | null = null;
+        for (const child of [...content.children]) {
+          const cls = (child.className || "").toString();
+          if (bands.some((b) => cls.includes(b))) continue;
+          if (!(child as HTMLElement).offsetParent) continue;
+          const r = child.getBoundingClientRect();
+          if (!widest || r.width > widest.r - widest.l) widest = { l: r.left, r: r.right };
+        }
+        if (!widest) return null;
+        return { left: Math.round(widest.l - cr.left), right: Math.round(cr.right - widest.r) };
+      });
+      if (!gaps) continue;
+      if (Math.abs(gaps.left - gaps.right) > 2) {
+        wrong.push(`${w}px ${id}: left ${gaps.left} vs right ${gaps.right}`);
+      }
+      if (expectSlack && gaps.left < 100) {
+        wrong.push(`${w}px ${id}: only ${gaps.left}px of margin where the window is wide`);
+      }
+      if (!expectSlack && gaps.left > 2) {
+        wrong.push(`${w}px ${id}: ${gaps.left}px of margin where the column should fill`);
+      }
+    }
+    expect(failures).toEqual([]);
+  }
+  expect(wrong).toEqual([]);
+});
