@@ -21,6 +21,14 @@ uuid = { version = "1", features = ["v4"] }
 rfd = "0.15"
 
 [target.'cfg(windows)'.dependencies]
+# The job object that ties the sidecar to this process's lifetime.  See `src/confine.rs`
+# for why the OS has to be the one holding that, rather than a shutdown path in here.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 winreg = "0.10"
 
 [features]

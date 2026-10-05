@@ -270,6 +270,13 @@ fn staged_update(value: &Value) -> bool {
 pub struct Bridge {
     input: AsyncMutex<ChildStdin>,
     child: AsyncMutex<Child>,
+    /// Ties the child to this process's lifetime through a Windows job object.
+    ///
+    /// Never read: it exists so the handle is dropped when the bridge is, which is what
+    /// ends the child if this process dies without running any shutdown code.  `None` when
+    /// the OS declined to confine it, which is not an error (see `crate::confine`).
+    #[cfg(windows)]
+    _confined: Option<crate::confine::Confined>,
     pending: Mutex<HashMap<String, Reply>>,
     ready: watch::Sender<Option<Result<(), BridgeError>>>,
     session: Mutex<Option<String>>,
@@ -352,6 +359,24 @@ impl Bridge {
         let mut child = command
             .spawn()
             .map_err(|error| launch_failed(&program, &error))?;
+        // Tie the sidecar to this process's lifetime before anything else can go wrong.
+        // Without it a host that is terminated -- rather than asked to quit -- leaves the
+        // sidecar running, and since the directory shape runs it *out of the install
+        // directory*, the orphan holds 191 files locked and the next install fails.  A
+        // refusal is not fatal: the sidecar still runs, and every path that can stop it
+        // still does (see `crate::confine`).
+        #[cfg(windows)]
+        let confined = {
+            match crate::confine::confine(child.raw_handle().map(|handle| handle as isize)) {
+                Ok(confined) => Some(confined),
+                Err(error) => {
+                    // Logged rather than returned: a launch must not fail because a
+                    // hardening step was declined by the OS.
+                    eprintln!("sidecar confinement unavailable: {error}");
+                    None
+                }
+            }
+        };
         let input = child.stdin.take().ok_or_else(BridgeError::unavailable)?;
         let output = child.stdout.take().ok_or_else(BridgeError::unavailable)?;
         let stderr = child.stderr.take().ok_or_else(BridgeError::unavailable)?;
@@ -359,6 +384,8 @@ impl Bridge {
         let bridge = Arc::new(Self {
             input: AsyncMutex::new(input),
             child: AsyncMutex::new(child),
+            #[cfg(windows)]
+            _confined: confined,
             pending: Mutex::new(HashMap::new()),
             ready,
             session: Mutex::new(None),

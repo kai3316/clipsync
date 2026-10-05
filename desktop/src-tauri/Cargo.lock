@@ -550,6 +550,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tokio",
  "uuid",
+ "windows",
  "winreg 0.10.1",
 ]
 
