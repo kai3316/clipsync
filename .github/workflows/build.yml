@@ -81,41 +81,57 @@ jobs:
 
           What is new in this release:
 
-          - **The layout is the one from 1.0.39, with four fixes measured against a
-            maximised window.**  A round of interface changes in 1.0.40–1.0.42 was
-            reported as worse than what it replaced, and it was: it restructured the
-            overview into two columns that only looked right at one window width, and it
-            was checked at that width only.  All of it is reverted here.  What follows is
-            what was left after measuring the real window rather than the one the
-            screenshots happened to use.
+          - **The interface is the one from 1.0.39, with three measured corrections.**
+            The changes between 1.0.40 and 1.0.45 were reported as worse than what they
+            replaced, and measuring this machine's own window says why: it is 2560x1440 at
+            150% scaling, so a maximised window is 1707 logical pixels wide — and every
+            screenshot those changes were checked against was rendered at 1280 or 390.  The
+            whole range the window actually uses was never looked at.  All of it is
+            reverted.  What is left is the 1.0.39 layout, plus:
 
-          - **Rows stop stretching across a wide window.**  At 1920 the content column is
-            1708px, which put a device row's name in the left ~400px and its six buttons
-            against the far right edge with about **900px of nothing between them** — the
-            row stopped reading as a row — and drew a **1550px** box around a four-word
-            note.  The row pages now cap at a readable width and stay left-aligned to the
-            header, so the extra room goes to the right instead of into the middle of
-            every row.
+            - **history rows**: the selection box sits on the clip's first line.  It was
+              centred in the row while the text starts at the top, so on a three-line clip
+              it was **60px below the text it selects**;
+            - **device rows**: the "sync clipboard" switch sits on the state chip's line.
+              It was the last block in the row, so on a paired device it sat below the note
+              field — four lines from the device it applies to;
+            - **settings**: the card is sized to the form (715px) rather than to the window.
 
-          - **The "sync clipboard" checkbox is on the right line.**  It is placed into the
-            row's content column now (it had fallen into the icon column, so it sat under
-            the device glyph, 89px left of the name above it), and it rides the state
-            chip's line rather than trailing at the bottom of the row — "正在同步 …
-            同步剪贴板" is one statement about one device.
+          - **Installs stop failing with "error opening file for writing".**  The Windows
+            sidecar moved from a single executable to a directory, and in the directory
+            shape it runs *from the install directory*: Windows locks a running process's
+            image and every DLL it loaded, **191 files**.  Two faults followed from that,
+            and both are fixed.
 
-          - **A history row's checkbox sits on its clip.**  It was centred in the row
-            while the clip's text starts at the top, so on a three-line clip it was
-            **60px below the text it selects**.  It is on the first line now, within 3px
-            of it on every row.
+            The update path spawned the installer first and stopped the sidecar second, so
+            NSIS began overwriting those files while `bridge.stop()` was still working —
+            which it bounds generously, two seconds asking and twelve waiting before a
+            kill.  The sidecar is now stopped before the installer starts.
 
-          - **The settings card is the size of its form.**  It was 1060px wide holding
-            530px of form: a row measured 1014px for its label, gap and field, and the
-            save bar was the plainest case — **a 111px button alone in a 1060px bar, 87%
-            of it empty**.  It is 715px now, which is what the form needs.
+            And a sidecar could outlive its host.  Every path that ends this process on
+            purpose stops the sidecar, but a host that is *terminated* — Task Manager, a
+            crash, an installer — runs none of that, and the orphan keeps all 191 files
+            locked, so the next install fails and the one after that does too.  Measured:
+            after force-killing the host, the sidecar was still running and
+            `sidecar/clipsync-sidecar.exe` refused to open.  The host now creates a
+            **Windows job object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so the OS
+            ends the sidecar when the host dies, however it dies.  Nothing has to run for
+            that, which is the point: the failure being fixed is "nothing ran".  Re-measured
+            after: the sidecar exits with the host, and all 191 files open for writing.
 
-          For anyone on 1.0.42: this release changes the layout back and then fixes the
-          four things above, so it will look different from what you have — closer to
-          1.0.39, with the wide-window stretching gone.
+          - **The version the window shows now matches the build.**  It comes from the
+            sidecar's status rather than from the bundle, and the sidecar staged beside a
+            1.0.45 host had been built two weeks earlier — so the application reported
+            **1.0.33**.  `desktop/src-tauri/sidecar/` is gitignored, so it is whatever the
+            last local build left there, and nothing complained.  The packaging step now
+            refuses to run when any source file is newer than the staged sidecar, and says
+            which ones.  Measurement rather than inspection: PyInstaller compresses its
+            archive, so the version cannot be read out of the file.
+
+          For anyone on 1.0.44 or 1.0.45: this will look different.  The reading-width
+          ceiling is gone, so the content keeps a fixed 32px inset from the sidebar at every
+          window size instead of a margin that appeared only when the window was wide
+          enough.  The overview is a single column again.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
