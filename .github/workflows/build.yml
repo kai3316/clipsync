@@ -81,56 +81,48 @@ jobs:
 
           What is new in this release:
 
-          - **A file copied on macOS can be downloaded by the peer.**  It used to arrive as its
-            *name* only -- a text row that looks like a transfer fault and is a capture fault,
-            because a FILE payload is the only place a path is ever written down.  Copying on
-            Windows worked, which is what made it a capture problem rather than a transfer one.
+          - **A peer update sends the build that is actually newer.**  Reported from three device
+            logs.  The guard that decided whether to serve compared *this machine's* build against
+            the peer's claim -- a 1.0.54 host is newer than a 1.0.33 peer, so it passed -- and then
+            sent whatever the cache held:
 
-            The cause was measured, by the diagnostic this release follows up on.  The Mac's log
-            said:
+                Kais-MacBook (1.0.54)   Serving cached update ClipSync_1.0.33_aarch64.dmg
+                zzz MacBook  (1.0.33)   Received update blob ClipSync_1.0.33_aarch64.dmg
 
-                classes=NSPasteboard=False, NSApplication=False,
-                        NSAutoreleasePool=True, NSObject=True
+            That is a file the peer already had, four times in ten minutes, **while both ends
+            logged a successful transfer**.  The cached file's own version is now checked, with the
+            same parser the receiver uses, so the two ends cannot disagree about a filename.
 
-            `NSPasteboard` and `NSApplication` are **AppKit** classes; the two that resolved are
-            in libobjc.  The four answers separate exactly along that line, so the class lookup
-            was not failing -- **AppKit had never been loaded into the process**, and a class that
-            is not in the runtime cannot be found by name.  The bridge loaded only libobjc, so
-            every pasteboard helper reported "no pasteboard" for the life of the process, while
-            `pbpaste` worked, because it is a separate binary that does link AppKit.  AppKit is
-            now loaded before its classes are asked for.
+          - **The macOS update payload can enter the cache.**  `ClipSync.app.tar.gz` was excluded
+            because it "is not a file a person installs" -- true of people, wrong for a cache whose
+            job is serving a peer with no route to the release server, and on macOS that payload is
+            exactly what its own updater downloads.  That is why a 1.0.54 Mac kept serving a
+            **1.0.33** `.dmg`: its own download was refused, so the stale file stayed the newest one
+            the cache accepted.  Windows never had the problem, because its payload *is* its
+            installer.
 
-            The fallback had a second fault: it asked `pbpaste -Prefer public.file-url`, and
-            `-Prefer` accepts only `txt`, `rtf` or `ps`.  An unknown value is not an error -- it
-            falls back to the plain text `pbpaste` looks for first, which for a copied file is the
-            name.  The man page is explicit: *"There is no way to tell pbpaste to get only a
-            specified data type."*  The fallback now asks `osascript`, which can read the
-            clipboard as file URLs.
+          - **Every rejection says what actually happened.**  `not_newer` -- the common case, a file
+            that is simply the build you already have -- was reported as **"checksum mismatch"**,
+            because two verdicts had their own words mapped and the rest fell through to a default.
+            There was no checksum failure anywhere in three logs.
 
-            Worth recording: the diagnostic's own experiment had never run.  It was gated on
-            `NSApplication` resolving -- precisely the state it was written to detect -- so it was
-            skipped whenever it was wanted.  It now runs whenever the pasteboard is missing.
+          - **The sending device is told what became of the file.**  A new `update_verdict`
+            message, so the machine holding the stale cache can stop offering it.  Its log said
+            "Serving cached update" four times and nothing else; the refusal existed only in the
+            other device's log.
 
-          - **Two log lines stopped reading like faults when nothing is wrong.**  Both counts come
-            from a real log.
+          - **One retry before a peer that is restarting is written off.**  Measured: a 15-second
+            dial timed out, the attempt was abandoned, and the machine went to a release server it
+            could not reach -- the update arrived two and a half minutes later from the device that
+            had it all along.  Only failures meaning "not this second" are retried, after a short
+            jittered wait.
 
-            *At-rest encryption WITHOUT a password* appeared **57 times in one run and 18 in the
-            other**: `EncryptionManager.__init__` emitted it whenever the password was empty, and
-            one start builds several managers.  75 identical lines bury the lines that differ, and
-            the fact is already carried permanently by the security card, in the window, where the
-            person who can act on it is looking.  It is said once per process now.
-
-            *LAN runtime did not release ownership within its budget (attempt 1/2)* appeared three
-            times per start, **two of them rescued by the second attempt** -- which is the retry
-            doing its job.  At WARNING a clean exit read as two failures and buried the one line
-            that means something.  A rescued attempt is now DEBUG; a genuine failure still reports.
-
-          **Deliberately not changed: the zeroconf socket errors.**  Both machines log one at app
-          start -- `Errno 65 No route to host` on macOS, `WinError 59` on Windows, naming the
-          virtual adapter `172.19.0.1` that WSL or Docker leaves behind.  They are transient
-          "interface not ready yet" failures from a third-party library, discovery works around
-          them, and the fix would be to bind mDNS to a single interface -- trading this noise for a
-          real inability to discover peers on a machine with two networks.
+          - **The automatic check no longer downloads from GitHub by itself.**  Asked for directly,
+            and the measurements agree: from a slow network an automatic fetch is worse than none,
+            and its timeout delays the peer that already has the file.  The check still finds the
+            release and the card offers it; **the download starts when you click 下载更新**.  The
+            peer-to-peer fetch stays automatic on purpose -- a peer on the same LAN answers in
+            seconds, and it is the source that works when the release server does not.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
