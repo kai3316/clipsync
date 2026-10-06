@@ -5221,6 +5221,15 @@ async function translateText() {
                 <p v-if="passwordMismatch" class="note setting-block">{{ t("两次输入的密码不一致。") }}</p>
                 <p class="note setting-note">{{ t("密码会随“保存设置”一起提交，并同时用作设备配对的通道密钥；剪贴板历史的密钥在重启后更新。") }}</p>
                 <p class="muted setting-block">{{ settings.password_set ? t("已设置加密密码") : t("未设置加密密码") }}</p>
+                <!-- What the state above means for the files on this machine.  The sentence
+                     further up describes *traffic* encryption, and the local files are not
+                     mentioned anywhere else -- so "encryption is on" reasonably read as "my
+                     files are encrypted", which without a password is not the case: the key
+                     is derived from the device fingerprint, and that is stored in plaintext
+                     in config.json beside the database. -->
+                <p class="note setting-note">{{ settings.password_set
+                  ? t("本机文件已加密：剪贴板历史与设备私钥用该密码存放。")
+                  : t("注意：未设置密码时，本机文件并未真正加密——密钥由公开的设备指纹派生，任何能读取本机文件的程序或人都能解开。") }}</p>
                 <div v-if="settings.password_set" class="setting-actions">
                   <button type="button" class="danger-outline" :disabled="securityBusy" @click="clearPasswordOpen = true"><Trash2 :size="16" />{{ t("清除加密密码") }}</button>
                 </div>

@@ -63,7 +63,12 @@ const PAGES: PageEntry[] = [
   { id: "settings", label: T("设置", "Settings") },
 ];
 
-async function open(page: Page, width: number, height = 900) {
+async function open(
+  page: Page,
+  width: number,
+  height = 900,
+  overrides: Record<string, unknown> = {},
+) {
   const failures: string[] = [];
   page.on("console", (message) => {
     if (message.type() !== "error") return;
@@ -75,7 +80,9 @@ async function open(page: Page, width: number, height = 900) {
     failures.push(message.text());
   });
   page.on("pageerror", (error) => failures.push(error.message));
-  await page.addInitScript(installPreviewHost, fixtures);
+  // Whole commands, because that is the granularity the host speaks: a test that needs "no
+  // password set" replaces `get_settings` rather than reaching inside it.
+  await page.addInitScript(installPreviewHost, { ...fixtures, ...overrides });
   await page.setViewportSize({ width, height });
   await page.goto("/");
   // The window opens on the overview, and it is only a page with a host behind
@@ -706,4 +713,59 @@ test("the favourites card fills its window and its sidebar does not", async ({ p
     expect(failures).toEqual([]);
   }
   expect(problems).toEqual([]);
+});
+
+
+/** The security card says what the encryption protects -- including when it protects nothing.
+ *
+ * Asked by the user: "does setting a password really encrypt everything?"  Measured, it does not,
+ * and the interesting part is not the gaps but the shape: decryption is automatic, so the key has
+ * to come from files on the machine -- and with no password it is derived from the device
+ * fingerprint, which is stored in plaintext beside the database.  Anything that can read the
+ * database can read the key material.
+ *
+ * The code said so in the log.  A log line does not reach the person deciding, and the sentence
+ * beside the setting describes *traffic* encryption, so "encryption is on" reasonably read as
+ * "my files are encrypted".  Both states are asserted: a note that appears in only one of them is
+ * a note about the other.
+ *
+ * Three things had to be right before anything rendered, and each was wrong first: `password_set`
+ * lives inside `get_settings.settings` rather than on the envelope; the section is behind the
+ * **安全** card, which is itself under the **数据** group, and only the open group is rendered;
+ * and the group and the card share a label, so `exact` is what keeps them apart.
+ */
+test("the security card says what is and is not encrypted", async ({ page }) => {
+  const settingsWith = (passwordSet: boolean) => {
+    const envelope = fixtures.get_settings as { settings: Record<string, unknown> };
+    return {
+      get_settings: { ...envelope, settings: { ...envelope.settings, password_set: passwordSet } },
+    };
+  };
+
+  const openSecurity = async (passwordSet: boolean) => {
+    await open(page, 1280, 900, settingsWith(passwordSet));
+    await page.getByRole("button", { name: T("设置", "Settings"), exact: true }).click();
+    await page.waitForTimeout(250);
+    await page.getByRole("button", { name: T("数据", "Data"), exact: true }).click();
+    await page.waitForTimeout(150);
+    await page.getByRole("button", { name: T("安全", "Security"), exact: true }).click();
+    await page.waitForTimeout(200);
+    return page.locator("#settings-security");
+  };
+
+  const encryptedNote = T(
+    "本机文件已加密：剪贴板历史与设备私钥用该密码存放。",
+    "The files on this machine are encrypted",
+  );
+  const warningNote = T("注意：未设置密码时", "Note: with no password set");
+
+  // No password: the warning, and not the reassurance.
+  let card = await openSecurity(false);
+  await expect(card.getByText(warningNote)).toBeVisible();
+  await expect(card.getByText(encryptedNote)).toHaveCount(0);
+
+  // A password: the reassurance, and not the warning.
+  card = await openSecurity(true);
+  await expect(card.getByText(encryptedNote)).toBeVisible();
+  await expect(card.getByText(warningNote)).toHaveCount(0);
 });

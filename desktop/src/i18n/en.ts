@@ -1132,6 +1132,10 @@ export const EN: Record<string, string> = {
     "The password is submitted with “Save settings” and also derives the device-pairing channel keys; the clipboard history key is updated after a restart.",
   "已设置加密密码": "Encryption password is set",
   "未设置加密密码": "No encryption password",
+  "本机文件已加密：剪贴板历史与设备私钥用该密码存放。":
+    "The files on this machine are encrypted: the clipboard history and the device key are stored under that password.",
+  "注意：未设置密码时，本机文件并未真正加密——密钥由公开的设备指纹派生，任何能读取本机文件的程序或人都能解开。":
+    "Note: with no password set, the files on this machine are not really encrypted — the key is derived from the public device fingerprint, so anything that can read the files can also open them.",
   "清除加密密码": "Clear encryption password",
   "危险区域": "Danger zone",
   "恢复出厂设置会删除全部历史、收藏、配对和设备身份，并重新启动应用。此操作无法撤销。":
