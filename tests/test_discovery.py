@@ -10,6 +10,7 @@ first is only what a peer older than that field can offer.
 import os
 import socket
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -649,3 +650,75 @@ def test_the_predicate_matches_the_shapes_it_names():
     ]
     wrong = [(n, predicate(n)) for n, want in cases if predicate(n) != want]
     assert wrong == [], f"unexpected answers: {wrong}"
+# ── The presence round asks, rather than waiting to be told ───────────────────
+
+def a_discovery(browsing=True):
+    """A real Discovery with its network collaborators replaced.
+
+    Only `_zc` and `_browser` are stood in for: everything else is what the constructor
+    builds, which is what keeps this test from failing on its own scaffolding.
+    """
+    sent: list = []
+
+    class Recorder:
+        def send(self, message):
+            sent.append(message)
+
+    discovery = discovery_module.Discovery(
+        device_id="local-device",
+        device_name="Host",
+        port=19990,
+        service_type="_clipsync._tcp.local.",
+    )
+    discovery._zc = Recorder()
+    discovery._browser = object() if browsing else None
+    # The round waits on this event for its settle window; setting it keeps the test quick
+    # without changing which branch runs.
+    discovery._netmon_stop.set()
+    return discovery, sent
+
+
+def test_a_presence_round_asks_the_network_who_is_here():
+    """The re-query is the mechanism, so its absence would be the bug.
+
+    A browser alone learns of a peer from an announcement, and one missed while this
+    machine was not listening is one it never gets.  The round sends a PTR question of its
+    own, which is what lets a peer that came back be noticed without a restart.
+    """
+    discovery, sent = a_discovery()
+
+    discovery._presence_round()
+
+    assert sent, "a presence round sent no query"
+    question = sent[0].questions[0]
+    assert question.name.rstrip(".") == discovery._service_type.rstrip("."), (
+        f"asked about {question.name}, not the service type"
+    )
+
+
+def test_the_query_carries_no_known_answers():
+    """Because a responder may suppress an answer it can see we already have.
+
+    The round's own comment: the library's service query carries the cached PTRs it is
+    asking about, "and a responder that is entitled to suppress those answers sends nothing
+    at all -- PTR, SRV, TXT and address alike -- so a peer that is sitting there answering
+    questions is never asked one it will answer."
+    """
+    discovery, sent = a_discovery()
+
+    discovery._presence_round()
+
+    assert not sent[0].answers, f"the query carried {len(sent[0].answers)} known answers"
+
+
+def test_the_browse_session_gates_the_round():
+    """No browser means this machine is not listening, so a round must do nothing.
+
+    The loop's comment says why: a round that ran anyway "would report every peer lost for
+    the crime of going unheard by a machine that had stopped listening".
+    """
+    discovery, sent = a_discovery(browsing=False)
+
+    discovery._presence_round()
+
+    assert sent == [], "a round queried the network while browsing was paused"
