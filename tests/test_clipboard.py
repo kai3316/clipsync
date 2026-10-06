@@ -856,3 +856,90 @@ def test_an_empty_clipboard_does_not_fire(monkeypatch):
     monitor._poll_hash()
 
     assert fired == [], "an empty clipboard fired the change callback"
+
+
+# ── File capture: the two causes of "the peer only gets the name" ─────────────
+
+def test_appkit_is_loaded_before_its_classes_are_asked_for(monkeypatch):
+    """The fix for the user's report.
+
+    The bridge loaded `libobjc` and asked it for `NSPasteboard`, which is an AppKit class.  A
+    class that is not in the runtime cannot be found by name, so the lookup returned nil and the
+    bridge never built -- measured on the machine as `NSPasteboard=False, NSObject=True`, the two
+    answers separated exactly by which library holds them.
+
+    Asserted by recording what is loaded, because the failure is a *missing* load and nothing else
+    in the process notices.
+    """
+    loaded: list[str] = []
+
+    class FakeLib:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: 0
+
+    def fake_load(path):
+        loaded.append(str(path))
+        return FakeLib()
+
+    fake_cdll = type("CDLL", (), {"LoadLibrary": staticmethod(fake_load)})
+    monkeypatch.setattr(darwin.ctypes, "cdll", fake_cdll)
+    monkeypatch.setattr(
+        darwin.ctypes.util, "find_library", lambda name: f"/usr/lib/lib{name}.dylib"
+    )
+    monkeypatch.setattr(darwin, "_nspasteboard_objc", None)
+    monkeypatch.setattr(darwin, "_nspasteboard_instance", None)
+    monkeypatch.setattr(darwin, "_nspasteboard_appkit", None)
+    monkeypatch.setattr(darwin, "_bridge_failed_at", 0.0)
+
+    darwin._init_nspasteboard()
+
+    assert any("objc" in path for path in loaded), f"libobjc was not loaded: {loaded}"
+    assert any("AppKit" in path for path in loaded), (
+        f"AppKit was not loaded, so NSPasteboard cannot be found by name: {loaded}"
+    )
+
+
+def test_the_file_fallback_does_not_ask_pbpaste_for_a_uti(monkeypatch):
+    """`pbpaste -Prefer` accepts `txt`, `rtf` or `ps` -- never a UTI.
+
+    From the man page: "There is no way to tell pbpaste to get only a specified data type."  An
+    unknown value is not an error; it falls back to the plain text looked for first, which for a
+    copied file is the name.  So the old call could not return what its comment claimed, and the
+    name travelled to the peer as an ordinary text row.
+    """
+    calls: list[list[str]] = []
+
+    def recorder(argv, *args, **kwargs):
+        calls.append(list(argv))
+
+        class Done:
+            returncode = 0
+            stdout = b""
+
+        return Done()
+
+    monkeypatch.setattr(darwin.subprocess, "run", recorder)
+    monkeypatch.setattr(darwin, "_init_nspasteboard", lambda: (None, None))
+    monkeypatch.setattr(darwin, "_pb_data_for_type", lambda _uti: None)
+
+    reader = darwin._ClipboardReader()
+    reader._get_files()
+
+    for argv in calls:
+        assert argv[0] != "pbpaste" or "-Prefer" not in argv or "public.file-url" not in argv, (
+            f"pbpaste was asked for a UTI it cannot accept: {argv}"
+        )
+
+
+def test_a_bare_name_is_not_a_servable_path():
+    """Which is why the name arrived as text: a relative path names nothing once it leaves.
+
+    The parser reads a bare name as a path -- it has to, since Finder coins are not the only
+    thing a pasteboard carries -- and `servable_paths` is what rejects it.  Asserted together, so
+    the pair cannot drift into treating any copied text as a file list.
+    """
+    from internal.clipboard import file_ref
+    from internal.clipboard.format import file_url_paths
+
+    assert file_url_paths(b"notes.txt") == ["notes.txt"]
+    assert file_ref.servable_paths(["notes.txt"]) == []

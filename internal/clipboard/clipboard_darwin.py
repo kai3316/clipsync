@@ -41,6 +41,8 @@ POLL_INTERVAL = 0.4
 
 _nspasteboard_objc = None
 _nspasteboard_instance = None
+# The AppKit handle, held for the process's life so the classes it registers stay loaded.
+_nspasteboard_appkit = None
 _objc_lock = threading.Lock()
 
 # How long a failed bridge is remembered before it is worth trying again, and how often
@@ -107,6 +109,18 @@ def _init_nspasteboard():
             return None, None
 
         objc = ctypes.cdll.LoadLibrary(lib_path)
+        # AppKit before its classes.  `NSPasteboard` and `NSApplication` live there, and a
+        # class that is not in the runtime cannot be found by name -- which is what the
+        # measurement showed: `NSObject` and `NSAutoreleasePool` resolved (both in libobjc)
+        # while `NSPasteboard` and `NSApplication` did not, and `pbpaste` worked, because it is
+        # a separate binary that links AppKit and this process does not.
+        #
+        # Kept, not discarded: the classes it registers stay in use for the process's life.
+        global _nspasteboard_appkit
+        if _nspasteboard_appkit is None:
+            _nspasteboard_appkit = ctypes.cdll.LoadLibrary(
+                ctypes.util.find_library("AppKit") or "AppKit"
+            )
         objc.objc_getClass.argtypes = [ctypes.c_char_p]
         objc.objc_getClass.restype = ctypes.c_void_p
         objc.sel_registerName.argtypes = [ctypes.c_char_p]
@@ -205,9 +219,13 @@ def probe_pasteboard_bridge() -> dict:
 
     report["pasteboard_instance"] = pasteboard()
 
-    if classes["NSApplication"] and not report["pasteboard_instance"]:
+    if not report["pasteboard_instance"]:
         # The one experiment worth running: bring AppKit up and ask again.  A pasteboard
         # that answers after this and not before names the fault precisely.
+        #
+        # **Not gated on `NSApplication` resolving**, which is how the first version of this
+        # never ran: a missing class is precisely the state it exists to diagnose, and gating
+        # on its presence meant the experiment was skipped whenever it was wanted.
         try:
             appkit_path = ctypes.util.find_library("AppKit") or ""
             appkit = ctypes.cdll.LoadLibrary(appkit_path)
@@ -893,28 +911,50 @@ class _ClipboardReader(ClipboardReader):
                 raw[:200],
             )
 
-        # Method 3: pbpaste, for a launchd context where the ctypes bridge could
-        # not reach the pasteboard at all.  ``-Prefer`` falls back to the next
-        # type it has when the one asked for is absent, so its answer is parsed
-        # as an address and then checked as a path rather than trusted as
-        # either — an ordinary text copy's plain text must not be read as a list
-        # of paths.  Both halves are `file_url_paths`' job: it reads a bare path
-        # as the bytes the name is, where a second attempt through `decode_text`
-        # would read a GBK name as the *display* spelling of it and hand back a
-        # path that stats nothing, losing a file that is sitting right there.
+        # Method 3: osascript, for the case where the ctypes bridge could not be built.  This
+        # used to be `pbpaste -Prefer public.file-url`, which **cannot work**: `-Prefer` takes
+        # one of three legacy types -- `txt`, `rtf` or `ps` -- and an unknown value makes
+        # `pbpaste` fall back to the plain text it looks for first.  For a copied file that
+        # text is the *name*; `file_url_paths` reads it as a bare relative path, and
+        # `servable_paths` drops it, so the method always found nothing and the name reached
+        # the peer as an ordinary text row -- a capture fault that looks like a transfer fault.
+        #
+        # https://keith.github.io/xcode-man-pages/pbcopy.1 -- "There is no way to tell pbpaste
+        # to get only a specified data type."
+        #
+        # `osascript` can read the file URL, and like `pbpaste` it is a signed Apple binary with
+        # its own identity rather than this process's.  A refusal is silent by design: macOS may
+        # withhold Automation permission, and a capture path that cannot run is the same outcome
+        # as the one above.
         try:
             result = subprocess.run(
-                ["pbpaste", "-Prefer", "public.file-url"],
+                [
+                    "osascript",
+                    "-e",
+                    'set out to ""',
+                    "-e",
+                    "repeat with f in (the clipboard as list)",
+                    "-e",
+                    'try',
+                    "-e",
+                    'set out to out & (f as text) & linefeed',
+                    "-e",
+                    "end try",
+                    "-e",
+                    "end repeat",
+                    "-e",
+                    "return out",
+                ],
                 capture_output=True,
-                timeout=2,
+                timeout=3,
             )
             if result.returncode == 0 and result.stdout.strip():
                 paths = file_ref.servable_paths(format.file_url_paths(result.stdout))
                 if paths:
-                    logger.debug("Read %d file path(s) via pbpaste", len(paths))
+                    logger.debug("Read %d file path(s) via osascript", len(paths))
                     return encode_paths(paths)
         except Exception:
-            logger.debug("pbpaste file-url read failed", exc_info=True)
+            logger.debug("osascript file read failed", exc_info=True)
 
         logger.debug("No file paths on the pasteboard")
         return b""
