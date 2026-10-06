@@ -704,3 +704,79 @@ def test_a_file_clip_reads_as_a_file_row_not_as_its_own_name(tmp_path):
     assert row["content_type"] == "FILE"
     assert GBK_NAME in row["text_preview"]
 
+
+# ── The NSPasteboard bridge's failure cache ───────────────────────────────────
+
+@pytest.fixture
+def bridge(monkeypatch):
+    """A bridge that cannot be built, with its clock and its log under the test's hand.
+
+    Returns the state and two knobs: `attempts()` for how many times the setup was tried,
+    and `tick()` to move the clock past the cooldown without sleeping.
+    """
+    state = {"now": 1000.0, "attempts": 0}
+
+    def find_library(_name):
+        state["attempts"] += 1
+        return None  # the failure path: no libobjc, so no bridge
+
+    monkeypatch.setattr(darwin.ctypes.util, "find_library", find_library)
+    monkeypatch.setattr(darwin.time, "monotonic", lambda: state["now"])
+    monkeypatch.setattr(darwin, "_nspasteboard_objc", None)
+    monkeypatch.setattr(darwin, "_nspasteboard_instance", None)
+    monkeypatch.setattr(darwin, "_bridge_failed_at", 0.0)
+    monkeypatch.setattr(darwin, "_bridge_logged_at", 0.0)
+    return state
+
+
+def test_a_failed_bridge_is_not_rebuilt_on_every_poll(bridge):
+    """The whole fault: five calls per poll, one poll per 0.4s, all rebuilding it.
+
+    Twenty calls stand in for four seconds of polling.  One attempt is the fix; twenty is
+    what was happening.
+    """
+    for _ in range(20):
+        assert darwin._init_nspasteboard() == (None, None)
+    assert bridge["attempts"] == 1, "the bridge was rebuilt inside its cooldown"
+
+
+def test_the_bridge_is_retried_after_its_cooldown(bridge):
+    """A refusal that goes away must still recover, or this trades work for function."""
+    assert darwin._init_nspasteboard() == (None, None)
+    assert bridge["attempts"] == 1
+
+    bridge["now"] += darwin._BRIDGE_RETRY_SECONDS + 1
+    assert darwin._init_nspasteboard() == (None, None)
+    assert bridge["attempts"] == 2, "the cooldown never expires"
+
+
+def test_a_repeated_failure_is_logged_once(bridge, caplog):
+    """9605 lines said the same thing.  The first one is the one worth reading."""
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="internal.clipboard.clipboard_darwin"):
+        for _ in range(50):
+            darwin._init_nspasteboard()
+            # Walk the clock forward inside the cooldown, as polling does.
+            bridge["now"] += 0.4
+
+    failures = [r for r in caplog.records if "libobjc" in r.getMessage()]
+    assert len(failures) == 1, f"logged {len(failures)} times: {[r.getMessage() for r in failures]}"
+
+
+def test_each_cooldown_logs_again(bridge, caplog):
+    """Silence is not the goal -- one line a minute is, so a lasting fault stays visible."""
+    import logging
+
+    with caplog.at_level(logging.DEBUG, logger="internal.clipboard.clipboard_darwin"):
+        for minute in range(3):
+            bridge["now"] += darwin._BRIDGE_RETRY_SECONDS + 1
+            darwin._init_nspasteboard()
+            # One attempt per cooldown, counting the one the first iteration makes.  The
+            # earlier version of this test expected one more, having copied the count from
+            # a test that calls `_init_nspasteboard` once before its loop -- the
+            # implementation was right and the expectation was wrong.
+            assert bridge["attempts"] == minute + 1, "each cooldown should allow one attempt"
+
+    failures = [r for r in caplog.records if "libobjc" in r.getMessage()]
+    assert len(failures) == 3, f"expected one per cooldown, got {len(failures)}"

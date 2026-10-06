@@ -43,6 +43,14 @@ _nspasteboard_objc = None
 _nspasteboard_instance = None
 _objc_lock = threading.Lock()
 
+# How long a failed bridge is remembered before it is worth trying again, and how often
+# the failure may be logged.  A poll is 0.4s and asks five times, so without these the
+# same failed setup runs twelve times a second and writes a log line for each.
+_BRIDGE_RETRY_SECONDS = 60.0
+_BRIDGE_LOG_SECONDS = 60.0
+_bridge_failed_at = 0.0
+_bridge_logged_at = 0.0
+
 _IMAGE_UTIS = frozenset(
     {
         b"public.tiff",
@@ -59,16 +67,43 @@ _IMAGE_UTIS = frozenset(
 )
 
 
+def _bridge_in_cooldown(now: float) -> bool:
+    """Whether a recent failure means this attempt is not worth the work."""
+    return _bridge_failed_at and (now - _bridge_failed_at) < _BRIDGE_RETRY_SECONDS
+
+
+def _note_bridge_failure(reason: str) -> None:
+    """Remember that the bridge could not be built, and log it at most once a minute.
+
+    A failure used to be logged on every attempt, which is where 9605 of one log file's
+    lines came from: the same sentence, twelve times a second, saying something that had
+    not changed.  The first one is the one worth reading.
+    """
+    global _bridge_failed_at, _bridge_logged_at
+    now = time.monotonic()
+    _bridge_failed_at = now
+    if not _bridge_logged_at or (now - _bridge_logged_at) >= _BRIDGE_LOG_SECONDS:
+        _bridge_logged_at = now
+        logger.debug("%s (will retry in %.0fs)", reason, _BRIDGE_RETRY_SECONDS)
+
+
 def _init_nspasteboard():
-    """Load NSPasteboard via ctypes + libobjc.  Cached on first success."""
+    """Load NSPasteboard via ctypes + libobjc.
+
+    Cached on success, and on failure: the bridge is a property of the process, so
+    rebuilding it twelve times a second cannot succeed where the first attempt did not.
+    A cooldown keeps a transient failure recoverable.
+    """
     global _nspasteboard_objc, _nspasteboard_instance
     if _nspasteboard_instance is not None:
         return _nspasteboard_objc, _nspasteboard_instance
+    if _bridge_in_cooldown(time.monotonic()):
+        return None, None
 
     try:
         lib_path = ctypes.util.find_library("objc")
         if not lib_path:
-            logger.debug("libobjc not found via find_library")
+            _note_bridge_failure("libobjc not found via find_library")
             return None, None
 
         objc = ctypes.cdll.LoadLibrary(lib_path)
@@ -83,14 +118,15 @@ def _init_nspasteboard():
         sel_general = objc.sel_registerName(b"generalPasteboard")
         pb = objc.objc_msgSend(ns_pasteboard, sel_general)
         if not pb:
-            logger.debug("NSPasteboard.generalPasteboard returned nil")
+            _note_bridge_failure("NSPasteboard.generalPasteboard returned nil")
             return None, None
 
         _nspasteboard_objc = objc
         _nspasteboard_instance = pb
         logger.debug("NSPasteboard bridge initialized via ctypes")
     except Exception:
-        logger.debug("Failed to init NSPasteboard via ctypes", exc_info=True)
+        _note_bridge_failure("Failed to init NSPasteboard via ctypes")
+        logger.debug("NSPasteboard bridge exception", exc_info=True)
         return None, None
 
     return _nspasteboard_objc, _nspasteboard_instance
