@@ -132,6 +132,126 @@ def _init_nspasteboard():
     return _nspasteboard_objc, _nspasteboard_instance
 
 
+def probe_pasteboard_bridge() -> dict:
+    """Why the ctypes bridge is or is not working, as a dict a log can carry.
+
+    Written for a machine whose log held **9605** lines of "generalPasteboard returned nil"
+    and **zero** of "changeCount": the bridge never built, so the clipboard monitor spent its
+    whole life on the `pbpaste` fallback.  That message has already ruled two things out --
+    `find_library("objc")` did not fail and `objc_getClass("NSPasteboard")` did not return
+    nil, or the log would say so -- which leaves the pasteboard instance itself, the shape of
+    a process with no connection to the pasteboard server.
+
+    That is not something this module can fix from where it stands, and it cannot be guessed
+    at either, so the diagnosis runs where the failure happens and travels in the report.
+    Each step is recorded separately because the first `False` is the answer:
+
+      * `objc_loadable` -- is there a libobjc to load at all;
+      * `appkit_loaded` -- does `NSApplication` resolve, or was AppKit never brought up;
+      * `pasteboard_instance` -- does `generalPasteboard` return anything;
+      * `after_nsapplicationload` -- and does that change once AppKit is loaded, which is
+        the documented way to bring it up in a process that is not a bundled application
+        (a sidecar is exactly that).  If this is the one that flips, the fault is named.
+      * `pbpaste_works` -- whether the pasteboard server is reachable at all, which tells
+        "no connection" apart from "NSPasteboard specifically".
+
+    Never raises: a diagnosis that fails to run is still a fact worth reporting.
+    """
+    report: dict = {
+        "objc_path": None,
+        "objc_loadable": False,
+        "classes": {},
+        "pasteboard_instance": False,
+        "after_nsapplicationload": None,
+        "pbpaste_works": False,
+    }
+    report["pbpaste_works"] = _pbpaste_answers()
+
+    try:
+        report["objc_path"] = ctypes.util.find_library("objc")
+    except Exception:
+        report["objc_path"] = None
+    if not report["objc_path"]:
+        return report
+
+    try:
+        objc = ctypes.cdll.LoadLibrary(report["objc_path"])
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        report["objc_loadable"] = True
+    except Exception as exc:
+        report["objc_error"] = f"{type(exc).__name__}: {exc}"
+        return report
+
+    classes = {}
+    for name in (b"NSPasteboard", b"NSApplication", b"NSAutoreleasePool", b"NSObject"):
+        try:
+            handle = objc.objc_getClass(name)
+        except Exception:
+            handle = None
+        classes[name.decode()] = bool(handle)
+    report["classes"] = classes
+
+    def pasteboard() -> bool:
+        try:
+            selector = objc.sel_registerName(b"generalPasteboard")
+            return bool(objc.objc_msgSend(objc.objc_getClass(b"NSPasteboard"), selector))
+        except Exception:
+            return False
+
+    report["pasteboard_instance"] = pasteboard()
+
+    if classes["NSApplication"] and not report["pasteboard_instance"]:
+        # The one experiment worth running: bring AppKit up and ask again.  A pasteboard
+        # that answers after this and not before names the fault precisely.
+        try:
+            appkit_path = ctypes.util.find_library("AppKit") or ""
+            appkit = ctypes.cdll.LoadLibrary(appkit_path)
+            appkit.NSApplicationLoad.restype = ctypes.c_bool
+            appkit.NSApplicationLoad()
+            report["after_nsapplicationload"] = pasteboard()
+        except Exception as exc:
+            report["nsapplicationload_error"] = f"{type(exc).__name__}: {exc}"
+
+    return report
+
+
+def _describe_bridge_failure() -> str:
+    """The bridge probe as one log line.
+
+    Called once, when the monitor falls back, because that is the moment the reason matters
+    and the only moment it is cheap: a machine whose bridge never builds would otherwise
+    write the same sentence 2.5 times a second.
+    """
+    seen = probe_pasteboard_bridge()
+    parts = [
+        f"libobjc={seen.get('objc_path') or 'not found'}",
+        f"loaded={seen.get('objc_loadable')}",
+        "classes=" + ",".join(f"{k}={v}" for k, v in (seen.get("classes") or {}).items()),
+        f"pasteboard={seen.get('pasteboard_instance')}",
+        f"pbpaste={seen.get('pbpaste_works')}",
+    ]
+    if seen.get("after_nsapplicationload") is not None:
+        parts.append(f"after_NSApplicationLoad={seen['after_nsapplicationload']}")
+    for key in ("objc_error", "nsapplicationload_error"):
+        if seen.get(key):
+            parts.append(f"{key}={seen[key]}")
+    return "; ".join(parts)
+
+
+def _pbpaste_answers() -> bool:
+    """Whether `pbpaste` returns successfully, which is a different question entirely."""
+    try:
+        done = subprocess.run(["pbpaste", "-Prefer", "txt"], capture_output=True, timeout=3)
+        return done.returncode == 0
+    except Exception:
+        return False
+
+
 def _autorelease_pool_push(objc):
     """Create and return a new NSAutoreleasePool on the calling thread.
 
@@ -1168,7 +1288,13 @@ class DarwinClipboardMonitor(ClipboardMonitor):
             logger.debug("Monitor using ctypes NSPasteboard.changeCount")
             self._poll_change_count(last_cc)
         else:
-            logger.debug("Monitor falling back to content hashing (ctypes bridge unavailable)")
+            # The fallback is a workaround, and which part of the bridge failed decides
+            # whether it can be repaired -- so the reason travels in the log rather than
+            # only in the diagnostics report.  Recorded once, at startup, not per poll.
+            logger.warning(
+                "Clipboard bridge unavailable, using the pbpaste fallback: %s",
+                _describe_bridge_failure(),
+            )
             self._poll_hash()
 
     def _poll_change_count(self, last_cc: int):

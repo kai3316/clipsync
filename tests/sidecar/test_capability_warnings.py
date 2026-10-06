@@ -108,3 +108,107 @@ def test_the_status_payload_carries_the_key(monkeypatch):
     payload = bootstrap.SidecarApplication.status(Locked())
     assert "warnings" in payload
     assert [w["code"] for w in payload["warnings"]] == ["clipboard_tool_missing"]
+
+
+# ── The macOS pasteboard bridge diagnosis ─────────────────────────────────────
+
+def test_a_non_macos_host_has_no_pasteboard_check(monkeypatch):
+    """Windows and Linux read their clipboard by other means; nothing to report."""
+    monkeypatch.setattr(diagnostics.platform, "system", lambda: "Windows")
+    assert diagnostics.pasteboard_bridge_probe() is None
+
+
+def test_the_report_names_every_step(monkeypatch):
+    """The first step that is False is the answer, so each must be visible.
+
+    A detail string saying only "bridge unavailable" would leave the log exactly where it
+    started -- which is the whole reason this probe exists.
+    """
+    monkeypatch.setattr(diagnostics.platform, "system", lambda: "Darwin")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "internal.clipboard.clipboard_darwin",
+        type(
+            "M",
+            (),
+            {
+                "probe_pasteboard_bridge": staticmethod(
+                    lambda: {
+                        "objc_path": "/usr/lib/libobjc.A.dylib",
+                        "objc_loadable": True,
+                        "classes": {"NSPasteboard": True, "NSApplication": True},
+                        "pasteboard_instance": False,
+                        "after_nsapplicationload": True,
+                        "pbpaste_works": True,
+                    }
+                )
+            },
+        ),
+    )
+
+    check = diagnostics.pasteboard_bridge_probe()
+
+    assert check is not None
+    assert check["ok"] is False
+    assert check["id"] == "pasteboard_bridge"
+    for fragment in (
+        "libobjc=/usr/lib/libobjc.A.dylib",
+        "loaded=True",
+        "NSPasteboard=True",
+        "pasteboard=False",
+        "pbpaste=True",
+        # The experiment, which is what names the fault when it flips.
+        "after_NSApplicationLoad=True",
+    ):
+        assert fragment in check["detail"], f"{fragment!r} missing from {check['detail']!r}"
+
+
+def test_a_working_bridge_is_not_a_warning(monkeypatch):
+    """A check that always complains is a check nobody reads."""
+    monkeypatch.setattr(diagnostics.platform, "system", lambda: "Darwin")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "internal.clipboard.clipboard_darwin",
+        type(
+            "M",
+            (),
+            {
+                "probe_pasteboard_bridge": staticmethod(
+                    lambda: {
+                        "objc_path": "/usr/lib/libobjc.A.dylib",
+                        "objc_loadable": True,
+                        "classes": {"NSPasteboard": True},
+                        "pasteboard_instance": True,
+                        "after_nsapplicationload": None,
+                        "pbpaste_works": True,
+                    }
+                )
+            },
+        ),
+    )
+
+    check = diagnostics.pasteboard_bridge_probe()
+
+    assert check is not None
+    assert check["ok"] is True
+    assert check["guidance"] is None
+
+
+def test_a_probe_that_cannot_run_still_reports(monkeypatch):
+    """A diagnosis that fails is a fact worth carrying, not an exception to raise."""
+    monkeypatch.setattr(diagnostics.platform, "system", lambda: "Darwin")
+
+    def explode():
+        raise RuntimeError("no ctypes here")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "internal.clipboard.clipboard_darwin",
+        type("M", (), {"probe_pasteboard_bridge": staticmethod(explode)}),
+    )
+
+    check = diagnostics.pasteboard_bridge_probe()
+
+    assert check is not None
+    assert check["ok"] is False
+    assert "RuntimeError" in check["detail"] and "no ctypes here" in check["detail"]

@@ -351,6 +351,67 @@ def mdns_probe() -> dict:
     return result
 
 
+def pasteboard_bridge_probe():
+    """macOS NSPasteboard bridge check; None on other platforms.
+
+    A machine's log held **9605** lines of "generalPasteboard returned nil" and **zero** of
+    "changeCount": the ctypes bridge never built, so the clipboard monitor ran on the
+    `pbpaste` fallback for its whole life.  The reason could not be worked out from the log
+    -- it rules out a missing `libobjc` and a missing `NSPasteboard` class, and stops there
+    -- and it could not be reproduced without the machine.
+
+    So it is measured where it fails and carried in this report.  `ok` is the pasteboard
+    instance existing at all; `detail` prints every step, because the first step that is
+    False is the answer and the steps after it are the experiment.
+    """
+    if platform.system() != "Darwin":
+        return None
+    try:
+        from internal.clipboard.clipboard_darwin import probe_pasteboard_bridge
+
+        seen = probe_pasteboard_bridge()
+    except Exception as exc:
+        return {
+            "id": "pasteboard_bridge",
+            "ok": False,
+            "detail": f"the probe itself failed: {type(exc).__name__}: {exc}",
+            "detail_key": None,
+            "guidance": None,
+            "guidance_key": None,
+        }
+
+    ok = bool(seen.get("pasteboard_instance"))
+    parts = [
+        f"libobjc={seen.get('objc_path') or 'not found'}",
+        f"loaded={seen.get('objc_loadable')}",
+        "classes=" + ",".join(f"{k}={v}" for k, v in (seen.get("classes") or {}).items()),
+        f"pasteboard={seen.get('pasteboard_instance')}",
+        f"pbpaste={seen.get('pbpaste_works')}",
+    ]
+    # Only meaningful when it was run, which is when the pasteboard was nil and AppKit
+    # resolved -- that experiment is what names the fault.
+    if seen.get("after_nsapplicationload") is not None:
+        parts.append(f"after_NSApplicationLoad={seen['after_nsapplicationload']}")
+    for key in ("objc_error", "nsapplicationload_error"):
+        if seen.get(key):
+            parts.append(f"{key}={seen[key]}")
+
+    return {
+        "id": "pasteboard_bridge",
+        "ok": ok,
+        "detail": "; ".join(parts),
+        "detail_key": None,
+        "guidance": None
+        if ok
+        else (
+            "The clipboard bridge could not be built, so clipboard capture is running on "
+            "the slower pbpaste fallback.  Send this report with the log: the steps above "
+            "say which part failed."
+        ),
+        "guidance_key": None,
+    }
+
+
 def clipboard_tool_probe():
     """Linux xclip / wl-paste check; None on other platforms."""
     if platform.system() != "Linux":
@@ -562,6 +623,10 @@ def build_checks(
     clipboard_tool = clipboard_tool_probe()
     if clipboard_tool is not None:
         checks.append(clipboard_tool)
+
+    pasteboard_bridge = pasteboard_bridge_probe()
+    if pasteboard_bridge is not None:
+        checks.append(pasteboard_bridge)
 
     return checks, firewall
 
