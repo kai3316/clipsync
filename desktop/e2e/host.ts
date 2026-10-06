@@ -582,4 +582,16 @@ export const fixtures: Record<string, unknown> = {
   copy_history: { copied: true },
   copy_favorite: { copied: true },
   push_text: { ok: true, len: 12, sent: true },
+  // A completed "test connection" result, so the row's report of it can be measured.
+  // The shape is what `devices.test` answers with, and two channels is the ordinary case
+  // for a paired device: a local route and, when it is not on this network, the relay.
+  // A third is included deliberately -- `probeLabel` joins every channel into one line, so
+  // this is what decides whether the report stays on one line or wraps.
+  test_device: {
+    ok: true,
+    results: [
+      { channel: "lan", ok: true, latency_ms: 4, error: null },
+      { channel: "relay", ok: true, latency_ms: 182, error: null },
+    ],
+  },
 };

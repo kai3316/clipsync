@@ -545,3 +545,107 @@ test("the device sync switch sits with the state it belongs to", async ({ page }
   expect(where!.aboveNote, "the switch is still below the note field").toBe(true);
   expect(failures).toEqual([]);
 });
+
+
+/** A device row's "test connection" report costs one short line, and collides with nothing.
+ *
+ * Measured before: **50px** added to a 153px row for 18px of text -- the grid's 14px row
+ * gap, the row's 16px padding above and below, and the line.  The report keeps its row (the
+ * alternative rendered through the sync switch) and the padding that made it expensive is
+ * trimmed, which brings it to 43px.
+ *
+ * The collision check is the part worth keeping.  It compares the report's band against the
+ * chips, the switch and the note field -- the things that share its columns -- rather than
+ * against one neighbour, because the earlier version of this measurement passed a layout
+ * whose text ran through the switch.
+ */
+test("the connection-test report is one bounded line that collides with nothing", async ({ page }) => {
+  const problems: string[] = [];
+  for (const [w, h] of [[1707, 960], [1280, 900]] as [number, number][]) {
+    const failures = await open(page, w, h);
+    await page.getByRole("button", { name: T("设备", "Devices"), exact: true }).click();
+    await page.waitForTimeout(150);
+    const before = await page.evaluate(
+      () => Math.round((document.querySelector(".device-row") as HTMLElement).getBoundingClientRect().height),
+    );
+    await page.locator(`[aria-label="${T("测试连接", "Test connection")}"]`).first().click();
+    await page.waitForTimeout(250);
+
+    const seen = await page.evaluate(() => {
+      const row = document.querySelector(".device-row") as HTMLElement;
+      const band = (sel: string) => {
+        const n = row.querySelector(sel) as HTMLElement | null;
+        if (!n) return null;
+        const r = n.getBoundingClientRect();
+        return { t: r.top, b: r.bottom, h: r.height };
+      };
+      const probe = band(".device-probe");
+      const collisions: string[] = [];
+      if (probe) {
+        for (const [name, sel] of [
+          ["chips", ".device-channels"],
+          ["switch", ".device-sync"],
+          ["note field", ".device-note"],
+        ] as [string, string][]) {
+          const other = band(sel);
+          // They share the row's width, so overlapping bands is the collision.
+          if (other && probe.t < other.b && other.t < probe.b) collisions.push(name);
+        }
+      }
+      return {
+        height: Math.round(row.getBoundingClientRect().height),
+        probeHeight: probe ? Math.round(probe.h) : 0,
+        text: (row.querySelector(".device-probe")?.textContent || "").trim(),
+        collisions,
+      };
+    });
+
+    expect(seen.text, `${w}px: the report is not shown`).not.toBe("");
+    expect(seen.probeHeight, `${w}px: the report is not laid out`).toBeGreaterThan(8);
+    if (seen.collisions.length) problems.push(`${w}px: overlaps ${seen.collisions.join(", ")}`);
+    const delta = seen.height - before;
+    if (delta > 46) problems.push(`${w}px: the row grew ${delta}px for a one-line report`);
+    expect(failures).toEqual([]);
+  }
+  expect(problems).toEqual([]);
+});
+
+
+/** The favourites sidebar is as tall as its groups, not as tall as the workspace.
+ *
+ * Measured before: a **640px** bordered column holding **223px** of group names, so **417px**
+ * of a box that draws an edge was empty.  Empty space inside a box with a border reads as a
+ * thing that failed to load; the same space with no box around it reads as the page being
+ * short, which is what it is.
+ *
+ * Asserted as "the box is close to its content", not as a number, because the number depends
+ * on how many groups there are.
+ */
+test("the favourites sidebar is as tall as the groups in it", async ({ page }) => {
+  const failures = await open(page, 1707, 960);
+  await page.getByRole("button", { name: T("收藏库", "Favorites"), exact: true }).click();
+  await expect(page.locator(".favorites-groups")).toBeVisible();
+
+  const seen = await page.evaluate(() => {
+    const sidebar = document.querySelector(".favorites-groups") as HTMLElement;
+    const list = document.querySelector(".favorites-list") as HTMLElement;
+    const box = sidebar.getBoundingClientRect();
+    let filled = 0;
+    for (const kid of [...sidebar.children]) {
+      const r = (kid as HTMLElement).getBoundingClientRect();
+      if (r.height > 0) filled = Math.max(filled, r.bottom - box.top);
+    }
+    return {
+      sidebarHeight: Math.round(box.height),
+      filled: Math.round(filled),
+      listHeight: Math.round(list.getBoundingClientRect().height),
+    };
+  });
+
+  // The sidebar's own padding is 14px a side, so a short group list still has real slack.
+  const empty = seen.sidebarHeight - seen.filled;
+  expect(empty, `the sidebar box is ${empty}px taller than its groups`).toBeLessThan(40);
+  // And the list beside it is what decides the workspace height.
+  expect(seen.listHeight).toBeGreaterThan(seen.sidebarHeight);
+  expect(failures).toEqual([]);
+});

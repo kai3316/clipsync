@@ -5502,7 +5502,10 @@ async function translateText() {
                 <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="busy || !!fetchBusyId || !canDial(device)" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('移除设备')" :title="t('移除设备')" :disabled="busy" @click="forgetDevice = device"><Trash2 :size="18" /></button>
               </div>
-              <p v-if="probeResults[device.id]" class="note device-full" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
+              <!-- A row of its own, made cheap: the class trims the padding that made a
+                   one-line sentence cost 50px.  Placing it on the chips' line instead
+                   rendered it through the sync switch. -->
+              <p v-if="probeResults[device.id]" class="note device-full device-probe" role="status">{{ t("连接测试：") }}{{ probeLabel(probeResults[device.id]) }}</p>
               <p v-if="updateNotes[device.id]" class="note device-full" role="status">{{ updateNotes[device.id] }}</p>
               <p v-if="logNotes[device.id]" class="note device-full" role="status">{{ logNotes[device.id] }}</p>
               <!-- The chips under the name.  One word for the device's state —

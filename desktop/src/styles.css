@@ -505,6 +505,19 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    They start where the name starts and run to the row's right edge, so one
    vertical line holds the identity, the chips and the note field together. */
 .device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2 / -1; }
+/* The test-connection report.  It keeps the row it had -- `device-full`, spanning the row --
+   and the row is made cheap instead of being given away.
+
+   It cost 50px for 18px of text: the grid's 14px row gap, plus this rule's own padding
+   above and below, plus the line.  A one-line status sentence is worth about 30px and no
+   more, and on five devices the difference is 100px of a 960px window.
+
+   The first attempt put it on the chips' line instead, which measured better (203px ->
+   167px) and rendered the text wrapping through the sync switch.  The measurement checked
+   the chips' right edge and the thing it collided with was the switch: checking the wrong
+   neighbour passes a broken layout, so the placement is reverted and the padding is
+   trimmed. */
+.device-probe { padding: 0; margin-top: -6px; line-height: 1.4; }
 /* The sync switch rides the chip's line, against the row's right edge.  It used to be the
    last block in the stack, so on a paired device it sat below the note field at the bottom
    of the row -- four lines from the device it applies to -- while the state chip that says
@@ -762,7 +775,11 @@ button.danger-outline:hover:not(:disabled),
 /* The library is one card holding two panes — the groups, and the list they
    filter — and the rule between them is the card's, not a column gap's.  It is
    the shape the chat page has: a rail, a divider, the room the rail is for. */
-.favorites-workspace { display: grid; min-width: 0; grid-template-columns: minmax(150px, 200px) minmax(0, 1fr); }
+/* `align-items: start` rather than the default `stretch`: the sidebar is a column of group
+   names, and stretched to the workspace's height it drew a border down 417px of nothing
+   (measured: 640px box, 223px of groups).  A short box that ends where its list ends is the
+   honest shape, and the space is then the page's rather than a box's. */
+.favorites-workspace { display: grid; align-items: start; min-width: 0; grid-template-columns: minmax(150px, 200px) minmax(0, 1fr); }
 .favorites-list { min-width: 0; padding: 0 var(--card-pad) 16px; }
 .favorites-groups { min-width: 0; display: flex; flex-direction: column; gap: 2px; align-content: start; padding: 14px; border-right: 1px solid var(--line); }
 /* A group's row and the way into its menu.  The row is the filter and takes
