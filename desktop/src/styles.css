@@ -775,11 +775,34 @@ button.danger-outline:hover:not(:disabled),
 /* The library is one card holding two panes — the groups, and the list they
    filter — and the rule between them is the card's, not a column gap's.  It is
    the shape the chat page has: a rail, a divider, the room the rail is for. */
-/* `align-items: start` rather than the default `stretch`: the sidebar is a column of group
-   names, and stretched to the workspace's height it drew a border down 417px of nothing
-   (measured: 640px box, 223px of groups).  A short box that ends where its list ends is the
-   honest shape, and the space is then the page's rather than a box's. */
+/* Two heights in one card, so `align-items` is not enough on its own.
+
+   The *sidebar* must not stretch: stretched, it drew a border down 417px of nothing (measured:
+   640px box, 223px of group names), and an empty stretch of a box with an edge reads as
+   something that failed to load.  The *list* must stretch: the page was asked to fill its
+   window, and with both items shrunk to their content the card ended 173px above the column's
+   end at 1920 (measured).
+
+   `align-items: start` on the grid for the first, `align-self: stretch` on the list for the
+   second.  Getting only the first is what made an earlier attempt look finished. */
 .favorites-workspace { display: grid; align-items: start; min-width: 0; grid-template-columns: minmax(150px, 200px) minmax(0, 1fr); }
+.favorites-workspace > .favorites-list { align-self: stretch; }
+
+/* The height chain down to that card, because filling the window needs every level to pass
+   the height along and two of them did not (measured at 1920x1040: the column 901px, the
+   `page-col` 696px, the card 642px).
+
+   `.favorites-view` was `display: block`.  It is a flex item with `flex: 1`, so it *is* 901px
+   tall, but a block container does not give its height to a grid child.  It becomes a column
+   so the `page-col` can stretch -- and `.page-col`'s `align-content: start` is then overridden
+   for this view only, because packing one row to the top is what every other page wants: the
+   AI page and the devices page are columns of cards that should sit at the top and scroll. */
+.favorites-view { display: flex; flex-direction: column; }
+/* Named rows, because `align-content: stretch` alone gave the free space to the toolbar as
+   well: measured, a 38px toolbar sat in a 90px row while the card took what was left over.
+   `minmax(0, 1fr)` on the second row so a long list shrinks and scrolls rather than pushing
+   the row past the window. */
+.favorites-view > .page-col { flex: 1; grid-template-rows: auto minmax(0, 1fr); }
 .favorites-list { min-width: 0; padding: 0 var(--card-pad) 16px; }
 .favorites-groups { min-width: 0; display: flex; flex-direction: column; gap: 2px; align-content: start; padding: 14px; border-right: 1px solid var(--line); }
 /* A group's row and the way into its menu.  The row is the filter and takes

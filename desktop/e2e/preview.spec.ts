@@ -651,71 +651,56 @@ test("the favourites sidebar is as tall as the groups in it", async ({ page }) =
 });
 
 
-/** The transfers in progress take the page's spare height; the history keeps its own.
+/** The favourites card fills its window, and the sidebar inside it does not.
  *
- * Before: 123px of page below both cards, because neither grew.  Stretching *both* would put
- * the blank inside the history card instead, which reads as something missing rather than as a
- * short list -- so only the active list grows, and it is the one where an empty bottom is a
- * place a new transfer appears.
+ * The page was asked to fill the height rather than ending wherever its content did.  Measured
+ * at 1920x1040 before: a 901px column with the card ending at 867, so **173px** below it.
  *
- * Asserted as "the active card reaches the bottom" and "the history is not stretched", which
- * are the two halves of the decision.  A single "there is no blank" assertion would pass the
- * version that makes the history card 300px tall.
+ * Three levels had to pass the height down and each was broken differently -- `display: block`
+ * on the view, `align-content: start` on the page column, and then `align-content: stretch`
+ * handing the free space to the toolbar's row as well -- so this asserts the outcome at the
+ * card, and separately that the sidebar did **not** come along: stretched, it draws a border
+ * down 417px of nothing, which is what it was doing before any of this.
  */
-test("the transfers in progress take the spare height and the history does not", async ({ page }) => {
+test("the favourites card fills its window and its sidebar does not", async ({ page }) => {
   const problems: string[] = [];
-  for (const [w, h] of [[1707, 960], [1280, 900], [1100, 760]] as [number, number][]) {
+  for (const [w, h] of [[1920, 1040], [1707, 960], [1280, 900]] as [number, number][]) {
     const failures = await open(page, w, h);
-    await page.getByRole("button", { name: T("文件传输", "File Transfer"), exact: true }).click();
-    await page.waitForTimeout(200);
+    await page.getByRole("button", { name: T("收藏库", "Favorites"), exact: true }).click();
+    await expect(page.locator(".favorites-workspace")).toBeVisible();
 
     const seen = await page.evaluate(() => {
-      const view = document.querySelector(".transfers-view") as HTMLElement;
-      const active = document.querySelector(".transfer-list--active") as HTMLElement;
-      const history = document.querySelector(".transfer-list--history") as HTMLElement;
+      const view = document.querySelector(".favorites-view") as HTMLElement;
+      const card = document.querySelector(".favorites-workspace") as HTMLElement;
+      const sidebar = document.querySelector(".favorites-groups") as HTMLElement;
+      const col = document.querySelector(".favorites-view > .page-col") as HTMLElement;
       const vr = view.getBoundingClientRect();
-      const ar = active.getBoundingClientRect();
-      const hr = history.getBoundingClientRect();
-      // How tall the history would be if nothing stretched it: its header plus its rows.
-      let natural = 0;
-      for (const kid of [...history.children]) {
+      const cr = card.getBoundingClientRect();
+      let sidebarContent = 0;
+      for (const kid of [...sidebar.children]) {
         const r = (kid as HTMLElement).getBoundingClientRect();
-        if (r.height > 0) natural = Math.max(natural, r.bottom - hr.top);
-      }
-      // The same for the active list, so "it grew" is measured against its own content.
-      let activeContent = 0;
-      for (const kid of [...active.children]) {
-        const r = (kid as HTMLElement).getBoundingClientRect();
-        if (r.height > 0) activeContent = Math.max(activeContent, r.bottom - ar.top);
-      }
-      // The lowest thing in the view, which is what "the page is filled" is about.
-      let lastBottom = vr.top;
-      for (const kid of [...view.children]) {
-        const r = (kid as HTMLElement).getBoundingClientRect();
-        if (r.height > 0) lastBottom = Math.max(lastBottom, r.bottom);
+        if (r.height > 0) sidebarContent = Math.max(sidebarContent, r.bottom - sidebar.getBoundingClientRect().top);
       }
       return {
+        cardBottom: Math.round(cr.bottom),
         viewBottom: Math.round(vr.bottom),
-        lastBottom: Math.round(lastBottom),
-        activeHeight: Math.round(ar.height),
-        activeContent: Math.round(activeContent),
-        historyHeight: Math.round(hr.height),
-        historyNatural: Math.round(natural),
+        // The column's own 32px bottom margin is the only slack expected.
+        colMarginBottom: getComputedStyle(col).marginBottom,
+        sidebarHeight: Math.round(sidebar.getBoundingClientRect().height),
+        sidebarContent: Math.round(sidebarContent),
+        // A toolbar that grows is the symptom the third attempt had.
+        toolbarHeight: Math.round((col.firstElementChild as HTMLElement).getBoundingClientRect().height),
       };
     });
 
-    // The last element in the column ends at the column's end, less the page's own padding.
-    // Asserting this of the *active* list would be wrong: the history sits below it.
-    const slack = seen.viewBottom - seen.lastBottom;
-    if (slack > 40) problems.push(`${w}px: the page stops ${slack}px above the bottom`);
-    // It really did grow, rather than the page being exactly its content's height.
-    if (seen.activeHeight <= seen.activeContent) {
-      problems.push(`${w}px: the active list is not taller than its ${seen.activeContent}px of content`);
+    const slack = seen.viewBottom - seen.cardBottom;
+    if (slack > 40) problems.push(`${w}px: the card ends ${slack}px above the column's end`);
+    if (seen.toolbarHeight > 60) {
+      problems.push(`${w}px: the toolbar is ${seen.toolbarHeight}px tall -- it took the slack`);
     }
-    // And the history is its own height, give or take its padding.
-    if (seen.historyHeight - seen.historyNatural > 30) {
+    if (seen.sidebarHeight - seen.sidebarContent > 40) {
       problems.push(
-        `${w}px: the history card is ${seen.historyHeight - seen.historyNatural}px taller than its rows`,
+        `${w}px: the sidebar is ${seen.sidebarHeight - seen.sidebarContent}px taller than its groups`,
       );
     }
     expect(failures).toEqual([]);
