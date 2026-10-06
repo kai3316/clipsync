@@ -707,15 +707,24 @@ describe("desktop application store", () => {
       downloaded: 50, total: 100, error: "", version: "", path: "" });
     // Progress must not be reset by a snapshot reload.
     //
-    // The count is taken here rather than once at the top of the test: the store
-    // polls, and whether a poll had already been scheduled and was waiting on the
-    // clock is not something the test controls.  Comparing against a count
-    // sampled several statements earlier made this fail on CI's runner ("expected
-    // 1 times, but got 2") while passing here, because the extra call was a
-    // scheduled poll rather than the refresh this is about.
-    const beforeProgressTick = vi.mocked(bridge.status).mock.calls.length;
+    // `refresh` is debounced by 60ms, so a pending one from any earlier event fires during a
+    // 120ms advance and the assertion gets a count it did not cause.  Sampling the count closer
+    // to the `expect` did not fix that -- it made the failure rarer, and CI still produced
+    // exactly the "expected 1 times, but got 2" this comment once blamed on that.  It is not
+    // rare, it is certain: 120 > 60 means the debounce *always* fires inside the advance.
+    //
+    // So the pending refresh is drained first, from both the timer queue and the promise chain
+    // `refresh` awaits, and then the event is expected to add nothing.  That is the claim in the
+    // test's name, and it is now deterministic rather than probable.
     await vi.advanceTimersByTimeAsync(120);
-    expect(bridge.status).toHaveBeenCalledTimes(beforeProgressTick);
+    const settled = vi.mocked(bridge.status).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(120);
+    expect(bridge.status).toHaveBeenCalledTimes(settled);
+    event({ type: "event", name: "update.state", session_id: "session", seq: 1,
+      data: { state: { phase: "downloading", fraction: 0.5, downloaded: 50, total: 100,
+        error: "", version: "", path: "" } } });
+    await vi.advanceTimersByTimeAsync(120);
+    expect(bridge.status).toHaveBeenCalledTimes(settled);
     event({ type: "event", name: "update.available", session_id: "session", seq: 2,
       data: { latest: "v2.0.0", current: "1.0.0", url: "https://example.com",
         installable: true } });
@@ -724,9 +733,8 @@ describe("desktop application store", () => {
     // is how a self-installing build sent the user another application.
     expect(store.state.updateCheck).toEqual({ available: true, latest: "v2.0.0",
       current: "1.0.0", url: "https://example.com", installable: true });
-    const beforeAvailableTick = vi.mocked(bridge.status).mock.calls.length;
     await vi.advanceTimersByTimeAsync(120);
-    expect(bridge.status).toHaveBeenCalledTimes(beforeAvailableTick);
+    expect(bridge.status).toHaveBeenCalledTimes(settled);
     store.dispose();
   });
 
