@@ -721,3 +721,63 @@ def test_the_browse_session_gates_the_round():
     discovery._presence_round()
 
     assert sent == [], "a round queried the network while browsing was paused"
+
+
+def test_a_failed_query_is_reported(monkeypatch, caplog):
+    """`zc.send` raising is how a round does nothing while looking healthy.
+
+    zeroconf raises on an interface it cannot use -- an adapter left by WSL or Docker is the
+    usual one, and this machine's log has `Error with socket (('172.19.0.1', 5353))`.  The
+    question then never leaves, and before this the application said nothing about it and
+    went on discovering nobody until it was restarted.
+    """
+    import logging
+
+    discovery, _ = a_discovery()
+
+    class Refusing:
+        def send(self, message):
+            raise OSError(59, "An unexpected network error occurred")
+
+    discovery._zc = Refusing()
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.discovery"):
+        discovery._presence_round()
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "a failed query produced no warning"
+    assert "could not ask" in warnings[0].getMessage()
+
+
+def test_the_round_is_counted_so_asking_is_answerable(caplog):
+    """The debug line is the evidence that distinguishes the two halves of the symptom.
+
+    "We asked and nobody answered" and "we never asked" need different fixes, and without
+    this line they are indistinguishable in a user's log.
+    """
+    import logging
+
+    discovery, _ = a_discovery()
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.discovery"):
+        discovery._presence_round()
+        discovery._presence_round()
+
+    rounds = [r.getMessage() for r in caplog.records if "Presence round" in r.getMessage()]
+    assert len(rounds) == 2, f"expected one line per round, got {rounds}"
+    assert "asked=True" in rounds[0], rounds[0]
+    assert "answered=0" in rounds[0], rounds[0]
+
+
+def test_a_round_still_survives_a_failing_send():
+    """Suppression stays: a raising round must not kill the presence thread."""
+    discovery, _ = a_discovery()
+
+    class Refusing:
+        def send(self, message):
+            raise OSError(59, "nope")
+
+    discovery._zc = Refusing()
+    # Returning rather than raising is the assertion; the thread this runs on has no
+    # handler above it, so an exception here is the failure mode being guarded against.
+    discovery._presence_round()

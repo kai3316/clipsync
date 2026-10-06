@@ -975,8 +975,24 @@ class Discovery:
             # is sitting there answering questions is never asked one it will
             # answer.  That is how "the device is not discovered" happens while
             # the device is on the network.
-            with contextlib.suppress(Exception):
+            # A failed send used to be suppressed without a word, and it is the one way
+            # this round can do nothing while looking healthy: zeroconf raises on an
+            # interface it cannot use (an adapter left by WSL or Docker, typically), the
+            # question is never asked, and the application goes on discovering nobody until
+            # it is restarted and builds a new zeroconf.  Suppressed still -- a raising
+            # round must not kill the presence thread -- but no longer silent, and counted,
+            # so "did we ask?" is answerable from a log instead of inferred.
+            sent = True
+            try:
                 zc.send(self._build_query())
+            except Exception as exc:
+                sent = False
+                logger.warning(
+                    "Presence round %d could not ask the network: %s: %s",
+                    self._rounds,
+                    type(exc).__name__,
+                    exc,
+                )
             self._netmon_stop.wait(SCAN_SETTLE_SECONDS)
             window_end = time.monotonic()
             with self._lock:
@@ -1013,6 +1029,13 @@ class Discovery:
                     # instead of returning None — _restart_zeroconf swaps and
                     # closes the Zeroconf this round is holding.
                     logger.debug("Presence re-read failed for %s", name, exc_info=True)
+            logger.debug(
+                "Presence round %d: asked=%s answered=%d known=%d",
+                self._rounds,
+                sent,
+                len(answered),
+                len(self._known_peers),
+            )
             self._sweep_presence()
 
     def _sweep_presence(self):
