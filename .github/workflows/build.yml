@@ -81,66 +81,43 @@ jobs:
 
           What is new in this release:
 
-          Found by reading a paired log set from two machines -- one Windows, one macOS --
-          sent to explain two symptoms: clipboard sync that sometimes did not happen, and a
-          Mac that Windows could not always discover.
+          - **Discovery is watched on both halves, and the advert half repairs itself.**  A
+            device that cannot be found, on any platform, with a restart as the only cure:
+            that report is what this is for.  A restart rebuilds the zeroconf instance, so the
+            fault lives in that instance's state -- and only one half of discovery was being
+            watched.
 
-          - **The macOS clipboard monitor no longer rebuilds its bridge ten times a second.**
-            The log held **9605** lines of `NSPasteboard.generalPasteboard returned nil` --
-            nearly the entire file.  The arithmetic: `POLL_INTERVAL` is 0.4s, one poll calls
-            five `_pb_*` helpers, and each calls `_init_nspasteboard()`.  A **success** was
-            cached; a **failure was not**, so every one of them rebuilt the bridge from
-            scratch -- `find_library`, `LoadLibrary`, `objc_getClass`, two `sel_registerName`s
-            and an `objc_msgSend` -- up to **12.5 failed library loads a second, forever**,
-            with a log line each.  A failure is now cached with a 60-second cooldown, so a
-            transient refusal still recovers and a permanent one stops costing anything.
+            The browser was covered: a presence round asks the network who is here every ten
+            seconds.  The **advertiser** was not.  The address watcher rebuilds everything when
+            the local *address set* changes, which is what lets peers find a device again after
+            a network change -- but if the sockets break or the registration is lost while the
+            address stays the same, the set never changes, nothing is compared, and nothing
+            rebuilds for as long as the process runs.  Such a device is healthy, reachable by
+            address, and invisible.
 
-          - **And it no longer spawns `pbpaste` ten times a second.**  When that bridge is
-            unavailable the monitor falls back to hashing the clipboard, and `_poll_hash`
-            called `_get_content_hash()` **twice** per poll -- once to seed itself and again
-            inside the loop -- while each of those spawns `pbpaste` twice.  At 0.4s that is
-            ten process spawns a second, on exactly the machines that could least afford it:
-            the ones whose bridge failed, which is why the fallback is running at all.
+            Two things now: a **state line about once a minute** -- whether this machine is
+            advertising, on which addresses, whether it is browsing, how many peers it knows
+            and how many services it has heard -- and a **repair**, in the round that notices
+            an advertisement has gone, logged at INFO.  If a device cannot be found again, that
+            line says which half went quiet.
 
-          - **A reverse-DNS host name is no longer sent to the resolver every 30 seconds.**
-            On this Mac `socket.getfqdn()` returns the reverse form of the host's own `::`,
-            and the code asked `getaddrinfo` about it anyway: `Address lookup for
-            '1.0.0.0...0.ip6.arpa' failed` **408 times** in one log, at a median interval of
-            **30.0 seconds**, for a 70-character name no resolver can answer.  Such names --
-            and `localhost` -- are filtered before the call.
+          - **More logging around the failures that need a restart to clear.**  A failed mDNS
+            query is a warning naming the round rather than silence; a presence round reports
+            `asked=` and `answered=`, which separates **"we asked and nobody answered"** from
+            **"we never asked"**; and a name no resolver can answer -- the reverse-DNS form
+            `socket.getfqdn()` returns on macOS -- is no longer asked about every 30 seconds.
 
-          - **A presence query that fails to send now says so.**  This is the one that
-            matters for the discovery symptom.  The mDNS presence round asks the network who
-            is here every ten seconds, and its one silent failure point was a
-            `contextlib.suppress(Exception)` around the send.  zeroconf **does** raise on an
-            interface it cannot use -- this machine's log has `Error with socket
-            (('172.19.0.1', 5353)): [WinError 59]`, an adapter left by WSL or Docker -- and
-            when it did, the question was never asked, **nothing was written down**, and the
-            application went on discovering nobody until it was restarted and built a new
-            zeroconf.  That is the reported symptom exactly.  The send is still suppressed so
-            a raising round cannot kill the presence thread, but it is no longer silent, and
-            a round now logs `asked=` and `answered=`, which is what separates **"we asked
-            and nobody answered"** from **"we never asked"**.
+          - **The macOS clipboard bridge diagnoses itself, in the log.**  One warning when the
+            `pbpaste` fallback is chosen, naming each step: whether a libobjc was found and
+            loaded, whether the Objective-C classes resolve, whether `generalPasteboard`
+            returns anything, whether `pbpaste` works, and whether the pasteboard answers
+            **after `NSApplicationLoad()`** -- the documented way to bring AppKit up in a
+            process that is not a bundled application, which a sidecar is not.
 
-          - **The macOS clipboard bridge now diagnoses itself, in the log.**  Whether the
-            bridge can be repaired depends on which part of it failed, and the log could not
-            say: it ruled out a missing `libobjc` and a missing `NSPasteboard` class and
-            stopped there.  When the fallback is chosen, one warning now carries every step
-            -- is there a libobjc, does AppKit resolve, does `generalPasteboard` return
-            anything, does `pbpaste` work, and does the pasteboard answer **after
-            `NSApplicationLoad()`**, which is the documented way to bring AppKit up in a
-            process that is not a bundled application.  A sidecar is exactly that, so if that
-            last one flips, the fault is named.  The same check appears in the diagnostics
-            report.
-
-          **What this release does not fix, and says so rather than implying otherwise:**
-          the discovery failure itself.  Windows discovered the Mac four times in the logs
-          available and recovered from every loss, so it could not be reproduced here.  This
-          release makes the next occurrence answerable from a log; if the new warning appears
-          while the Mac is unreachable, the adapter is the cause and the fix is to bind mDNS
-          to the real interface, or to rebuild zeroconf when a send fails instead of waiting
-          for a restart.  The macOS bridge failing at all is likewise still open -- what is
-          fixed is the cost of it failing.
+          - **Interface:** the favourites card fills its window while its sidebar stays the
+            height of its groups; the transfers in progress take the page's spare height and
+            the history keeps its own; a completed "test connection" report costs 43px rather
+            than 50px.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
