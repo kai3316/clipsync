@@ -651,7 +651,7 @@ def test_the_predicate_matches_the_shapes_it_names():
     assert wrong == [], f"unexpected answers: {wrong}"
 # ── The presence round asks, rather than waiting to be told ───────────────────
 
-def a_discovery(browsing=True):
+def a_discovery(browsing=True, settled=True):
     """A real Discovery with its network collaborators replaced.
 
     Only `_zc` and `_browser` are stood in for: everything else is what the constructor
@@ -671,9 +671,11 @@ def a_discovery(browsing=True):
     )
     discovery._zc = Recorder()
     discovery._browser = object() if browsing else None
-    # The round waits on this event for its settle window; setting it keeps the test quick
-    # without changing which branch runs.
-    discovery._netmon_stop.set()
+    # The round waits on this event for its settle window.  Set, it returns at once, which
+    # keeps the test quick -- but the event is *also* how the advertisement repair knows a
+    # shutdown is in progress, so a test that expects a repair has to leave it clear.
+    if settled:
+        discovery._netmon_stop.set()
     return discovery, sent
 
 
@@ -781,3 +783,83 @@ def test_a_round_still_survives_a_failing_send():
     # Returning rather than raising is the assertion; the thread this runs on has no
     # handler above it, so an exception here is the failure mode being guarded against.
     discovery._presence_round()
+
+
+# ── The discovery state line and the advertisement repair ─────────────────────
+
+def test_the_state_line_is_reported_on_its_cadence(caplog):
+    """One line a minute, not one a round: it is a status, and it is read by a person.
+
+    It answers "can this machine be found, and can it find anyone" from a log alone, which is
+    what a fault that a restart cures needs -- a restart says the state was wrong, and this
+    says which half of it.
+    """
+    import logging
+
+    discovery, _ = a_discovery()
+    # A registered service, so the repair below stays out of the way.
+    discovery._service_info = object()
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.discovery"):
+        for _ in range(discovery_module.DISCOVERY_STATE_EVERY_ROUNDS):
+            discovery._presence_round()
+
+    states = [r.getMessage() for r in caplog.records if "Discovery state:" in r.getMessage()]
+    assert len(states) == 1, f"expected one line per cadence, got {len(states)}"
+    for fragment in ("advertising=True", "browsing=True", "known_peers=", "heard_services="):
+        assert fragment in states[0], f"{fragment!r} missing from {states[0]!r}"
+
+
+def test_a_lost_advertisement_is_re_registered(caplog):
+    """The condition a restart cures: no service info while the runtime is up.
+
+    `_network_watch_loop` only rebuilds when the local address *set* changes, so a
+    registration lost while the address stays the same was never retried.  A device in that
+    state is reachable by address, healthy, and invisible.
+    """
+    import logging
+
+    discovery, _ = a_discovery(settled=False)
+    discovery._service_info = None  # the advertisement has gone
+
+    calls: list[int] = []
+
+    def fake_publish():
+        calls.append(1)
+        discovery._service_info = object()  # and this time it works
+        return True
+
+    discovery._publish = fake_publish
+
+    with caplog.at_level(logging.INFO, logger="internal.transport.discovery"):
+        discovery._presence_round()
+
+    assert calls == [1], "the lost advertisement was not registered again"
+    said = [r.getMessage() for r in caplog.records if "not advertising" in r.getMessage()]
+    assert len(said) == 1, f"the repair was not said out loud: {said}"
+
+
+def test_a_healthy_advertisement_is_left_alone():
+    """A repair that fires when nothing is wrong is worse than none."""
+    discovery, _ = a_discovery(settled=False)
+    discovery._service_info = object()
+
+    calls: list[int] = []
+    discovery._publish = lambda: calls.append(1) or True
+
+    discovery._presence_round()
+
+    assert calls == [], "the repair ran while the device was advertising"
+
+
+def test_nothing_is_repaired_while_stopping():
+    """A registration that loses the race with shutdown is not a fault to report."""
+    discovery, _ = a_discovery(settled=True)
+    discovery._service_info = None  # and a shutdown is in progress
+
+    calls: list[int] = []
+    discovery._publish = lambda: calls.append(1) or True
+
+    discovery._presence_round()
+
+    assert calls == [], "the repair ran during a shutdown"

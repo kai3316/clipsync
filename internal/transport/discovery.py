@@ -47,6 +47,10 @@ logger = logging.getLogger(__name__)
 # that had been reported lost could not come back at all until it restarted --
 # see _PresenceListener.
 PRESENCE_INTERVAL_SECONDS = 10.0
+# One state line per this many presence rounds, which at a 10s cadence is about a minute.  The
+# line answers "can this machine be found, and can it find anyone" from a log alone, which is
+# what a fault that a restart cures needs.
+DISCOVERY_STATE_EVERY_ROUNDS = 6
 PRESENCE_TIMEOUT_SECONDS = 20.0
 
 # Announce on every Nth round -- 60 seconds, deliberately half of the 120 s TTL
@@ -786,24 +790,15 @@ class Discovery:
         ).start()
 
     def _register_soon(self):
-        """Publish our service from a worker, once the sockets are up."""
+        """Publish our service from a worker, once the sockets are up.
+
+        `_publish` reports a failure through `_on_error` itself, so this only has to make sure
+        the "registration in flight" flag is cleared whatever happens.
+        """
         try:
-            published = self._register_service()
-        except Exception:
-            # A registration that raised must not take the process down; the
-            # network watcher re-registers when the address set next changes,
-            # and is_advertising() still reports the truth in the meantime.
-            logger.warning("mDNS registration failed", exc_info=True)
-            published = False
+            self._publish()
         finally:
             self._registering.clear()
-        if not published and not self._netmon_stop.is_set() and self._on_error is not None:
-            # Both attempts failed, so this device is on the network but
-            # invisible on it.  Swallowed here (there is no caller left), so it
-            # is reported instead.  Not while stopping: a registration that
-            # loses the race with stop() is not a fault to report.
-            with contextlib.suppress(Exception):
-                self._on_error()
 
     def _register_service(self) -> bool:
         """Build and publish our service record.  Requires ``start()``.
@@ -1036,7 +1031,75 @@ class Discovery:
                 len(answered),
                 len(self._known_peers),
             )
+            self._report_discovery_state(asked=sent)
             self._sweep_presence()
+
+    def _report_discovery_state(self, *, asked: bool) -> None:
+        """One line a minute about whether this machine can be found, and fix it if not.
+
+        A restart cures the reported symptom, which means the fault is in this instance's
+        state -- and nothing was watching the advert half of it.  The address watcher only
+        rebuilds when the local address *set changes*, so sockets that break or a
+        registration that is lost while the address stays the same go unnoticed for as long
+        as the process runs: reachable by address, healthy, and invisible.
+
+        Reported per round only in the log's own sense -- once every
+        ``DISCOVERY_STATE_EVERY_ROUNDS`` rounds, which at a ten-second cadence is about a
+        minute.  A repair is attempted whenever it is needed, regardless of the cadence,
+        because the condition is a fault rather than a status.
+        """
+        if self._rounds % DISCOVERY_STATE_EVERY_ROUNDS == 0:
+            with self._lock:
+                advertising = self._service_info is not None
+                addresses = sorted(self._advertised_ips)
+            with self._heard_lock:
+                heard = len(self._heard)
+            logger.debug(
+                "Discovery state: advertising=%s addresses=%s browsing=%s "
+                "known_peers=%d heard_services=%d last_asked=%s",
+                advertising,
+                addresses or "none",
+                self._browser is not None,
+                len(self._known_peers),
+                heard,
+                asked,
+            )
+
+        # The repair.  `_netmon_stop` set means a shutdown is in progress, and a runtime that
+        # is not up has nothing to register with.
+        if self._netmon_stop.is_set() or self._zc is None:
+            return
+        with self._lock:
+            missing = self._service_info is None
+        if not missing:
+            return
+        logger.info(
+            "This device is not advertising on mDNS -- register mDNS again so peers can find it"
+        )
+        try:
+            self._publish()
+        except Exception as exc:
+            logger.warning("Re-registering mDNS failed: %s: %s", type(exc).__name__, exc)
+
+    def _publish(self) -> bool:
+        """Register the service once, and record the result.
+
+        Split out of `_register_soon` so the repair above can call the same path rather than a
+        second copy of it -- two registrations that drift apart is how "it works after a
+        restart" becomes "it works after a restart, sometimes".
+        """
+        try:
+            published = self._register_service()
+        except Exception:
+            # A registration that raised must not take the process down; the network watcher
+            # re-registers when the address set next changes, and this device's own state line
+            # reports the truth in the meantime.
+            logger.warning("mDNS registration failed", exc_info=True)
+            published = False
+        if not published and not self._netmon_stop.is_set() and self._on_error is not None:
+            with contextlib.suppress(Exception):
+                self._on_error()
+        return published
 
     def _sweep_presence(self):
         """Report every peer that has gone unheard for ``PRESENCE_TIMEOUT``.
