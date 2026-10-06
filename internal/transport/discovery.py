@@ -93,6 +93,32 @@ _SERVICE_INFO_TIMEOUT_MS = 1000
 HOSTNAME_LOOKUP_TIMEOUT = 2.0
 
 
+def _is_resolvable_name(name: str) -> bool:
+    """Whether a host name is worth handing to the resolver.
+
+    Two shapes are not, and both are things `socket.getfqdn()` really returns:
+
+    * a **reverse-DNS name** (``...ip6.arpa``, ``...in-addr.arpa``).  macOS answers
+      `getfqdn()` with the reverse form of the host's own ``::`` on some configurations,
+      and that name has no forward record anywhere: the resolver can only say no.
+    * ``localhost`` and its variants, which resolve to a loopback address these callers
+      discard anyway -- they want LAN addresses.
+
+    Measured cost of not doing this, from one machine's log: **408** identical failures at
+    a 30-second interval, each naming a 70-character string.
+    """
+    if not name or not name.strip():
+        return False
+    lowered = name.strip().lower().rstrip(".")
+    if not lowered:
+        return False
+    if lowered == "localhost" or lowered.endswith(".localhost"):
+        return False
+    # An ordinary host may contain "arpa" (a company name, say); only a reverse name has it
+    # as the final label.
+    return not lowered.endswith(".arpa") and lowered != "arpa"
+
+
 def _resolved_host_addresses(timeout: float) -> list[str]:
     """Every IPv4 address the host name and the FQDN resolve to, bounded.
 
@@ -109,18 +135,27 @@ def _resolved_host_addresses(timeout: float) -> list[str]:
     found: list[str] = []
 
     def _worker() -> None:
+        skipped: list[str] = []
         for name in (socket.gethostname(), socket.getfqdn()):
+            if not _is_resolvable_name(name):
+                skipped.append(name)
+                continue
             try:
                 for info in socket.getaddrinfo(name, None, family=socket.AF_INET):
                     found.append(info[4][0])
             except Exception as exc:
-                # One line, not a traceback: this runs on every enumeration --
-                # the network watcher alone calls it twice a minute -- and on
-                # macOS the FQDN is the reverse name of the host's own `::`,
-                # which no resolver answers.  A four-frame traceback per minute
-                # said nothing the name and the errno do not, and buried the
-                # lines that mattered in a log the user is asked to send.
+                # One line, not a traceback: this runs on every enumeration -- the network
+                # watcher alone calls it twice a minute -- and a four-frame traceback per
+                # minute said nothing the name and the errno do not, and buried the lines
+                # that mattered in a log the user is asked to send.  The macOS reverse-name
+                # case that used to arrive here no longer does: `_is_resolvable_name`
+                # filters it before the call, because a name no resolver can answer is not
+                # worth asking about 408 times in one log.
                 logger.debug("Address lookup for %r failed: %s", name, exc)
+        if skipped:
+            # Said once per enumeration rather than once per name, and at a level that does
+            # not fill a user's log with a fact that never changes.
+            logger.debug("Skipped unresolvable names: %s", ", ".join(repr(n) for n in skipped))
 
     worker = threading.Thread(target=_worker, daemon=True, name="lan-address-lookup")
     worker.start()

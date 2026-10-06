@@ -564,3 +564,88 @@ def test_a_peer_is_dialled_where_this_machine_would_reach_it(monkeypatch):
     routes.clear()
     routes.update({"10.8.0.2": "192.168.31.250", "192.168.31.238": "172.19.0.1"})
     assert pick(["10.8.0.2", "192.168.31.238"], "192.168.31.250", virtual) == "192.168.31.238"
+
+
+# ── Names that are not worth resolving ────────────────────────────────────────
+
+# Transcribed from the log, not invented: 30 zero nibbles and the ip6.arpa zone.
+THE_REVERSE_NAME = "1.0." + "0." * 29 + "ip6.arpa"
+
+
+def test_a_reverse_dns_name_is_not_looked_up(monkeypatch):
+    """The measurement that prompted this: 408 failures, one every 30 seconds.
+
+    `getaddrinfo` is replaced with a recorder, so the assertion is about the call and not
+    about how quiet the failure was.
+    """
+    calls: list[str] = []
+
+    def recorder(name, *_args, **_kwargs):
+        calls.append(name)
+        raise socket.gaierror(8, "nodename nor servname provided, or not known")
+
+    monkeypatch.setattr(discovery_module.socket, "gethostname", lambda: "host-a")
+    monkeypatch.setattr(discovery_module.socket, "getfqdn", lambda: THE_REVERSE_NAME)
+    monkeypatch.setattr(discovery_module.socket, "getaddrinfo", recorder)
+
+    discovery_module._resolved_host_addresses(timeout=2.0)
+
+    assert calls == ["host-a"], f"the reverse name was resolved: {calls}"
+
+
+def test_the_skipped_name_is_still_explained(monkeypatch, caplog):
+    """Said once, at debug: a reader should learn why `getfqdn()` contributed nothing."""
+    import logging
+
+    monkeypatch.setattr(discovery_module.socket, "gethostname", lambda: "host-a")
+    monkeypatch.setattr(discovery_module.socket, "getfqdn", lambda: THE_REVERSE_NAME)
+    monkeypatch.setattr(
+        discovery_module.socket,
+        "getaddrinfo",
+        lambda name, *a, **k: [(2, 1, 6, "", ("10.0.0.5", 0))],
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.discovery"):
+        found = discovery_module._resolved_host_addresses(timeout=2.0)
+
+    assert found == ["10.0.0.5"]
+    skipped = [r.getMessage() for r in caplog.records if "Skipped unresolvable" in r.getMessage()]
+    assert len(skipped) == 1, f"expected one line, got {skipped}"
+
+
+def test_a_real_host_name_is_still_resolved(monkeypatch):
+    """The control: filtering must not stop ordinary names from working."""
+    calls: list[str] = []
+
+    def recorder(name, *_args, **_kwargs):
+        calls.append(name)
+        return [(2, 1, 6, "", ("192.168.1.20", 0))]
+
+    monkeypatch.setattr(discovery_module.socket, "gethostname", lambda: "host-a")
+    monkeypatch.setattr(discovery_module.socket, "getfqdn", lambda: "host-a.lan")
+    monkeypatch.setattr(discovery_module.socket, "getaddrinfo", recorder)
+
+    found = discovery_module._resolved_host_addresses(timeout=2.0)
+
+    assert calls == ["host-a", "host-a.lan"]
+    assert "192.168.1.20" in found
+
+
+def test_the_predicate_matches_the_shapes_it_names():
+    """Table-driven, because the cases are the specification."""
+    predicate = discovery_module._is_resolvable_name
+    cases = [
+        (THE_REVERSE_NAME, False),
+        ("38.31.168.192.in-addr.arpa", False),
+        ("arpa", False),
+        ("localhost", False),
+        ("foo.localhost", False),
+        ("", False),
+        ("   ", False),
+        ("Kais-MacBook-Air.local", True),
+        ("NAME.Example.COM.", True),
+        # An ordinary host may contain "arpa"; only a reverse name ends with it.
+        ("my-arpa-company.example.com", True),
+    ]
+    wrong = [(n, predicate(n)) for n, want in cases if predicate(n) != want]
+    assert wrong == [], f"unexpected answers: {wrong}"
