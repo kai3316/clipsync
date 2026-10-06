@@ -333,6 +333,13 @@ class SidecarApplication:
         set_sink = getattr(self.runtime, "set_update_sink", None)
         if set_sink is not None:
             set_sink(self.updates.finish_from_peer)
+        # The other direction: what became of a blob this machine served.  Without it the sending
+        # device holds the stale installer and never learns it is being refused -- measured, a
+        # 1.0.54 Mac served its 1.0.33 `.dmg` four times while its own log said "Serving cached
+        # update" every time.
+        set_verdict_reporter = getattr(self.runtime, "set_update_verdict_reporter", None)
+        if set_verdict_reporter is not None:
+            set_verdict_reporter(self.runtime._report_verdict_to_sender)
         # A peer may ask this machine for the files behind a history entry it
         # published to us; the store, not the runtime, answers which paths a
         # request may reach — so the runtime is handed the store's own resolver.

@@ -87,17 +87,32 @@ def _asset_matchers() -> list[re.Pattern]:
     (``ClipSync_1.0.10_x64-setup.exe``), which no fixed string can name, so they
     are matched by shape.
 
-    ``ClipSync.app.tar.gz`` is deliberately not among them even on macOS, where
-    it is published: it is that application's *update payload*, which its own
-    updater plugin unpacks over the installed bundle, and it is not a file a
-    person installs.  What a user is handed here -- the .dmg, the -setup.exe,
-    the AppImage -- is the thing they can actually run.
+    macOS answers with **two** patterns, and the order is the preference.  On Windows and Linux
+    the payload a person installs and the payload the updater consumes are the same file
+    (`ClipSync_1.0.10_x64-setup.exe`, the `.AppImage`), so one pattern covers both.  On macOS they
+    differ: the updater unpacks `ClipSync.app.tar.gz` over the installed bundle, while a person
+    runs the `.dmg`.
+
+    `ClipSync.app.tar.gz` used to be excluded on the reasoning that it "is not a file a person
+    installs", which is true and was the wrong test -- this cache is not for people, it is what
+    this machine serves to a peer with no route to GitHub, and on macOS the payload is the file
+    its own updater fetches.  Excluding it left the cache unable to hold anything newer than a
+    stale `.dmg`, which is what a 1.0.54 host was measured serving to a 1.0.33 peer.
+
+    The payload comes first for a *newer or equal* version: `_cache_rank` sorts by version before
+    preference, so a newer `.dmg` still wins.
     """
     system, is_arm = _machine()
     if running_shell() != SHELL_TAURI:
         return [re.compile("^" + re.escape(_legacy_asset_name()) + "$")]
     if system == "Darwin":
-        return [re.compile(r"^ClipSync_.*_%s\.dmg$" % ("aarch64" if is_arm else "x64"))]
+        arch = "aarch64" if is_arm else "x64"
+        return [
+            # Both spellings the bundler has used: `<product>.app.tar.gz` and
+            # `<product>_<version>_<arch>.app.tar.gz`.
+            re.compile(r"^ClipSync(?:_[0-9][^/]*)?\.app\.tar\.gz$"),
+            re.compile(rf"^ClipSync_.*_{arch}\.dmg$"),
+        ]
     if system == "Windows":
         return [re.compile(r"^ClipSync_.*_%s-setup\.exe$" % ("arm64" if is_arm else "x64"))]
     return [re.compile(r"^ClipSync_.*_%s\.(?:AppImage|deb)$" % ("aarch64" if is_arm else "amd64"))]
@@ -694,8 +709,17 @@ def cache_asset(asset_path: str, name: str = "") -> str | None:
         # service stages the same download for the user to install by hand, and
         # that move has to find it where the download left it.
         shutil.copyfile(asset_path, dest)
+        # Keep the newest of each pattern, and never delete the one file this shell's own updater
+        # consumes.  Without that protection the sweep makes the fix above fire on itself: the
+        # payload lands, the sweep treats it as a sibling of the .dmg and removes it, and the
+        # stale .dmg is the only candidate again.
+        keep = _updater_payload_pattern()
         for other in os.listdir(d):
             if other == base or not any(m.match(other) for m in _asset_matchers()):
+                continue
+            if keep is not None and keep.match(other) and not keep.match(base):
+                continue
+            if _cache_rank(os.path.join(d, other)) > _cache_rank(dest):
                 continue
             with contextlib.suppress(OSError):
                 os.remove(os.path.join(d, other))
@@ -704,6 +728,21 @@ def cache_asset(asset_path: str, name: str = "") -> str | None:
     except OSError as exc:
         logger.warning("Failed to cache update asset: %s", exc)
         return None
+
+
+def _updater_payload_pattern() -> re.Pattern | None:
+    """The pattern of the file *this* shell's updater downloads, or None if it is the installer.
+
+    Only macOS differs: its updater unpacks `ClipSync.app.tar.gz`, where Windows and Linux update
+    from the same file a person installs.  Named as a function rather than a constant because the
+    answer depends on the platform this process is running on.
+    """
+    if running_shell() != SHELL_TAURI:
+        return None
+    system, _is_arm = _machine()
+    if system != "Darwin":
+        return None
+    return re.compile(r"^ClipSync(?:_[0-9][^/]*)?\.app\.tar\.gz$")
 
 
 def _cache_rank(path: str) -> tuple:

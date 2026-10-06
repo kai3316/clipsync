@@ -4,6 +4,7 @@ import inspect
 import logging
 import os
 import platform
+import random
 import secrets
 import threading
 import time
@@ -51,6 +52,7 @@ from internal.sync.manager import SyncManager
 from internal.sync.nearby_chat import CHAT_MSG_TYPES, ChatManager
 from internal.system import updater
 from internal.system.archive import ArchiveEmptyError, create_archive
+from internal.system.update_service import _verdict_is_rejection
 from internal.transport.connection import (
     _REJECT_REASONS,
     MAX_FRAME_SIZE,
@@ -83,6 +85,11 @@ CLIP_FILE_WINDOW = 300.0
 # still bounded because what it leaves open is the one transfer kind that never
 # asks the user anything.
 UPDATE_WINDOW = 1800.0
+
+# A failed automatic fetch is retried once for a peer that is coming back up.  These
+# are the codes that mean "not this second"; every other refusal is an answer.
+_UPDATE_RETRY_CODES = frozenset({"update.peer_unreachable", "update.fetch_failed"})
+_UPDATE_RETRY_SECONDS = 4.0
 
 # How long the "send this device the update" click waits for the peer to say
 # whether it wants the asset.  The answer is one frame, and the peer answers
@@ -459,6 +466,7 @@ class LanRuntime:
         self._outgoing_archives = {}
         self._archive_lock = threading.Lock()
         self._update_sink = None
+        self._update_verdict_reporter = None
         # peer device_id -> monotonic deadline, the ledger of peers this machine
         # has actually asked for a cached update asset.  Consulted by the update
         # guard above; a peer's answer that arrives inside the window is the only
@@ -1047,8 +1055,32 @@ class LanRuntime:
         may have no route to the release server -- that is what the peer's copy
         is for -- and the sender's digest is then the only thing the bytes can
         be checked against.  Empty for a peer too old to declare one.
+
+        Wrapped rather than assigned so the peer and the transfer travel into the
+        service with the blob: without them a refusal cannot be reported back, and
+        the device holding the stale file never learns it is being refused.
         """
-        self._update_sink = sink
+
+        def carry_origin(path, sha256="", peer_id="", transfer_id=""):
+            try:
+                return sink(path, sha256=sha256, peer_id=peer_id, transfer_id=transfer_id)
+            except TypeError:
+                # A sink written against the two arguments this method documents.  The service's
+                # own `finish_from_peer` takes the origin as well, so the fallback is for callers
+                # that kept to the documented shape -- a verdict then carries an empty transfer
+                # id, which the sender reads as "no reply expected" rather than as a failure.
+                return sink(path, sha256=sha256)
+
+        self._update_sink = carry_origin
+
+    def set_update_verdict_reporter(self, reporter) -> None:
+        """Where a decided verdict about a peer-sent blob is published.
+
+        Set by `bootstrap` rather than reached for here: this class does not hold
+        the update service, and a lookup of something a caller never gave it would
+        work in the application and fail in every test that builds a runtime alone.
+        """
+        self._update_verdict_reporter = reporter
 
     # ── files pulled from a peer's history ───────────────────────────────
     def set_clip_file_source(self, source) -> None:
@@ -1651,6 +1683,21 @@ class LanRuntime:
             logger.info("Peer asked for an update, but none is cached")
             self._say_no_update_here(pid, "no_asset")
             return
+        # The cached file's own version, not this build's.  The guard above asks whether *this
+        # machine* is ahead, which it can be while the cache still holds an older installer --
+        # measured: a 1.0.54 host served its stale 1.0.33 .dmg to a 1.0.33 peer, which discarded
+        # it as "not newer than the running version" while both ends logged a successful
+        # transfer.  Read with the receiver's own parser, so the two ends agree about a name.
+        cached_version = updater.version_in_asset_name(os.path.basename(cached))
+        if cached_version and peer_version and not updater.is_newer(cached_version, peer_version):
+            logger.info(
+                "Not serving cached update %s to %s: it runs %s",
+                os.path.basename(cached),
+                str(pid)[:12],
+                cached_version,
+            )
+            self._say_no_update_here(pid, "cached_not_newer")
+            return
         # The digest travels with the transfer because the asking device may have
         # no route to the release server at all -- that is the whole reason it is
         # asking a peer.  Without it the receiver has nothing to check the bytes
@@ -1702,6 +1749,76 @@ class LanRuntime:
             self._cached_digest_key = key
             self._cached_digest_value = digest
         return digest
+
+    def _on_update_verdict(self, pid: str, payload: dict) -> None:
+        """What the device we sent an installer to did with it.
+
+        This is the message that was missing.  Measured, a 1.0.54 Mac served its stale 1.0.33
+        `.dmg` to a 1.0.33 peer four times in ten minutes; the peer discarded every one as "not
+        newer than the running version" and the sender's log said only "Serving cached update".
+
+        Logged at WARNING for a refusal because it means the exchange achieved nothing, and the
+        file is named so the reader can go and look at the cache it came from.  Nothing is retried
+        here: the version guard in `_serve_cached_update` is what stops the stale file going out
+        again, and this line is how anyone finds out it was going out at all.
+        """
+        verdict = str(payload.get("verdict") or "")
+        filename = str(payload.get("file_name") or "?")
+        if _verdict_is_rejection(verdict):
+            logger.warning(
+                "Peer %s refused the update we sent: %s (%s)",
+                str(pid)[:12],
+                verdict or "unknown",
+                filename,
+            )
+        else:
+            logger.info(
+                "Peer %s accepted the update we sent: %s (%s)",
+                str(pid)[:12],
+                verdict or "ok",
+                filename,
+            )
+
+    def _report_verdict_to_sender(
+        self, peer_id: str, transfer_id: str, verdict: str, filename: str
+    ) -> None:
+        """Tell the sending device what became of the file, and log it here as well.
+
+        The message is what lets the other machine act: it is the one holding the
+        stale cache, so a refusal is only actionable there.  The log line is for
+        this side's own log, because a reader looking at the receiving machine
+        should not have to open the sender's to find out a file was refused.
+
+        A refusal is a WARNING and an acceptance is INFO -- only one of the two
+        means the exchange did not do what it set out to do.
+        """
+        rejected = _verdict_is_rejection(verdict)
+        log = logger.warning if rejected else logger.info
+        log(
+            "Update %s from %s: %s (%s)",
+            "refused" if rejected else "accepted",
+            str(peer_id)[:12],
+            verdict,
+            filename or "?",
+        )
+        try:
+            self.transport.send_to_peer(
+                peer_id,
+                encode_frame(
+                    {
+                        "msg_type": "update_verdict",
+                        "transfer_id": transfer_id,
+                        "verdict": verdict,
+                        "file_name": filename,
+                        "version": __version__,
+                        "os": _local_platform()[0],
+                        "arch": _local_platform()[1],
+                    },
+                    source_device=self.config.device_id,
+                ),
+            )
+        except Exception:
+            logger.debug("Could not report an update verdict", exc_info=True)
 
     def _say_no_update_here(self, pid: str, reason: str = "") -> None:
         """Tell a peer that asked for an update that this machine has none.
@@ -1943,21 +2060,43 @@ class LanRuntime:
         to show.
         """
         try:
-            # Through ``_command``, not straight to the callback: the fetch dials
-            # and waits, so it takes the same ``blocking=True`` route the click
-            # does -- the runtime held, the stop event checked, a failure wrapped
-            # -- and it is that path rather than a bare call because a runtime
-            # that started stopping between the tick and this thread should not
-            # dial anybody.
-            self._command(self._fetch_device_update, pid, blocking=True)
-        except ApplicationError as exc:
-            logger.info(
-                "Automatic update from %s did not start: %s", str(pid)[:12], exc.code
-            )
-        except Exception:
-            logger.warning(
-                "Automatic update from %s failed", str(pid)[:12], exc_info=True
-            )
+            # One retry for a peer that is coming back up.  Measured: a device that was restarting
+            # timed out the dial, the attempt was abandoned, and the machine went to a release
+            # server it could not reach -- the update arrived two and a half minutes late from the
+            # peer that had it all along.
+            attempts = 2
+            for attempt in range(attempts):
+                try:
+                    # Through ``_command``, not straight to the callback: the fetch dials and
+                    # waits, so it takes the same ``blocking=True`` route the click does -- the
+                    # runtime held, the stop event checked, a failure wrapped -- and it is that
+                    # path rather than a bare call because a runtime that started stopping between
+                    # the tick and this thread should not dial anybody.
+                    self._command(self._fetch_device_update, pid, blocking=True)
+                    return
+                except ApplicationError as exc:
+                    # Only the failures that mean "not this second" are retried.  Anything else
+                    # (`no_asset`, `not_newer`, `other_platform`) is a real answer, and asking again
+                    # would spend another dial to be told the same thing.
+                    if attempt + 1 < attempts and exc.code in _UPDATE_RETRY_CODES:
+                        logger.info(
+                            "Automatic update from %s: %s; trying once more",
+                            str(pid)[:12],
+                            exc.code,
+                        )
+                        # Jittered because several devices notice the same new peer at the same
+                        # moment, and retrying in lockstep would hammer a machine still coming up.
+                        self._stop_event.wait(_UPDATE_RETRY_SECONDS * (0.5 + random.random()))
+                        continue
+                    logger.info(
+                        "Automatic update from %s did not start: %s", str(pid)[:12], exc.code
+                    )
+                    return
+                except Exception:
+                    logger.warning(
+                        "Automatic update from %s failed", str(pid)[:12], exc_info=True
+                    )
+                    return
         finally:
             # Released when the request is away, not when the answer comes: the
             # answer is what the quiet window above is for, and the next
@@ -2296,9 +2435,9 @@ class LanRuntime:
         )
 
     @staticmethod
-    def _deliver_update_blob(sink, saved_path, sha256: str = ""):
+    def _deliver_update_blob(sink, saved_path, sha256: str = "", peer_id="", transfer_id=""):
         try:
-            sink(saved_path, sha256=sha256)
+            sink(saved_path, sha256=sha256, peer_id=peer_id, transfer_id=transfer_id)
         except Exception:
             logger.exception("Could not stage a peer-sent update blob")
 
@@ -5654,6 +5793,14 @@ class LanRuntime:
                 or self._offer_answer_pending_for(pid)
             ):
                 self._on_update_unavailable(pid, payload)
+            return
+        if kind == "update_verdict":
+            # The answer to a file this machine served.  Read for the same reason
+            # `update_unavailable` is: it is only meaningful from a device this machine asked
+            # something of, and the ledger is what establishes that, not the payload's claim.
+            payload = getattr(msg, "_raw_payload", {}) or {}
+            if trusted or self._update_outstanding_for(pid) or self._auto_update_served.get(pid):
+                self._on_update_verdict(pid, payload)
             return
         if kind == "log_request":
             # A peer asking for this machine's log.  Answered from the setting

@@ -3503,3 +3503,178 @@ class TestTheConsentWindow:
         runtime, *_ = rig
 
         assert runtime.file_transfer._clip_file_guard == runtime._clip_file_outstanding_for
+
+
+# ── the update exchange: the file, the words, and the reply ──────────────
+def test_a_stale_cached_asset_is_not_served_to_a_peer_at_that_version(rig, monkeypatch, tmp_path):
+    """The sender must check the *file*, not only itself.
+
+    Measured: a 1.0.54 Mac served its cached 1.0.33 `.dmg` to a 1.0.33 peer four times in ten
+    minutes.  The guard that existed compared this build against the peer's claim -- which passed,
+    because 1.0.54 is newer than 1.0.33 -- and then sent whatever the cache held.  The peer refused
+    every one as "not newer than the running version", so the feature did nothing while both ends
+    logged a successful transfer.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    # A cache holding the peer's own build, while this machine is ahead.
+    stale = tmp_path / "ClipSync_1.0.7_aarch64.dmg"
+    stale.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(stale))
+    monkeypatch.setattr(lan, "__version__", "1.0.9")
+
+    transport.message(frame("update_request", version="1.0.7"), "remote")
+
+    sent = [msg for _, msg in transport.sent]
+    assert [msg.msg_type for msg in sent] == ["update_unavailable"], (
+        "a build the peer already runs must not be sent"
+    )
+    assert sent[0]._raw_payload["reason"] == "cached_not_newer"
+
+
+def test_a_newer_cached_asset_is_still_served(rig, monkeypatch, tmp_path):
+    """And the check is about the file's version, not about refusing everything.
+
+    Without this, the guard above could be satisfied by never serving an update at all.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    fresh = tmp_path / "ClipSync_1.0.9_aarch64.dmg"
+    fresh.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(fresh))
+    monkeypatch.setattr(lan, "__version__", "1.0.9")
+
+    transport.message(frame("update_request", version="1.0.7"), "remote")
+
+    sent = [msg for msg in (m for _, m in transport.sent)]
+    assert [msg.msg_type for msg in sent] == ["file_request"]
+    assert sent[0]._raw_payload["file_name"] == "ClipSync_1.0.9_aarch64.dmg"
+
+
+def test_a_refused_blob_is_reported_to_the_sender(rig, monkeypatch, tmp_path):
+    """The receiver tells the sender, which is the only machine that can act on it.
+
+    The sending device holds the stale cache.  Measured, its log said "Serving cached update" four
+    times and nothing else; the refusal existed only in the other device's log, so nobody reading
+    the sender's record could tell the exchange was achieving nothing.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    # The fake transport records a send only for a connected peer, so a test that leaves this out
+    # is asserting about a message to a device that is not there.
+    transport.connected.add("remote")
+    runtime.set_update_verdict_reporter(runtime._report_verdict_to_sender)
+    runtime._report_verdict_to_sender("remote", "abc123", "not_newer", "ClipSync_1.0.7_aarch64.dmg")
+
+    sent = [msg for _, msg in transport.sent]
+    assert [msg.msg_type for msg in sent] == ["update_verdict"]
+    payload = sent[0]._raw_payload
+    assert payload["verdict"] == "not_newer"
+    assert payload["transfer_id"] == "abc123"
+    assert payload["file_name"] == "ClipSync_1.0.7_aarch64.dmg"
+
+
+def test_the_sink_wrapper_carries_the_origin_and_tolerates_the_documented_form(rig):
+    """`set_update_sink` promises `sink(path, sha256="")`, and the origin rides along when it can.
+
+    The service's own `finish_from_peer` takes the peer and the transfer so a verdict can be
+    reported; a caller that supplied a two-argument callable, as the documented signature allows,
+    must keep working -- with an empty transfer id rather than a TypeError.
+    """
+    runtime = rig[0]
+    calls: list[dict] = []
+
+    def modern(path, sha256="", peer_id="", transfer_id=""):
+        calls.append(
+            {"path": path, "sha256": sha256, "peer_id": peer_id, "transfer_id": transfer_id}
+        )
+
+    runtime.set_update_sink(modern)
+    runtime._update_sink("a.dmg", sha256="d", peer_id="p", transfer_id="t")
+    assert calls == [{"path": "a.dmg", "sha256": "d", "peer_id": "p", "transfer_id": "t"}]
+
+    legacy: list[tuple] = []
+    runtime.set_update_sink(lambda path, sha256="": legacy.append((path, sha256)))
+    runtime._update_sink("b.dmg", sha256="e", peer_id="p", transfer_id="t")
+    assert legacy == [("b.dmg", "e")], "a two-argument sink must still be called"
+
+
+def test_every_verdict_the_verifier_documents_has_its_own_words():
+    """A verdict with no sentence borrowed another one's, and named the wrong fault.
+
+    `_discard` mapped two verdicts and let a default carry the rest, so `not_newer` -- the common
+    case, a file that is simply the build you already have -- read as a checksum failure.  A reader
+    told "checksum" goes looking at the network over a file that was fine.
+    """
+    import re
+
+    from internal.i18n import T
+    from internal.system import updater as updater_module
+    from internal.system.update_service import (
+        _REJECTION_KEYS,
+        _REJECTION_UNKNOWN_KEY,
+        _rejection_key,
+    )
+
+    # Only the block that lists them.  The body above it mentions "github" and "p2p", which are
+    # the sources rather than verdicts.
+    doc = updater_module.verify_update_blob.__doc__ or ""
+    block = doc.split("verdict one of:", 1)[-1]
+    documented = set(re.findall(r'"([a-z_]+)"\s+\S', block))
+    assert {"not_newer", "hash_mismatch", "no_release_info"} <= documented, (
+        f"the docstring's verdicts were not read: {documented}"
+    )
+
+    # `ok` and `peer_verified` are acceptances, so they are in no refusal table: nothing was
+    # discarded and there is nothing to explain.  Every other verdict must have its own words.
+    acceptances = {"ok", "peer_verified"}
+    refusals = documented - acceptances
+    assert refusals, f"no refusals were parsed from the docstring: {documented}"
+    for verdict in sorted(refusals):
+        assert verdict in _REJECTION_KEYS, f"{verdict} would borrow another verdict's sentence"
+    for verdict in sorted(acceptances):
+        assert verdict not in _REJECTION_KEYS, f"{verdict} is an acceptance, not a refusal"
+        # And the runtime reads them the same way, which is what keeps a success from being logged
+        # as a refusal on the sending side.
+        assert not lan._verdict_is_rejection(verdict)
+
+    # And an unknown one does not claim to know which of the three it was.
+    assert _rejection_key("something_new") == _REJECTION_UNKNOWN_KEY
+    sentences = {_rejection_key(v) for v in _REJECTION_KEYS}
+    assert len(sentences) == len(_REJECTION_KEYS), "two verdicts share a sentence"
+    assert "checksum" not in T(_rejection_key("not_newer")).lower()
+
+
+def test_a_failed_automatic_fetch_is_retried_for_a_peer_coming_back_up():
+    """Measured, the retry is worth five minutes.
+
+    A peer that was restarting timed out the dial at 22:54:39, the attempt was abandoned, and the
+    machine went to a release server it could not reach -- the update arrived at 22:57:24 from the
+    device that had it all along.  The retry list is only the codes that mean "not this second".
+    """
+    assert {"update.peer_unreachable", "update.fetch_failed"} == lan._UPDATE_RETRY_CODES
+    # A real answer is not retried, or the second dial is spent to be told the same thing.
+    for answer in ("update.no_asset", "update.not_newer", "update.offer_failed"):
+        assert answer not in lan._UPDATE_RETRY_CODES
+    assert lan._UPDATE_RETRY_SECONDS > 0
+
+
+def test_the_automatic_check_announces_an_update_without_downloading_it():
+    """Reported from a slow network: an automatic GitHub fetch is worse than none.
+
+    The check keeps its job -- finding out -- and stops doing the part that is not its to decide.
+    The card offers the download and a click starts it, which is what `start_download` is still for.
+    """
+    import inspect
+
+    from internal.system import update_service
+
+    source = inspect.getsource(update_service.UpdateService._auto_check_worker)
+    assert "self.start_download()" not in source, (
+        "the automatic check downloads by itself again"
+    )
+    assert "self._notify_available(result)" in source, (
+        "the automatic check must still announce what it found"
+    )

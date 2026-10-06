@@ -246,6 +246,7 @@ _EN: dict[str, str] = {
     "notify.update_downloading": "Downloading update…",
     "notify.update_rejected_hash": "Update discarded: checksum mismatch",
     "notify.update_rejected_old": "Update discarded: not newer than the running version",
+    "notify.update_rejected_unknown": "Update discarded: it did not pass verification",
     "notify.update_unverifiable": "Update discarded: nothing to check it against — the release server could not be reached and the sending device declared no checksum",  # noqa: E501
     "ui.web_start_failed2": "Failed to start on port {port}. Another process may already be using this port.",  # noqa: E501
     "ui.web_companion": "Remote access",

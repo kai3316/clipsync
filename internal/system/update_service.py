@@ -68,6 +68,33 @@ def stage_ready_archive(asset_path: str, home: str | None = None) -> str:
     return str(dest)
 
 
+# Every verdict `updater.verify_update_blob` documents, and the sentence each one earns.
+#
+# Module level rather than a literal inside `_discard` so a test can hold it against that set: the
+# whole point is that no verdict silently borrows another one's words, and that cannot be checked
+# from inside the function that does the borrowing.
+_REJECTION_KEYS = {
+    "hash_mismatch": "notify.update_rejected_hash",
+    "not_newer": "notify.update_rejected_old",
+    "no_release_info": "notify.update_unverifiable",
+}
+
+# A verdict with no sentence of its own -- added to the verifier before it was added here.  It
+# must not claim to know which of the three it was, because naming the wrong one sends the reader
+# to check the network over a file that was fine.
+_REJECTION_UNKNOWN_KEY = "notify.update_rejected_unknown"
+
+
+def _verdict_is_rejection(verdict: str) -> bool:
+    """Whether *verdict* means the receiver did not take the file."""
+    return verdict not in ("ok", "peer_verified")
+
+
+def _rejection_key(verdict: str) -> str:
+    """The sentence a verdict earns, or the one that admits it has none."""
+    return _REJECTION_KEYS.get(verdict, _REJECTION_UNKNOWN_KEY)
+
+
 class UpdateService:
     """Serialized update lifecycle for one application instance.
 
@@ -81,10 +108,15 @@ class UpdateService:
         publish: Callable[[str, dict], None] | None = None,
         config: Callable[[], object] | None = None,
         home: str | None = None,
+        verdict_reporter: Callable[[str, str, str, str], None] | None = None,
     ):
         self._publish = publish
         self._config = config
         self._home = home
+        # Told what became of a peer-sent blob: (peer_id, transfer_id, verdict, filename).  The
+        # runtime supplies it -- the sending device is the one that can stop offering a file the
+        # receiver keeps refusing, and only the runtime can reach it.
+        self._verdict_reporter = verdict_reporter
         self._lock = threading.RLock()
         self._state = {
             "phase": "idle",
@@ -245,7 +277,9 @@ class UpdateService:
         self._pending_version = version
         self._finish(path, reason, "github")
 
-    def finish_from_peer(self, path: str, sha256: str = "") -> None:
+    def finish_from_peer(
+        self, path: str, sha256: str = "", peer_id: str = "", transfer_id: str = ""
+    ) -> None:
         """A peer sent us its cached update asset (M2 P2P update).
 
         *sha256* is the digest the sending device declared for the file, and it
@@ -256,7 +290,14 @@ class UpdateService:
         Runs on the caller's thread: the release lookup inside :meth:`_finish`
         can block, so the runtime hands this off the transfer receive thread.
         """
-        self._finish(path, None, "p2p", peer_digest=sha256)
+        self._finish(
+            path,
+            None,
+            "p2p",
+            peer_digest=sha256,
+            peer_id=peer_id,
+            transfer_id=transfer_id,
+        )
 
     def _finish(
         self,
@@ -264,6 +305,8 @@ class UpdateService:
         reason: str | None,
         source: str = "github",
         peer_digest: str = "",
+        peer_id: str = "",
+        transfer_id: str = "",
     ) -> None:
         """Verify, cache and stage an arrived asset, or surface the failure."""
         with self._lock:
@@ -303,6 +346,7 @@ class UpdateService:
                     "the sending device to check it against"
                 )
             self._discard(path, verdict, source)
+            self._report_verdict(peer_id, transfer_id, verdict, path)
             return
         if release_info:
             # The digest match pins this blob to that release, so its version is
@@ -327,6 +371,10 @@ class UpdateService:
             return
         with self._lock:
             self._installing = False
+        # The sending device is told the archive was taken.  Reported here rather than at the
+        # end of the method so "ok" means the file is on disk and staged, which is what the
+        # sender needs to know to stop offering it.
+        self._report_verdict(peer_id, transfer_id, verdict, path)
         self._set_state(
             phase="ready",
             version=self._pending_version or "",
@@ -338,6 +386,23 @@ class UpdateService:
             # device's own word and worth saying out loud.
             verified="release" if verdict == "ok" else verdict,
         )
+
+    def _report_verdict(
+        self, peer_id: str, transfer_id: str, verdict: str, path: str | None
+    ) -> None:
+        """Tell the sender what happened, and never let that failure matter.
+
+        The update has already been staged or discarded by the time this runs, so a reporter that
+        raises would report a failure that did not happen.  `_verdict_is_rejection` is the one
+        judgement here, and it is shared with anything that wants to read a verdict the same way.
+        """
+        reporter = self._verdict_reporter
+        if reporter is None or not peer_id:
+            return
+        try:
+            reporter(peer_id, transfer_id, verdict, os.path.basename(path or ""))
+        except Exception:
+            logger.debug("Could not report an update verdict", exc_info=True)
 
     def _discard(self, path: str, verdict: str, source: str = "github") -> None:
         """Throw away a rejected blob and report why.
@@ -351,15 +416,9 @@ class UpdateService:
             os.remove(path)
         except OSError:
             logger.debug("Could not remove rejected update blob", exc_info=True)
-        # The verdicts that need their own words: a digest that did not match, a
-        # release that is not newer, and an arrival with nothing at all to check
-        # it against -- which is a different sentence from either, because
-        # nothing about the file was found to be wrong.
-        key = {
-            "hash_mismatch": "notify.update_rejected_hash",
-            "no_release_info": "notify.update_unverifiable",
-        }.get(verdict, "notify.update_rejected_old")
-        self._set_state(phase="failed", error=T(key), source=source)
+        self._set_state(
+            phase="failed", error=T(_rejection_key(verdict)), source=source
+        )
 
     # ── reveal ───────────────────────────────────────────────────────────
     def open_folder(self) -> dict:
@@ -456,16 +515,19 @@ class UpdateService:
     def _auto_check_worker(self) -> None:
         """Silent check: fetch and stage what it finds, or say nothing.
 
-        The check does not stop at the announcement.  It used to -- it published
-        ``update.available`` and left the download to a click in the update card
-        -- which meant a machine that had been told about a newer build was
-        still on the old one until somebody went and looked at a page.  The
-        whole of 自动更新 is that nobody has to: the check finds it, the worker
-        fetches it, and the host installs what :meth:`_finish` stages.
+        The check stops at the announcement: it publishes ``update.available`` and
+        leaves the download to a click in the update card.
 
-        A failed download is not worth a word here.  Nobody is watching, the
-        state goes to ``failed`` where the card can show it, and the next
-        interval tries the same thing again.
+        It used to continue -- the check found a build, the worker fetched it, and
+        the host installed what :meth:`_finish` staged, so nobody had to look at a
+        page.  That is the right shape on a network where the release server is
+        fast and the wrong one where it is not: reported from a network in China,
+        an automatic download spends minutes on a transfer that may time out
+        anyway, and the timeout delays the peer that already has the file.
+
+        A peer on the same LAN is a different matter and is still fetched without
+        being asked, by the runtime rather than by this loop: it answers in
+        seconds, and it is the source that works when the release server does not.
         """
         try:
             result = updater.check_for_update(timeout=AUTO_CHECK_TIMEOUT)
@@ -480,7 +542,8 @@ class UpdateService:
         if not result.get("available") or self._shutting_down:
             return
         self._notify_available(result)
+        # Announced, not fetched.  The download is a click in the update card.
         logger.info(
-            "Automatic update check found %s; downloading it", result.get("latest", "")
+            "Automatic update check found %s; it can be downloaded from the update card",
+            result.get("latest", ""),
         )
-        self.start_download()

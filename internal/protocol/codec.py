@@ -206,7 +206,9 @@ FILE_CONTROL_MSG_TYPES = frozenset(
         "file_resume",
     }
 )
-UPDATE_MSG_TYPES = frozenset({"update_offer", "update_request", "update_unavailable"})
+UPDATE_MSG_TYPES = frozenset(
+    {"update_offer", "update_request", "update_unavailable", "update_verdict"}
+)
 LOG_MSG_TYPES = frozenset({"log_request", "log_denied"})
 
 # Everything one of those transfers consists of, chunk frame included, so the
