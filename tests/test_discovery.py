@@ -10,7 +10,6 @@ first is only what a peer older than that field can offer.
 import os
 import socket
 import sys
-import threading
 import time
 from types import SimpleNamespace
 
