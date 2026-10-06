@@ -124,21 +124,6 @@ def dir_writable(path: Path) -> bool:
         return False
 
 
-def trash_size(mgr) -> int:
-    """Total bytes in the AI-config recoverable trash (0 when empty)."""
-    base = mgr._trash_base()
-    if not base.is_dir():
-        return 0
-    total = 0
-    for p in base.rglob("*"):
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
 def item(
     item_id,
     status,
@@ -1047,242 +1032,29 @@ def _group_internet(cfg, relay_state, pending_count) -> dict:
     return {"label_key": "diag.v2.group.internet", "items": items}
 
 
-def _group_ai_config(cfg, mgr) -> dict:
-    items = []
-    tools = [t for t in (getattr(cfg, "ai_config_tools", []) or []) if isinstance(t, str) and t]
-    custom = [
-        c
-        for c in (getattr(cfg, "ai_config_custom_paths", []) or [])
-        if isinstance(c, str) and c
-    ]
-    roots = tools + custom
-    if roots:
-        items.append(
-            item(
-                "watch_roots",
-                "ok",
-                f"{len(roots)} profile root(s)",
-                detail_key="diag.v2.item.watch_roots.ok.detail",
-                detail_params={"count": len(roots)},
-            )
-        )
-    else:
-        items.append(
-            item(
-                "watch_roots",
-                "warn",
-                "No watch roots",
-                detail_key="diag.v2.item.watch_roots.warn.detail",
-                hint="Enable AI tool profiles in AI config settings to inventory AI tool configs.",  # noqa: E501
-                hint_key="diag.v2.item.watch_roots.warn.hint",
-            )
-        )
+def _active_transfer_count(mgr) -> int:
+    """Transfers that have not finished, which is the live list's own status rather than a count.
+
+    Read from `get_transfers()` because that is what the manager exposes: the removed group did
+    the same sum, and keeping the same source is what makes this a fold rather than a rewrite.
+    """
     if mgr is None:
-        for entry_id in ("local_entries", "last_collected", "trash_size"):
-            items.append(
-                item(
-                    entry_id,
-                    "warn",
-                    "Unavailable",
-                    detail_key="diag.v2.item.unavailable.detail",
-                    hint="This data isn't available in the current state.",
-                    hint_key="diag.v2.item.unavailable.hint",
-                )
-            )
-        return {"label_key": "diag.v2.group.ai_config", "items": items}
-    try:
-        summary = mgr.local_summary()
-        entry_count = int(summary.get("entry_count", 0) or 0)
-        items.append(
-            item(
-                "local_entries",
-                "ok",
-                f"{entry_count} local file(s)",
-                detail_key="diag.v2.item.local_entries.detail",
-                detail_params={"count": entry_count},
-            )
-        )
-        collected = float(summary.get("collected_at", 0.0) or 0.0)
-        if collected > 0:
-            ago = fmt_duration(int(time.time() - collected))
-            items.append(
-                item(
-                    "last_collected",
-                    "ok",
-                    f"{ago} ago",
-                    detail_key="diag.v2.item.last_collected.ok.detail",
-                    detail_params={"ago": ago},
-                )
-            )
-        else:
-            items.append(
-                item(
-                    "last_collected",
-                    "warn",
-                    "Never collected",
-                    detail_key="diag.v2.item.last_collected.warn.detail",
-                    hint="Run a collection from the AI config panel, or add watch roots.",
-                    hint_key="diag.v2.item.last_collected.warn.hint",
-                )
-            )
-    except Exception:
-        items.append(
-            item(
-                "local_entries",
-                "warn",
-                "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail",
-            )
-        )
-        items.append(
-            item(
-                "last_collected",
-                "warn",
-                "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail",
-            )
-        )
-    try:
-        size = trash_size(mgr)
-        pretty = fmt_bytes(size)
-        items.append(
-            item(
-                "trash_size",
-                "ok" if size == 0 else "warn",
-                pretty,
-                detail_key="diag.v2.item.trash_size.detail",
-                detail_params={"size": pretty},
-                hint=None
-                if size == 0
-                else "Recycle bin is non-empty — restore or clear it from the AI config panel.",
-                hint_key=None if size == 0 else "diag.v2.item.trash_size.warn.hint",
-            )
-        )
-    except Exception:
-        items.append(
-            item(
-                "trash_size",
-                "warn",
-                "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail",
-            )
-        )
-    return {"label_key": "diag.v2.group.ai_config", "items": items}
+        return 0
+    return sum(
+        1
+        for entry in mgr.get_transfers()
+        if entry.get("status") not in ("completed", "cancelled", "failed")
+    )
 
 
-def _group_chat(mgr) -> dict:
-    items = []
+def _recent_transfer_failures(mgr) -> int:
+    """Finished transfers that did not succeed."""
     if mgr is None:
-        items.append(
-            item(
-                "chat_sessions",
-                "warn",
-                "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail",
-                hint="This data isn't available in the current state.",
-                hint_key="diag.v2.item.unavailable.hint",
-            )
-        )
-    else:
-        try:
-            count = len(mgr.get_sessions())
-            items.append(
-                item(
-                    "chat_sessions",
-                    "ok",
-                    f"{count} active session(s)",
-                    detail_key="diag.v2.item.chat_sessions.detail",
-                    detail_params={"count": count},
-                )
-            )
-        except Exception:
-            items.append(
-                item(
-                    "chat_sessions",
-                    "warn",
-                    "Unavailable",
-                    detail_key="diag.v2.item.unavailable.detail",
-                )
-            )
-    return {"label_key": "diag.v2.group.chat", "items": items}
+        return 0
+    return sum(1 for entry in mgr.get_history() if not entry.get("success"))
 
 
-def _group_transfer(mgr) -> dict:
-    items = []
-    if mgr is None:
-        for entry_id in ("active_transfers", "transfer_failures"):
-            items.append(
-                item(
-                    entry_id,
-                    "warn",
-                    "Unavailable",
-                    detail_key="diag.v2.item.unavailable.detail",
-                    hint="This data isn't available in the current state.",
-                    hint_key="diag.v2.item.unavailable.hint",
-                )
-            )
-        return {"label_key": "diag.v2.group.transfer", "items": items}
-    try:
-        active = sum(
-            1
-            for t in mgr.get_transfers()
-            if t.get("status") not in ("completed", "cancelled", "failed")
-        )
-        items.append(
-            item(
-                "active_transfers",
-                "ok",
-                f"{active} in progress",
-                detail_key="diag.v2.item.active_transfers.detail",
-                detail_params={"count": active},
-            )
-        )
-    except Exception:
-        items.append(
-            item(
-                "active_transfers",
-                "warn",
-                "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail",
-            )
-        )
-    try:
-        history = mgr.get_history()
-        failures = sum(1 for t in history if not t.get("success"))
-        if failures:
-            items.append(
-                item(
-                    "transfer_failures",
-                    "warn",
-                    f"{failures} failed transfer(s)",
-                    detail_key="diag.v2.item.transfer_failures.warn.detail",
-                    detail_params={"count": failures},
-                    hint="Check the Transfers panel and retry any failed transfers.",
-                    hint_key="diag.v2.item.transfer_failures.warn.hint",
-                )
-            )
-        else:
-            items.append(
-                item(
-                    "transfer_failures",
-                    "ok",
-                    "No recent failures",
-                    detail_key="diag.v2.item.transfer_failures.ok.detail",
-                )
-            )
-    except Exception:
-        items.append(
-            item(
-                "transfer_failures",
-                "warn",
-                "Unavailable",
-                detail_key="diag.v2.item.unavailable.detail",
-            )
-        )
-    return {"label_key": "diag.v2.group.transfer", "items": items}
-
-
-def _group_filesystem(cfg, history) -> dict:
+def _group_filesystem(cfg, history, file_transfer=None) -> dict:
     items = []
     try:
         db_path = getattr(history, "_db_path", None) if history is not None else None
@@ -1344,21 +1116,67 @@ def _group_filesystem(cfg, history) -> dict:
                 "disk_free", "warn", "Unavailable", detail_key="diag.v2.item.unavailable.detail"
             )
         )
+    # Transfers, as one line rather than a group of two counts.  It lives here because its
+    # subject is the same as this group's -- whether this machine can hold what it is being
+    # asked to hold -- and a reader asking "is transferring working" gets both halves at once.
+    try:
+        active = _active_transfer_count(file_transfer)
+        failures = _recent_transfer_failures(file_transfer)
+        # One sentence per state, and the count as a parameter rather than interpolated into
+        # the key -- which is what the other items do, and what makes the text translatable.
+        if failures:
+            level = "warn"
+            detail = f"{failures} failed"
+            detail_key, params = "diag.v2.item.transfers.warn.detail", {"count": failures}
+            hint = "Open the transfers page to see which failed."
+            hint_key = "diag.v2.item.transfers.warn.hint"
+        elif active:
+            level = "ok"
+            detail = f"{active} in progress"
+            detail_key, params = "diag.v2.item.transfers.active.detail", {"count": active}
+            hint = hint_key = None
+        else:
+            level = "ok"
+            detail = "No transfers in progress"
+            detail_key, params = "diag.v2.item.transfers.ok.detail", None
+            hint = hint_key = None
+        items.append(
+            item(
+                "transfers",
+                level,
+                detail,
+                detail_key=detail_key,
+                detail_params=params,
+                hint=hint,
+                hint_key=hint_key,
+            )
+        )
+    except Exception:
+        items.append(
+            item(
+                "transfers",
+                "warn",
+                "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail",
+            )
+        )
     return {"label_key": "diag.v2.group.filesystem", "items": items}
 
 
 def build_groups(cfg, ctx, *, chat=None, ai_config=None, file_transfer=None, history=None) -> dict:
     """The grouped (round 19) diagnostics payload."""
+    # Four groups, all answering one question: why can this machine not sync?  The groups that
+    # answered other questions -- how the AI config feature is doing, how many chat sessions are
+    # open -- were counts of internal state rather than faults, and a reader who cannot sync was
+    # being asked to interpret them.
+    _ = chat, ai_config  # accepted and unused: callers still pass them
     return {
         "system": _group_system(cfg, ctx.get("start_time", 0)),
         "network": _group_network(cfg, ctx),
         "internet": _group_internet(
             cfg, ctx.get("relay_state", "off"), ctx.get("pending_count", -1)
         ),
-        "ai_config": _group_ai_config(cfg, ai_config),
-        "chat": _group_chat(chat),
-        "transfer": _group_transfer(file_transfer),
-        "filesystem": _group_filesystem(cfg, history),
+        "filesystem": _group_filesystem(cfg, history, file_transfer),
     }
 
 

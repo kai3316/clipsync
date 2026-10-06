@@ -330,8 +330,11 @@ def test_diagnostics_report_comes_from_the_shared_builder(runtime_app):
     assert report["v2"] is True
     assert report["summary"] in ("ok", "warn", "fail")
     assert [check["id"] for check in report["checks"]][:2] == ["server_port", "discovery"]
+    # Four groups, all answering "why can this machine not sync?".  The AI-config and chat
+    # groups were removed: they were counts of other features' internal state, not faults, and
+    # a reader who cannot sync was being asked to interpret them.
     assert sorted(report["groups"]) == [
-        "ai_config", "chat", "filesystem", "internet", "network", "system", "transfer",
+        "filesystem", "internet", "network", "system",
     ]
     assert report["version"]
     assert report["web_port"] == app.config.web_port

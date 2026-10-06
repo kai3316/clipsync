@@ -1992,7 +1992,7 @@ watch(() => updateState.value.phase, (phase, previous) => {
 });
 // Fixed group order, mirroring the legacy diagnostics panel: a group missing
 // from the payload is skipped rather than rendered empty.
-const diagnosticGroupOrder = ["system", "network", "internet", "ai_config", "chat", "transfer", "filesystem"];
+const diagnosticGroupOrder = ["system", "network", "internet", "filesystem"];
 const discoveryState = ref<{ enabled: boolean; visible: boolean } | null>(null);
 const discoveryBusy = ref(false);
 /** The live rows, ordered the way the tray orders its own list.

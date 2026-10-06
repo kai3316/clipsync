@@ -22,9 +22,6 @@ GROUP_LABEL_KEYS = (
     ("system", "diag.v2.group.system"),
     ("network", "diag.v2.group.network"),
     ("internet", "diag.v2.group.internet"),
-    ("ai_config", "diag.v2.group.ai_config"),
-    ("chat", "diag.v2.group.chat"),
-    ("transfer", "diag.v2.group.transfer"),
     ("filesystem", "diag.v2.group.filesystem"),
 )
 
@@ -48,12 +45,9 @@ ITEM_LABEL_KEYS = {
     "watch_roots": "diag.v2.item.watch_roots",
     "local_entries": "diag.v2.item.local_entries",
     "last_collected": "diag.v2.item.last_collected",
-    "trash_size": "diag.v2.item.trash_size",
-    "chat_sessions": "diag.v2.item.chat_sessions",
-    "active_transfers": "diag.v2.item.active_transfers",
-    "transfer_failures": "diag.v2.item.transfer_failures",
     "history_db_size": "diag.v2.item.history_db_size",
     "disk_free": "diag.v2.item.disk_free",
+    "transfers": "diag.v2.item.transfers",
 }
 
 FALLBACK_LOCALE = "en"
