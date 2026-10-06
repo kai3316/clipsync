@@ -1180,7 +1180,16 @@ class DarwinClipboardMonitor(ClipboardMonitor):
                 self._fire_callback()
 
     def _poll_hash(self):
-        last_hash = self._get_content_hash()
+        # Seeded empty rather than with a hash taken here.  Taking one before the loop and
+        # another inside it meant two `_get_content_hash()` calls per poll, and each of
+        # those spawns `pbpaste` twice -- so at POLL_INTERVAL 0.4s the fallback path cost
+        # **ten process spawns a second, forever**, on the machines least able to afford it:
+        # the ones whose ctypes bridge failed, which is why they are here at all.
+        #
+        # Nothing is lost by starting empty: the first iteration computes a hash, it differs
+        # from "", and the change that would have been reported immediately is reported one
+        # poll interval later.
+        last_hash = ""
         while self._running:
             time.sleep(self._poll_interval)
             current = self._get_content_hash()

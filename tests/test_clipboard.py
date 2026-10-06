@@ -780,3 +780,79 @@ def test_each_cooldown_logs_again(bridge, caplog):
 
     failures = [r for r in caplog.records if "libobjc" in r.getMessage()]
     assert len(failures) == 3, f"expected one per cooldown, got {len(failures)}"
+
+
+# ── The hash fallback's cost per poll ─────────────────────────────────────────
+
+def test_the_hash_fallback_hashes_once_per_poll(monkeypatch):
+    """Two hashes per poll is four `pbpaste` spawns; one is two.
+
+    Measured from the code before this: `_poll_hash` took a hash to seed `last_hash` and
+    then took another inside the loop.  The seed was redundant -- an empty start is detected
+    as a change on the first iteration anyway -- and it doubled the cost of a path that runs
+    2.5 times a second.
+    """
+    monitor = darwin.DarwinClipboardMonitor(poll_interval=0.01)
+    monitor._running = True
+    monitor.suppress_until = 0.0
+    monitor._callback = lambda: None
+
+    calls = {"n": 0}
+
+    def counted():
+        calls["n"] += 1
+        # Stop the loop, so exactly one iteration is measured.
+        monitor._running = False
+        return "hash-1"
+
+    monkeypatch.setattr(monitor, "_get_content_hash", counted)
+
+    monitor._poll_hash()
+
+    assert calls["n"] == 1, f"hashed {calls['n']} times in one poll"
+
+
+def test_the_first_change_is_still_reported(monkeypatch):
+    """Starting from an empty seed must not swallow the first copy.
+
+    The seed hash used to be taken before the loop; now the first iteration computes it and
+    compares against "".  A change is still a change, one poll interval later.
+    """
+    monitor = darwin.DarwinClipboardMonitor(poll_interval=0.01)
+    monitor._running = True
+    monitor.suppress_until = 0.0
+    fired: list[int] = []
+    monitor._callback = lambda: fired.append(1)
+
+    calls = {"n": 0}
+
+    def first_then_stop():
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            monitor._running = False
+        return "hash-1"
+
+    monkeypatch.setattr(monitor, "_get_content_hash", first_then_stop)
+
+    monitor._poll_hash()
+
+    assert fired == [1], f"the change was not reported: fired={fired}"
+
+
+def test_an_empty_clipboard_does_not_fire(monkeypatch):
+    """An empty pasteboard is not a copy, and the loop must not treat it as one."""
+    monitor = darwin.DarwinClipboardMonitor(poll_interval=0.01)
+    monitor._running = True
+    monitor.suppress_until = 0.0
+    fired: list[int] = []
+    monitor._callback = lambda: fired.append(1)
+
+    def empty_hash():
+        monitor._running = False
+        return ""
+
+    monkeypatch.setattr(monitor, "_get_content_hash", empty_hash)
+
+    monitor._poll_hash()
+
+    assert fired == [], "an empty clipboard fired the change callback"
