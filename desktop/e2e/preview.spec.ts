@@ -649,3 +649,76 @@ test("the favourites sidebar is as tall as the groups in it", async ({ page }) =
   expect(seen.listHeight).toBeGreaterThan(seen.sidebarHeight);
   expect(failures).toEqual([]);
 });
+
+
+/** The transfers in progress take the page's spare height; the history keeps its own.
+ *
+ * Before: 123px of page below both cards, because neither grew.  Stretching *both* would put
+ * the blank inside the history card instead, which reads as something missing rather than as a
+ * short list -- so only the active list grows, and it is the one where an empty bottom is a
+ * place a new transfer appears.
+ *
+ * Asserted as "the active card reaches the bottom" and "the history is not stretched", which
+ * are the two halves of the decision.  A single "there is no blank" assertion would pass the
+ * version that makes the history card 300px tall.
+ */
+test("the transfers in progress take the spare height and the history does not", async ({ page }) => {
+  const problems: string[] = [];
+  for (const [w, h] of [[1707, 960], [1280, 900], [1100, 760]] as [number, number][]) {
+    const failures = await open(page, w, h);
+    await page.getByRole("button", { name: T("文件传输", "File Transfer"), exact: true }).click();
+    await page.waitForTimeout(200);
+
+    const seen = await page.evaluate(() => {
+      const view = document.querySelector(".transfers-view") as HTMLElement;
+      const active = document.querySelector(".transfer-list--active") as HTMLElement;
+      const history = document.querySelector(".transfer-list--history") as HTMLElement;
+      const vr = view.getBoundingClientRect();
+      const ar = active.getBoundingClientRect();
+      const hr = history.getBoundingClientRect();
+      // How tall the history would be if nothing stretched it: its header plus its rows.
+      let natural = 0;
+      for (const kid of [...history.children]) {
+        const r = (kid as HTMLElement).getBoundingClientRect();
+        if (r.height > 0) natural = Math.max(natural, r.bottom - hr.top);
+      }
+      // The same for the active list, so "it grew" is measured against its own content.
+      let activeContent = 0;
+      for (const kid of [...active.children]) {
+        const r = (kid as HTMLElement).getBoundingClientRect();
+        if (r.height > 0) activeContent = Math.max(activeContent, r.bottom - ar.top);
+      }
+      // The lowest thing in the view, which is what "the page is filled" is about.
+      let lastBottom = vr.top;
+      for (const kid of [...view.children]) {
+        const r = (kid as HTMLElement).getBoundingClientRect();
+        if (r.height > 0) lastBottom = Math.max(lastBottom, r.bottom);
+      }
+      return {
+        viewBottom: Math.round(vr.bottom),
+        lastBottom: Math.round(lastBottom),
+        activeHeight: Math.round(ar.height),
+        activeContent: Math.round(activeContent),
+        historyHeight: Math.round(hr.height),
+        historyNatural: Math.round(natural),
+      };
+    });
+
+    // The last element in the column ends at the column's end, less the page's own padding.
+    // Asserting this of the *active* list would be wrong: the history sits below it.
+    const slack = seen.viewBottom - seen.lastBottom;
+    if (slack > 40) problems.push(`${w}px: the page stops ${slack}px above the bottom`);
+    // It really did grow, rather than the page being exactly its content's height.
+    if (seen.activeHeight <= seen.activeContent) {
+      problems.push(`${w}px: the active list is not taller than its ${seen.activeContent}px of content`);
+    }
+    // And the history is its own height, give or take its padding.
+    if (seen.historyHeight - seen.historyNatural > 30) {
+      problems.push(
+        `${w}px: the history card is ${seen.historyHeight - seen.historyNatural}px taller than its rows`,
+      );
+    }
+    expect(failures).toEqual([]);
+  }
+  expect(problems).toEqual([]);
+});

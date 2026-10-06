@@ -1297,7 +1297,15 @@ button.danger-outline:hover:not(:disabled),
 .ai-pull-status { display: flex; align-items: center; gap: 6px; }
 .ai-pull-status--done { color: var(--accent-text); }
 .ai-pull-status--failed { color: var(--danger-text); }
-.transfers-view { flex: 1; min-width: 0; padding-bottom: 16px; }
+/* A column, so the list of transfers in progress can take the height the page has left.
+   Only that list: the history below it keeps its own height, because a card that draws a
+   border around three rows should not also be 300px tall -- that is the empty-box shape just
+   fixed on the favourites sidebar, and it reads as something missing rather than as a short
+   list. */
+.transfers-view { flex: 1; min-width: 0; padding-bottom: 16px; display: flex; flex-direction: column; }
+/* `flex: 1 1 auto` with a `min-height` floor, so a window with room to spare gives the extra
+   to the active list and a short window still shows a few rows before scrolling. */
+.transfers-view > .transfer-list--active { flex: 1 1 auto; min-height: 180px; }
 /* Everything on this page between the toolbar and the bottom is the page's own
    column: the relay note, the drop's band, the speed test, the bulk report and
    the two cards all take the gutter and the card gap, so a sentence about a
