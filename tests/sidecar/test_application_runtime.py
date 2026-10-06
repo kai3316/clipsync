@@ -493,11 +493,17 @@ def test_a_runtime_that_never_releases_ownership_still_reports_it(
 
     app = SidecarApplication()
     app.runtime = Wedged()
-    with caplog.at_level(logging.WARNING, logger="internal.application.bootstrap"):
+    # The retry is recorded at DEBUG and the failure is what the caller acts on.  It used to be
+    # a WARNING per attempt, which put a healthy teardown -- two misses rescued by the second
+    # attempt, measured on macOS with two live peers -- in the same channel as the one line that
+    # means the runtime really did not let go.
+    with caplog.at_level(logging.DEBUG, logger="internal.application.bootstrap"):
         assert app._stop_runtime() is False
     assert len(attempts) == SidecarApplication.RUNTIME_STOP_ATTEMPTS
     assert app.runtime is not None
     assert "did not release ownership" in caplog.text
+    # And nothing at WARNING, so a genuine failure is the only thing that shows up as one.
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 def test_failed_runtime_stop_keeps_history_identity_and_data_lock(runtime_app):
@@ -643,3 +649,46 @@ def test_ai_profile_save_failure_restores_values_without_broadcast(runtime_app, 
     assert (runtime_app.config.ai_config_tools,
             runtime_app.config.ai_config_custom_paths) == previous
     manager.on_watch_list_changed.assert_not_called()
+
+
+def test_the_no_password_warning_is_said_once_per_process(caplog):
+    """One line, where the user's log had 57.
+
+    `EncryptionManager.__init__` emitted it whenever the password was empty, and a start builds
+    several managers -- bootstrap and device identity, twice -- so one fact about the machine was
+    written once per object.  75 identical lines across two runs is a warning nobody reads, which
+    is worse than no warning: it also buries the lines that differ.
+    """
+    import logging
+
+    from internal.security import encryption as encryption_module
+
+    fingerprint = "56:71:1a:12:d4:f0:00:11:22:33:44:55:66:77:88:99"
+    # The flag is module state, so this test owns putting it back.
+    original = encryption_module._no_password_warned
+    encryption_module._no_password_warned = False
+    try:
+        # INFO, so the per-construction lines are captured as well -- the assertion below is
+        # that silencing the repeated warning did not silence the record of the objects.
+        with caplog.at_level(logging.INFO, logger="internal.security.encryption"):
+            for _ in range(5):
+                encryption_module.EncryptionManager(fingerprint, "")
+        said = [r for r in caplog.records if "obfuscation only" in r.getMessage()]
+        assert len(said) == 1, f"said {len(said)} times for five managers"
+        # Each construction still records itself, so nothing about the objects is lost.
+        initialized = [r for r in caplog.records if "initialized" in r.getMessage()]
+        assert len(initialized) == 5, f"expected one initialized line each, got {len(initialized)}"
+    finally:
+        encryption_module._no_password_warned = original
+
+
+def test_a_password_set_says_nothing(caplog):
+    """The warning is about the no-password state, and only that state."""
+    import logging
+
+    from internal.security import encryption as encryption_module
+
+    fingerprint = "56:71:1a:12:d4:f0:00:11:22:33:44:55:66:77:88:99"
+    with caplog.at_level(logging.WARNING, logger="internal.security.encryption"):
+        encryption_module.EncryptionManager(fingerprint, "hunter2")
+    assert [r for r in caplog.records if "obfuscation only" in r.getMessage()] == []

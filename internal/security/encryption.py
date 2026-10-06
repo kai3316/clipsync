@@ -170,6 +170,25 @@ def is_encrypted(data: bytes) -> bool:
     return data.startswith(_ENCRYPTED_PREFIX)
 
 
+# Whether the no-password warning has been said.  Module state rather than instance state,
+# because the fact is about the machine and the application builds several managers per start --
+# 57 identical lines in one log is a warning nobody reads and a log nobody searches.
+_no_password_warned = False
+
+
+def _warn_once_about_no_password() -> None:
+    """One line per process, where there used to be one per `EncryptionManager`."""
+    global _no_password_warned
+    if _no_password_warned:
+        return
+    _no_password_warned = True
+    logger.warning(
+        "At-rest encryption WITHOUT a password is obfuscation only: "
+        "the storage key is derived from the public device fingerprint, "
+        "which is stored in plaintext. Set a password for real encryption."
+    )
+
+
 class EncryptionManager:
     """Manages encryption keys and operations for a device instance.
 
@@ -189,11 +208,7 @@ class EncryptionManager:
             "set" if password else "not set",
         )
         if not password:
-            logger.warning(
-                "At-rest encryption WITHOUT a password is obfuscation only: "
-                "the storage key is derived from the public device fingerprint, "
-                "which is stored in plaintext. Set a password for real encryption."
-            )
+            _warn_once_about_no_password()
 
     @property
     def storage_key(self) -> bytes:

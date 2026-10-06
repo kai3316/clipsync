@@ -365,11 +365,17 @@ class SidecarApplication:
             stopped = self.runtime.stop() is not False
             if stopped:
                 break
-            # Logged even when the retry rescues it: the log tail is what any
-            # later run of this has to reason from.
-            logger.warning(
-                "LAN runtime did not release ownership within its budget (attempt %d/%d)",
-                attempt + 1, self.RUNTIME_STOP_ATTEMPTS,
+            # Logged even when the retry rescues it: the log tail is what any later run of
+            # this has to reason from.  DEBUG rather than WARNING because the retry is the
+            # expected path -- measured, two of two misses on a normal teardown at macOS with
+            # two live peers -- and a warning per rescued retry buried the one line that means
+            # the runtime really did not let go (`lifecycle`: "Resource did not release
+            # ownership"), which is still reported at its own level.
+            logger.debug(
+                "LAN runtime did not release ownership within its budget (attempt %d/%d); "
+                "retrying",
+                attempt + 1,
+                self.RUNTIME_STOP_ATTEMPTS,
             )
         if not stopped:
             return False
