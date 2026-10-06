@@ -81,57 +81,66 @@ jobs:
 
           What is new in this release:
 
-          - **The interface is the one from 1.0.39, with three measured corrections.**
-            The changes between 1.0.40 and 1.0.45 were reported as worse than what they
-            replaced, and measuring this machine's own window says why: it is 2560x1440 at
-            150% scaling, so a maximised window is 1707 logical pixels wide — and every
-            screenshot those changes were checked against was rendered at 1280 or 390.  The
-            whole range the window actually uses was never looked at.  All of it is
-            reverted.  What is left is the 1.0.39 layout, plus:
+          Found by reading a paired log set from two machines -- one Windows, one macOS --
+          sent to explain two symptoms: clipboard sync that sometimes did not happen, and a
+          Mac that Windows could not always discover.
 
-            - **history rows**: the selection box sits on the clip's first line.  It was
-              centred in the row while the text starts at the top, so on a three-line clip
-              it was **60px below the text it selects**;
-            - **device rows**: the "sync clipboard" switch sits on the state chip's line.
-              It was the last block in the row, so on a paired device it sat below the note
-              field — four lines from the device it applies to;
-            - **settings**: the card is sized to the form (715px) rather than to the window.
+          - **The macOS clipboard monitor no longer rebuilds its bridge ten times a second.**
+            The log held **9605** lines of `NSPasteboard.generalPasteboard returned nil` --
+            nearly the entire file.  The arithmetic: `POLL_INTERVAL` is 0.4s, one poll calls
+            five `_pb_*` helpers, and each calls `_init_nspasteboard()`.  A **success** was
+            cached; a **failure was not**, so every one of them rebuilt the bridge from
+            scratch -- `find_library`, `LoadLibrary`, `objc_getClass`, two `sel_registerName`s
+            and an `objc_msgSend` -- up to **12.5 failed library loads a second, forever**,
+            with a log line each.  A failure is now cached with a 60-second cooldown, so a
+            transient refusal still recovers and a permanent one stops costing anything.
 
-          - **Installs stop failing with "error opening file for writing".**  The Windows
-            sidecar moved from a single executable to a directory, and in the directory
-            shape it runs *from the install directory*: Windows locks a running process's
-            image and every DLL it loaded, **191 files**.  Two faults followed from that,
-            and both are fixed.
+          - **And it no longer spawns `pbpaste` ten times a second.**  When that bridge is
+            unavailable the monitor falls back to hashing the clipboard, and `_poll_hash`
+            called `_get_content_hash()` **twice** per poll -- once to seed itself and again
+            inside the loop -- while each of those spawns `pbpaste` twice.  At 0.4s that is
+            ten process spawns a second, on exactly the machines that could least afford it:
+            the ones whose bridge failed, which is why the fallback is running at all.
 
-            The update path spawned the installer first and stopped the sidecar second, so
-            NSIS began overwriting those files while `bridge.stop()` was still working —
-            which it bounds generously, two seconds asking and twelve waiting before a
-            kill.  The sidecar is now stopped before the installer starts.
+          - **A reverse-DNS host name is no longer sent to the resolver every 30 seconds.**
+            On this Mac `socket.getfqdn()` returns the reverse form of the host's own `::`,
+            and the code asked `getaddrinfo` about it anyway: `Address lookup for
+            '1.0.0.0...0.ip6.arpa' failed` **408 times** in one log, at a median interval of
+            **30.0 seconds**, for a 70-character name no resolver can answer.  Such names --
+            and `localhost` -- are filtered before the call.
 
-            And a sidecar could outlive its host.  Every path that ends this process on
-            purpose stops the sidecar, but a host that is *terminated* — Task Manager, a
-            crash, an installer — runs none of that, and the orphan keeps all 191 files
-            locked, so the next install fails and the one after that does too.  Measured:
-            after force-killing the host, the sidecar was still running and
-            `sidecar/clipsync-sidecar.exe` refused to open.  The host now creates a
-            **Windows job object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so the OS
-            ends the sidecar when the host dies, however it dies.  Nothing has to run for
-            that, which is the point: the failure being fixed is "nothing ran".  Re-measured
-            after: the sidecar exits with the host, and all 191 files open for writing.
+          - **A presence query that fails to send now says so.**  This is the one that
+            matters for the discovery symptom.  The mDNS presence round asks the network who
+            is here every ten seconds, and its one silent failure point was a
+            `contextlib.suppress(Exception)` around the send.  zeroconf **does** raise on an
+            interface it cannot use -- this machine's log has `Error with socket
+            (('172.19.0.1', 5353)): [WinError 59]`, an adapter left by WSL or Docker -- and
+            when it did, the question was never asked, **nothing was written down**, and the
+            application went on discovering nobody until it was restarted and built a new
+            zeroconf.  That is the reported symptom exactly.  The send is still suppressed so
+            a raising round cannot kill the presence thread, but it is no longer silent, and
+            a round now logs `asked=` and `answered=`, which is what separates **"we asked
+            and nobody answered"** from **"we never asked"**.
 
-          - **The version the window shows now matches the build.**  It comes from the
-            sidecar's status rather than from the bundle, and the sidecar staged beside a
-            1.0.45 host had been built two weeks earlier — so the application reported
-            **1.0.33**.  `desktop/src-tauri/sidecar/` is gitignored, so it is whatever the
-            last local build left there, and nothing complained.  The packaging step now
-            refuses to run when any source file is newer than the staged sidecar, and says
-            which ones.  Measurement rather than inspection: PyInstaller compresses its
-            archive, so the version cannot be read out of the file.
+          - **The macOS clipboard bridge now diagnoses itself, in the log.**  Whether the
+            bridge can be repaired depends on which part of it failed, and the log could not
+            say: it ruled out a missing `libobjc` and a missing `NSPasteboard` class and
+            stopped there.  When the fallback is chosen, one warning now carries every step
+            -- is there a libobjc, does AppKit resolve, does `generalPasteboard` return
+            anything, does `pbpaste` work, and does the pasteboard answer **after
+            `NSApplicationLoad()`**, which is the documented way to bring AppKit up in a
+            process that is not a bundled application.  A sidecar is exactly that, so if that
+            last one flips, the fault is named.  The same check appears in the diagnostics
+            report.
 
-          For anyone on 1.0.44 or 1.0.45: this will look different.  The reading-width
-          ceiling is gone, so the content keeps a fixed 32px inset from the sidebar at every
-          window size instead of a margin that appeared only when the window was wide
-          enough.  The overview is a single column again.
+          **What this release does not fix, and says so rather than implying otherwise:**
+          the discovery failure itself.  Windows discovered the Mac four times in the logs
+          available and recovered from every loss, so it could not be reproduced here.  This
+          release makes the next occurrence answerable from a log; if the new warning appears
+          while the Mac is unreachable, the adapter is the cause and the fix is to bind mDNS
+          to the real interface, or to rebuild zeroconf when a send fails instead of waiting
+          for a restart.  The macOS bridge failing at all is likewise still open -- what is
+          fixed is the cost of it failing.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
