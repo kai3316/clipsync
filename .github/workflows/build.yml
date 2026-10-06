@@ -81,43 +81,57 @@ jobs:
 
           What is new in this release:
 
-          - **Discovery is watched on both halves, and the advert half repairs itself.**  A
-            device that cannot be found, on any platform, with a restart as the only cure:
-            that report is what this is for.  A restart rebuilds the zeroconf instance, so the
-            fault lives in that instance's state -- and only one half of discovery was being
-            watched.
+          - **The encryption is described honestly, next to the setting.**  Asked whether a
+            password really encrypts everything, and measured, it does not -- and the useful
+            part is the shape rather than the gaps.  Decryption is automatic, so the key has to
+            be derivable from files on the machine; with no password it comes from the device
+            fingerprint, which is stored **in plaintext in `config.json`** beside the database.
+            So anything that can read the database can read the key material, and "encryption
+            enabled, no password" protects against someone who takes the database and not the
+            configuration, and nothing else.  The code said so in a log line; a log line does
+            not reach the person deciding, and the sentence beside the setting described
+            *traffic* encryption, so "encryption is on" reasonably read as "my files are
+            encrypted".  The security card now says which of the two states you are in.
 
-            The browser was covered: a presence round asks the network who is here every ten
-            seconds.  The **advertiser** was not.  The address watcher rebuilds everything when
-            the local *address set* changes, which is what lets peers find a device again after
-            a network change -- but if the sockets break or the registration is lost while the
-            address stays the same, the set never changes, nothing is compared, and nothing
-            rebuilds for as long as the process runs.  Such a device is healthy, reachable by
-            address, and invisible.
+          - **Diagnostics: seven groups became four, all answering one question.**  They used to
+            answer three -- why this machine cannot sync, how the AI-config feature is doing,
+            and how chat and transfers are doing.  A person who cannot sync was being asked to
+            read "0 profile roots", "Never collected", **"Recycle bin is 12.4 MB"** and
+            "3 active session(s)": counts of other features' internal state, where a count is
+            not a fault and nothing said what to do about one.  `ai_config` and `chat` are gone,
+            and transfers became one line inside storage.  23 items become 15.
 
-            Two things now: a **state line about once a minute** -- whether this machine is
-            advertising, on which addresses, whether it is browsing, how many peers it knows
-            and how many services it has heard -- and a **repair**, in the round that notices
-            an advertisement has gone, logged at INFO.  If a device cannot be found again, that
-            line says which half went quiet.
+          - **A device that cannot be found is now watched on both halves, and repairs itself.**
+            Reported on more than one platform, with a restart as the only cure -- and that is
+            the diagnosis: a restart rebuilds the zeroconf instance, so the fault lives in that
+            instance's state, and only the *browser* half was being watched.  The address
+            watcher rebuilds when the local address set changes, so sockets that break while the
+            address stays the same were never noticed and never rebuilt.  There is now a state
+            line about once a minute, and an advertisement that has gone is registered again.
 
-          - **More logging around the failures that need a restart to clear.**  A failed mDNS
-            query is a warning naming the round rather than silence; a presence round reports
-            `asked=` and `answered=`, which separates **"we asked and nobody answered"** from
-            **"we never asked"**; and a name no resolver can answer -- the reverse-DNS form
-            `socket.getfqdn()` returns on macOS -- is no longer asked about every 30 seconds.
+          - **More logging where the failures were silent.**  A failed mDNS query is a warning
+            naming the round instead of `contextlib.suppress(Exception)` with nothing written; a
+            presence round reports `asked=` and `answered=`, which separates "we asked and nobody
+            answered" from "we never asked"; a reverse-DNS name -- the form `socket.getfqdn()`
+            returns on macOS -- is no longer asked of the resolver every 30 seconds (408 of those
+            in one log); and the macOS clipboard bridge diagnoses itself, naming whether the
+            pasteboard answers after `NSApplicationLoad()`, which is what identifies the fault if
+            it flips.
 
-          - **The macOS clipboard bridge diagnoses itself, in the log.**  One warning when the
-            `pbpaste` fallback is chosen, naming each step: whether a libobjc was found and
-            loaded, whether the Objective-C classes resolve, whether `generalPasteboard`
-            returns anything, whether `pbpaste` works, and whether the pasteboard answers
-            **after `NSApplicationLoad()`** -- the documented way to bring AppKit up in a
-            process that is not a bundled application, which a sidecar is not.
+          - **Interface**, each measured against the running application: the favourites card
+            fills its window while its sidebar stays the height of its groups (it was drawing a
+            border down 417px of nothing); the transfers in progress take the page's spare height
+            and the history keeps its own; and a completed "test connection" report costs 43px
+            rather than 50px.
 
-          - **Interface:** the favourites card fills its window while its sidebar stays the
-            height of its groups; the transfers in progress take the page's spare height and
-            the history keeps its own; a completed "test connection" report costs 43px rather
-            than 50px.
+          **What is deliberately not done.**  Two encryption gaps were measured and left alone:
+          `config.json` keeps `relay_password`, `translate_api_key` and the pairing secrets in
+          the clear even with a password set, and the history rows keep `timestamp`,
+          `content_type` and the `types` JSON keys readable.  Encrypting them would not add
+          protection, because they sit inside the same trust boundary as the database -- anything
+          that can read one can read the other -- and encrypting the timestamps would mean
+          rewriting the database and losing time-ordered queries.  The honest note is worth more
+          than a field that looks tidier.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
