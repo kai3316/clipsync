@@ -4464,6 +4464,12 @@ async function translateText() {
              retry cannot fix: the repair has to run outside the sidecar. -->
         <button v-if="dataInvalid" class="icon-button" :title="t('修复数据')" :aria-label="t('修复数据')" :disabled="state.pending" @click="recoverOpen = true"><Wrench :size="18" /></button>
         <button v-if="state.error.retryable" class="icon-button" :title="t('重新连接')" :aria-label="t('重新连接')" @click="store.reconnect"><RefreshCw :size="18" /></button>
+        <!-- And a way out for the errors that cannot be retried.  The band had no control at all
+             for those, so a request the sidecar refused left a red line the reader could only wait
+             out.  Offered only when there is
+             nothing to retry: an error that *can* be retried is answered by the button beside this
+             one, and a second way to dismiss it would be a second thing to explain. -->
+        <button v-else class="icon-button" :title="t('关闭')" :aria-label="t('关闭提示')" @click="store.dismissError()"><X :size="18" /></button>
       </div>
 
       <div class="content">

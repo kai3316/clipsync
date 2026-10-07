@@ -1051,6 +1051,14 @@ export function createApplicationStore() {
       return fields;
     },
     refresh() { state.error = null; return refresh(); },
+    /** The error band's close, for an error that has nothing to retry.
+     *
+     * Every other path that clears `state.error` does it as a side effect of starting something --
+     * a command's own `guardFlag`, a reconnect, a settings save.  A reader who hit a request the
+     * sidecar refused has none of those to reach for, so the band could not be dismissed at all,
+     * which is how it was reported: a validation error with no way to close it.
+     */
+    dismissError() { state.error = null; },
     // The error band's retry: relaunches a dead sidecar, then refreshes.
     reconnect,
     // The error band's repair, offered only for a data directory the sidecar

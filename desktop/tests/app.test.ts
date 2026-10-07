@@ -2673,3 +2673,79 @@ describe("the update button on a device row", () => {
     }
   });
 });
+
+
+describe("the failure band", () => {
+  /** Open the factory-reset dialog and confirm it, letting the command fail as told. */
+  async function resetThatFails(app: VueWrapper) {
+    await flushPromises();
+    await app.get('[aria-label="设置"]').trigger("click");
+    await flushPromises();
+    await app.findAll("button").find(button => button.text().includes("恢复出厂设置"))!.trigger("click");
+    await flushPromises();
+    const dialog = app.get('[aria-labelledby="factory-reset-title"]');
+    await dialog.findAll("button").find(button => button.text() === "确认重置")!.trigger("click");
+    await flushPromises();
+  }
+
+  it("offers a way out for an error that cannot be retried", async () => {
+    // Reported as "VALIDATION_ERROR 这样的提示关不掉".  The band renders two buttons and both were
+    // conditional -- the repair, for a data directory the sidecar refuses, and the retry, for a code
+    // in `SIDECAR_DOWN_CODES` or `USER_FIXABLE_CODES` -- so an error in neither had no control at
+    // all: it stayed until some later store action cleared it as a side effect of starting.
+    HTMLDialogElement.prototype.showModal = vi.fn();
+    HTMLDialogElement.prototype.close = vi.fn();
+    vi.mocked(bridge.factoryReset).mockRejectedValue({
+      code: "VALIDATION_ERROR",
+      message: t("请求的格式不符合预期，本次操作没有执行。"),
+      retryable: false,
+    });
+
+    const app = mount(App);
+    try {
+      await resetThatFails(app);
+
+      const band = app.get(".error-band");
+      // The message reaches the reader first, which is what the band is for.
+      expect(band.text()).toContain(t("请求的格式不符合预期，本次操作没有执行。"));
+      expect(band.text()).toContain("VALIDATION_ERROR");
+
+      // And there is something to press.  Found by label rather than by position: the band also
+      // carries the repair and retry buttons, each behind its own condition.
+      const dismiss = band.find('[aria-label="关闭提示"]');
+      expect(dismiss.exists(), "no dismiss control on a non-retryable error").toBe(true);
+
+      await dismiss.trigger("click");
+      await flushPromises();
+      expect(app.find(".error-band").exists()).toBe(false);
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.factoryReset).mockReset().mockResolvedValue(null);
+    }
+  });
+
+  it("keeps the retry control, and offers no second way out beside it", async () => {
+    // The control: a retryable error is answered by 重新连接, and a dismiss button beside it would
+    // be a second thing to explain for the same situation.  `setError` forces these codes retryable
+    // even though the host reports them as not.
+    HTMLDialogElement.prototype.showModal = vi.fn();
+    HTMLDialogElement.prototype.close = vi.fn();
+    vi.mocked(bridge.factoryReset).mockRejectedValue({
+      code: "SIDECAR_UNAVAILABLE",
+      message: t("后台进程不可用，请重试"),
+      retryable: false,
+    });
+
+    const app = mount(App);
+    try {
+      await resetThatFails(app);
+
+      const band = app.get(".error-band");
+      expect(band.find('[aria-label="重新连接"]').exists()).toBe(true);
+      expect(band.find('[aria-label="关闭提示"]').exists()).toBe(false);
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.factoryReset).mockReset().mockResolvedValue(null);
+    }
+  });
+});

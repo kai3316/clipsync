@@ -489,6 +489,7 @@ export const EN: Record<string, string> = {
   "邀请中": "Inviting",
   "聊天中": "Chatting",
   "关闭": "Close",
+  "关闭提示": "Dismiss this notice",
   "关闭会话": "Close conversation",
   "会话": "Sessions",
   "附近没有可聊天的设备。": "No devices nearby to chat with.",
