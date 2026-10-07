@@ -485,3 +485,63 @@ class TestTheRejectionMarkerCarriesAReason:
         """A bare code in a log line sends the reader to the source."""
         for reason in (REJECT_UNSPECIFIED, REJECT_REMOVED, REJECT_IDENTITY_UNPROVEN):
             assert _REJECT_REASONS.get(reason), f"reason {reason} has no name"
+
+
+# ── the noise a sleeping peer used to make ───────────────────────────────
+def test_a_retry_cycle_warns_once_and_then_goes_quiet(caplog):
+    """259 warnings became one, and the retries are still recorded.
+
+    A laptop asleep with its lid closed does not answer mDNS and does not accept TCP, so every
+    attempt fails and every failure used to be a WARNING -- one line every 30 seconds for three
+    hours, none of them actionable and all of them from a path working as designed.
+
+    The retry machinery already knows which attempt starts a cycle: `_reconnect_timers` holds a
+    live timer while one is pending.  Asserted as counts, because the count is the change.
+    """
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._reconnect_timers = {}
+    manager._connect_failures = {}
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.connection"):
+        # The first attempt of a cycle: nothing pending, nothing failed before.
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        first = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(first) == 1, "the first failure of a cycle is news"
+
+        # A retry is now pending, so the attempts that follow are the expected ones.
+        manager._reconnect_timers["peer"] = object()
+        for _ in range(20):
+            manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, f"{len(warnings)} warnings for 21 failures"
+    # And nothing is lost: every attempt is in the log at DEBUG.
+    assert len([r for r in caplog.records if "connect failed" in r.getMessage()]) == 21
+    assert manager._connect_failures["peer"] == 21
+
+
+def test_a_peer_coming_back_ends_the_streak(caplog):
+    """So a peer that goes away a second time is announced a second time.
+
+    Without the reset, the second outage would be silent -- which is the other half of the
+    trade: one warning per *cycle*, not one per process.
+    """
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._reconnect_timers = {}
+    manager._connect_failures = {}
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.connection"):
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        manager._reconnect_timers["peer"] = object()
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+
+        # The peer answers: the reconnect bookkeeping is cleared, streak included.
+        manager._reconnect_timers.pop("peer", None)
+        manager._connect_failures.pop("peer", None)
+
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 2, "each cycle gets its own warning"

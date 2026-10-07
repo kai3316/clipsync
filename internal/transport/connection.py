@@ -676,6 +676,10 @@ class TransportManager:
         self._callback_addresses: dict[str, tuple[str, str, int]] = {}
         self._reconnect_attempts: dict[str, int] = {}
         self._reconnect_timers: dict[str, threading.Timer] = {}
+        # peer_id -> consecutive connect failures since the last success.  The
+        # first one is worth saying; the rest of a retry cycle are not, and the
+        # retry machinery is what tells them apart (see `_log_connect_failure`).
+        self._connect_failures: dict[str, int] = {}
         # peer_id -> (real_id, fingerprint refused on).  A cert-pin mismatch
         # suppresses auto-reconnect; this is what lets the health loop notice
         # the user re-pairing and lift the suppression.
@@ -1860,7 +1864,7 @@ class TransportManager:
                     with contextlib.suppress(Exception):
                         sock.close()
             except Exception as e:
-                logger.warning("[%s] connect failed: %s", peer_name, e)
+                self._log_connect_failure(peer_id, peer_name, e)
                 if ssl_sock:
                     with contextlib.suppress(Exception):
                         ssl_sock.close()
@@ -1980,6 +1984,9 @@ class TransportManager:
                     timers_to_cancel.append(timer)
                 self._reconnect_attempts.pop(pid, None)
                 self._cert_pin_blocked.pop(pid, None)
+                # A peer that is back ends the failure streak, so the next time it
+                # goes away the first failure is a warning again.
+                self._connect_failures.pop(pid, None)
             if reject:
                 deadline = time.monotonic() + DISCONNECT_HOLD_SECONDS
                 self._connect_holds[peer_id] = deadline
@@ -2275,6 +2282,7 @@ class TransportManager:
             with self._lock:
                 self._peer_addresses.pop(peer_id, None)
                 self._reconnect_attempts.pop(peer_id, None)
+                self._connect_failures.pop(peer_id, None)
             return
         if conn is not None and getattr(conn, "_crypto_mismatch", False):
             # The peers disagree on app-layer encryption (the recv loop detected
@@ -2303,6 +2311,27 @@ class TransportManager:
                     "[%s] peer not paired — skipping auto-reconnect",
                     peer_id[:12],
                 )
+
+    def _log_connect_failure(self, peer_id: str, peer_name: str, error) -> None:
+        """Say the first failure of a cycle, and keep the rest quiet.
+
+        Measured: 259 WARNING lines in three hours for a laptop asleep with its lid shut, one every
+        30 seconds, none of them actionable.  A retry already pending means this attempt was
+        expected to fail, so it is DEBUG; the attempt that *starts* a cycle is the one that says a
+        peer went away, and that stays a WARNING.
+
+        Two things end a cycle: the peer coming back (the attempts counter is cleared) and the
+        retry machinery giving up on it.  Both clear the streak, so a peer that goes away a second
+        time is announced a second time.
+        """
+        with self._lock:
+            pending = peer_id in self._reconnect_timers
+            streak = self._connect_failures.get(peer_id, 0) + 1
+            self._connect_failures[peer_id] = streak
+        if pending or streak > 1:
+            logger.debug("[%s] connect failed (attempt %d): %s", peer_name, streak, error)
+        else:
+            logger.warning("[%s] connect failed: %s", peer_name, error)
 
     def _schedule_reconnect(self, peer_id: str):
         with self._lock:
