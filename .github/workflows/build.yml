@@ -81,31 +81,33 @@ jobs:
 
           What is new in this release:
 
+          - **A refused request can be dismissed.**  The failure band rendered two buttons and both
+            were conditional — a repair for a data directory the sidecar refuses, and a retry for a
+            code the app knows how to retry — so an error in neither left a red line with **no
+            control at all**, staying until some later action cleared it as a side effect of
+            starting.  Reported as "VALIDATION_ERROR 这样的提示关不掉".  The band now offers 重新连接
+            when there is something to retry and 关闭 otherwise.
+
           - **Pulling a large skill folder works again.**  It failed intermittently — "大部分的 skill
-            拉取都没有问题" — and that is what a count boundary looks like from the outside.  The
-            request validator capped the item list at **100** while the feature behind it expands up
-            to **2000** and reports per item, so ticking a skill folder of more than a hundred files
-            was refused as a malformed request:
-
-                error.validation_error  ->  "请求的格式不符合预期，本次操作没有执行。"
-
-            with nothing naming the limit that had been hit.  The cap is now the feature's own
-            constant, imported from the module that owns it, so the two cannot drift apart again.
+            拉取都没有问题" — which is what a count boundary looks like from the outside.  The request
+            validator capped the item list at **100** while the feature behind it expands up to
+            **2000** and reports per item, so ticking a skill folder of more than a hundred files was
+            refused as a malformed request, with nothing naming the limit that had been hit.  The cap
+            is now the feature's own constant, imported from the module that owns it, so the two
+            cannot drift apart again.
 
           - **Optional features that are switched off are no longer warnings.**  Remote access and
             internet sync are optional, and having them off is the default state of a working
             install — but both reported a warning, so the page's verdict read **存在警告** for a
             machine with nothing wrong.  The two items derived from them were worse: the relay
             reported **failure** for "no brokers configured" when it was off *because* internet sync
-            was off.  All four report normally now and still say what is off, and the relay still
-            fails when internet sync is on and it genuinely cannot work.
+            was off.  All four report normally now and still say what is off.
 
-          - **The diagnostics page reports the update cache.**  That cache is what this machine can
-            hand a peer that cannot reach the release server, and its contents decide whether an
-            update can be sent at all: measured, a cache holding a build the peer already runs makes
-            the device refuse with `cached_not_newer`.  The page names the cached file and its
-            version — `<data>/update_cache/`, which is `~/Library/Application Support/ClipSync/
-            update_cache/` on macOS and `%APPDATA%\ClipSync\update_cache\` on Windows.
+          - **The diagnostics page reports the update cache** — the file and its version.  That cache
+            decides whether this machine can send an update at all: measured, one holding a build the
+            peer already runs makes the device refuse with `cached_not_newer`.
+            `<data>/update_cache/` is `~/Library/Application Support/ClipSync/update_cache/` on macOS
+            and `%APPDATA%\ClipSync\update_cache\` on Windows.
 
           - **A device row no longer flickers while anything is happening**, and **the update button
             says what it is doing**.  The row wrote its note only after the peer answered — and the
