@@ -15,6 +15,7 @@ from internal.application.bootstrap import SidecarApplication
 from internal.application.errors import ApplicationError
 from internal.application.use_cases.history import KINDS, SORTS
 from internal.config.config import FIELD_RANGES, PRIVILEGED_PORT_FLOOR
+from internal.sync.ai_config import MAX_ENTRIES as AI_MAX_ENTRIES
 from internal.transport.peer_id import id_forms
 
 logger = logging.getLogger(__name__)
@@ -408,7 +409,12 @@ class Dispatcher:
         if method == "ai.pull":
             validate_params(params, {
                 "peer_id": (str, lambda v: 0 < len(v) <= 128),
-                "items": (list, lambda v: 0 < len(v) <= 100),
+                # The feature's own cap, not a second number that means the same thing and had
+                # drifted from it: 100 here against `MAX_ENTRIES = 2000` behind it, so ticking a
+                # skill folder of more than a hundred files was refused as a malformed request and
+                # said so in terms of a parameter name.  Measured as intermittent, which is what a
+                # count boundary looks like from the outside.
+                "items": (list, lambda v: 0 < len(v) <= AI_MAX_ENTRIES),
                 "mode": (str, lambda v: v in ("copy", "overwrite", "append")),
                 "batch_id": (str, lambda v: len(v) <= 128),
             }, ("peer_id", "items"))

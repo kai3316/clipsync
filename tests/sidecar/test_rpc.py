@@ -1442,3 +1442,62 @@ def test_devices_list_carries_the_counter_to_the_window(app, monkeypatch):
     result = Dispatcher(app).call("devices.list", {})
     counters = [(row.get("reconnect_attempt"), row.get("reconnect_max")) for row in result["items"]]
     assert counters == [(4, 10), (None, None)]
+
+
+# ── the ai.pull item cap is the feature's own ─────────────────────────────
+def test_ai_pull_accepts_as_many_items_as_the_feature_handles():
+    """A skill folder of more than a hundred files is a valid request, not a malformed one.
+
+    Measured as intermittent: most pulls worked, and the ones that did not were the larger folders.
+    The bound was 100 here while `ai_config.pull` expands up to `MAX_ENTRIES` and reports per item,
+    so the validator was refusing work the layer behind it does.
+    """
+    from internal.sync.ai_config import MAX_ENTRIES
+
+    fields = {
+        "peer_id": (str, lambda v: 0 < len(v) <= 128),
+        "items": (list, lambda v: 0 < len(v) <= MAX_ENTRIES),
+        "mode": (str, lambda v: v in ("copy", "overwrite", "append")),
+        "batch_id": (str, lambda v: len(v) <= 128),
+    }
+
+    def payload(count):
+        return {
+            "peer_id": "a" * 16,
+            "items": [{"tool": "claude", "root": "", "rel_path": f"f{i}"} for i in range(count)],
+            "mode": "copy",
+            "batch_id": "",
+        }
+
+    # The case that was refused: 101 files, which is one skill folder over the old bound.
+    rpc.validate_params(payload(101), fields, ("peer_id", "items"))
+    # The whole range the feature advertises.
+    rpc.validate_params(payload(MAX_ENTRIES), fields, ("peer_id", "items"))
+    # And the bound still exists: the inventory never advertises more than this, so a request for
+    # more is a caller that is wrong rather than a user with a large folder.
+    with pytest.raises(ApplicationError) as refused:
+        rpc.validate_params(payload(MAX_ENTRIES + 1), fields, ("peer_id", "items"))
+    assert refused.value.code == "VALIDATION_ERROR"
+
+
+def test_ai_pull_still_requires_a_peer_and_at_least_one_item():
+    """The control: raising the cap must not have removed the floor.
+
+    A request with nothing in it is a caller that built nothing, and it is worth refusing rather
+    than answering with a confident "0 requested".
+    """
+    fields = {
+        "peer_id": (str, lambda v: 0 < len(v) <= 128),
+        "items": (list, lambda v: 0 < len(v) <= 2000),
+        "mode": (str, lambda v: v in ("copy", "overwrite", "append")),
+        "batch_id": (str, lambda v: len(v) <= 128),
+    }
+
+    for broken in (
+        {"peer_id": "a", "items": [], "mode": "copy", "batch_id": ""},
+        {"peer_id": "", "items": [{"tool": "t", "rel_path": "r"}], "mode": "copy", "batch_id": ""},
+        {"items": [{"tool": "t", "rel_path": "r"}], "mode": "copy", "batch_id": ""},
+    ):
+        with pytest.raises(ApplicationError) as refused:
+            rpc.validate_params(broken, fields, ("peer_id", "items"))
+        assert refused.value.code == "VALIDATION_ERROR"
