@@ -469,7 +469,7 @@ def test_a_couple_of_missed_answers_does_not_report_a_peer_lost():
     assert subject._known_peers == {}
 
 
-def test_a_browse_that_asks_and_hears_nobody_is_rebuilt(caplog):
+def test_a_browse_that_asks_and_hears_nobody_is_rebuilt(caplog, monkeypatch):
     """asked=True answered=0 for a minute is a deaf socket, not a quiet LAN.
 
     ``zc.send`` does not raise into a socket with no route, so the presence
@@ -491,6 +491,9 @@ def test_a_browse_that_asks_and_hears_nobody_is_rebuilt(caplog):
     with subject._heard_lock:
         subject._heard.clear()
 
+    # A fresh host's monotonic clock starts near zero, and the cooldown must
+    # not read that as "rebuilt just now" (CI caught exactly this).
+    monkeypatch.setattr(discovery_module.time, "monotonic", lambda: 5.0)
     with caplog.at_level(logging.INFO, logger="internal.transport.discovery"):
         for _ in range(discovery_module.BROWSE_REBUILD_AFTER_EMPTY_ROUNDS):
             subject._presence_round()

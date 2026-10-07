@@ -650,7 +650,11 @@ class Discovery:
         # was last rebuilt so a broken socket is not rebuilt in a tight loop.
         self._empty_rounds = 0
         self._had_peers = False
-        self._last_browse_rebuild = 0.0
+        # -inf, not 0.0: the cooldown is measured against time.monotonic(),
+        # whose zero is boot, not the epoch.  On a host up for less than
+        # the cooldown a 0.0 start reads as "rebuilt a moment ago" and
+        # blocks the first repair (a fresh CI runner does exactly that).
+        self._last_browse_rebuild = float("-inf")
 
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
