@@ -1,0 +1,29 @@
+# Best-effort constraints for the Python build/test environments.
+#
+# This is NOT a full lockfile.  It pins the direct dependencies this tree was
+# tested against, so a dependency release cannot silently change what a tagged
+# build installs.  What it does not do, and must not pretend to do:
+#
+#   * transitive dependencies are left to the resolver (no `pip-compile` /
+#     hash-pinned lock yet);
+#   * platform-only dependencies (pyobjc-framework-Cocoa on macOS) are not
+#     pinned here because this snapshot came from a Windows/Python 3.13
+#     environment;
+#   * pytest-cov is not installed in that environment, so it is not pinned
+#     either.  Pin it when the real lock story lands.
+#
+# The CI legs install with `-c scripts/constraints.txt` and cache pip against
+# this file.  Refresh it from the environment CI should use, e.g.:
+#   python -m pip install -e ".[dev]"
+#   python -m pip freeze | findstr /i "zeroconf ifaddr cryptography pillow qrcode certifi paho pytest ruff pyinstaller"
+zeroconf==0.148.0
+ifaddr==0.2.0
+cryptography==46.0.5
+Pillow==12.2.0
+qrcode==8.2
+certifi==2026.1.4
+paho-mqtt==2.1.0
+pytest==9.0.3
+pytest-timeout==2.4.0
+ruff==0.15.12
+pyinstaller==6.20.0

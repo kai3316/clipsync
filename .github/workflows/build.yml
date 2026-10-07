@@ -81,48 +81,53 @@ jobs:
 
           What is new in this release:
 
-          - **A peer update sends the build that is actually newer.**  Reported from three device
-            logs.  The guard that decided whether to serve compared *this machine's* build against
-            the peer's claim -- a 1.0.54 host is newer than a 1.0.33 peer, so it passed -- and then
-            sent whatever the cache held:
+          - **Peer updates now install the signed release, on every desktop
+            platform.**  A machine that already has the installer can pass it to
+            another on the same LAN.  The receiver checks the release's minisign
+            signature before anything runs; a blob that only matches the sender's
+            own checksum is staged for the reader, never executed.  Online and
+            offline (release manifest unreachable) both install from the staged
+            bytes: Windows runs the verified NSIS installer, macOS swaps the
+            `.app`, and Linux installs the AppImage or runs the signed
+            `.deb`/`.rpm` through the system authentication prompt.
 
-                Kais-MacBook (1.0.54)   Serving cached update ClipSync_1.0.33_aarch64.dmg
-                zzz MacBook  (1.0.33)   Received update blob ClipSync_1.0.33_aarch64.dmg
+          - **The unauthenticated update-execution path is closed.**  Previously
+            a same-LAN device that merely completed an identity handshake could
+            get a `*-setup.exe` auto-run whenever the published release digest
+            was out of reach.  Auto-install now requires a release-verified or
+            signed peer payload *and* the release signature; everything else
+            stages the file and waits for the reader.
 
-            That is a file the peer already had, four times in ten minutes, **while both ends
-            logged a successful transfer**.  The cached file's own version is now checked, with the
-            same parser the receiver uses, so the two ends cannot disagree about a filename.
+          - **Internet pairing can no longer be re-keyed by a later hello.**  A
+            hello claiming an already-confirmed device cannot replace its pinned
+            DH key, and a freshly generated code cannot rebind an existing
+            device id.
 
-          - **The macOS update payload can enter the cache.**  `ClipSync.app.tar.gz` was excluded
-            because it "is not a file a person installs" -- true of people, wrong for a cache whose
-            job is serving a peer with no route to the release server, and on macOS that payload is
-            exactly what its own updater downloads.  That is why a 1.0.54 Mac kept serving a
-            **1.0.33** `.dmg`: its own download was refused, so the stale file stayed the newest one
-            the cache accepted.  Windows never had the problem, because its payload *is* its
-            installer.
+          - **Relay replay and timestamp hardening.**  The duplicate cache now
+            covers the full 30-minute timestamp window, and new envelopes carry
+            an HMAC over the timestamp so a relay can no longer move it.
 
-          - **Every rejection says what actually happened.**  `not_newer` -- the common case, a file
-            that is simply the build you already have -- was reported as **"checksum mismatch"**,
-            because two verdicts had their own words mapped and the rest fell through to a default.
-            There was no checksum failure anywhere in three logs.
+          - **Reconnect discipline.**  The fast ladder stays capped at 30
+            seconds; after the ten fast attempts the steady retry is five
+            minutes instead of 30 seconds, and a successful reconnect clears the
+            failure streak so the next outage warns again.
 
-          - **The sending device is told what became of the file.**  A new `update_verdict`
-            message, so the machine holding the stale cache can stop offering it.  Its log said
-            "Serving cached update" four times and nothing else; the refusal existed only in the
-            other device's log.
+          - **Web companion.**  API calls authenticate with
+            `Authorization: Bearer`, so the token stays out of request URLs;
+            clearing the token no longer opens writes to DNS-rebinding
+            hostnames, and rejected requests drain their bodies cleanly.
 
-          - **One retry before a peer that is restarting is written off.**  Measured: a 15-second
-            dial timed out, the attempt was abandoned, and the machine went to a release server it
-            could not reach -- the update arrived two and a half minutes later from the device that
-            had it all along.  Only failures meaning "not this second" are retried, after a short
-            jittered wait.
+          - **Desktop.**  Error banners go through one normalisation path;
+            update and log notices show translated titles; restarting the
+            sidecar no longer leaves the old one running.
 
-          - **The automatic check no longer downloads from GitHub by itself.**  Asked for directly,
-            and the measurements agree: from a slow network an automatic fetch is worse than none,
-            and its timeout delays the peer that already has the file.  The check still finds the
-            release and the card offers it; **the download starts when you click 下载更新**.  The
-            peer-to-peer fetch stays automatic on purpose -- a peer on the same LAN answers in
-            seconds, and it is the source that works when the release server does not.
+          - **One identity-frame implementation, one source of truth for
+            setting ranges**, plus the ARM64 Linux `.deb` cache fix.
+
+          - **Release engineering.**  macOS joins the test matrix, a Chromium
+            e2e job runs in CI, and a tag-only gate re-runs the release-critical
+            suites before anything is published; `npm run tauri` fills the real
+            version override.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
@@ -189,6 +194,73 @@ jobs:
               --notes "$NOTES" --draft
           fi
 
+  tests:
+    # Publishing used to wait only for the artifacts, so a tag whose commit
+    # had never passed a suite could be published.  Branch pushes run
+    # test.yml, but a tag pushed on its own reaches neither it nor anyone
+    # else.  This is the gate: the same suites test.yml runs -- pytest, the
+    # web contract tests, the desktop unit tests and `cargo test --locked` --
+    # and `release` cannot start without it.  It gates publication, not
+    # `prepare`: that job only creates a draft release, and a failing gate
+    # must still leave the release unpublished rather than absent.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+            scripts/constraints.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" -c scripts/constraints.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - name: Install Node dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          npm ci --no-audit --no-fund --prefix desktop
+
+      - name: Python suite
+        run: python -m pytest tests -q
+
+      - name: Web contract suite
+        run: npm run test:web
+
+      - name: Desktop type check
+        working-directory: desktop
+        run: npm run typecheck
+
+      - name: Desktop unit tests
+        working-directory: desktop
+        run: npm test
+
+      - name: Linux native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf
+
+      - name: Rust tests
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     # `prepare` is named here because the first thing this job does is a
@@ -202,8 +274,9 @@ jobs:
     # application, and the desktop installers arrive from `desktop.yml`.  What is
     # left here is the release itself -- created by `prepare` the moment the tag
     # lands, published at the end of this job -- which is what the desktop
-    # workflow attaches its installers to and waits for.
-    needs: [prepare]
+    # workflow attaches its installers to and waits for.  `tests` is the other
+    # half: publication is held until the suites that guard a release pass.
+    needs: [prepare, tests]
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release once it carries its update manifest

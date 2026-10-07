@@ -9,7 +9,7 @@
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "tauri": "tauri"
+    "tauri": "node ../scripts/tauri.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

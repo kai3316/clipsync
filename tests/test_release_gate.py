@@ -7,22 +7,30 @@ trigger that also fires on a branch, or a `needs:` line that gets dropped,
 does not turn the run red.  It publishes something nobody checked, and the
 Releases page is where that is discovered.
 
-Neither publishing workflow runs the test suite: that is `test.yml`, which runs
-on every branch and can publish nothing.  What these cases hold is the graph
-itself -- that only a tag can publish, that the uploader waits for the jobs
-producing what it uploads, and that the testing workflow stays unable to
+The publishing workflows used to run no test suite at all: the suite is
+`test.yml`, which runs on every branch and can publish nothing -- so a tag
+pushed on its own reached no check.  Each publishing workflow now carries a
+tag-only gate job that re-runs the release-critical suites, and its `release`
+job needs it.  What these cases hold is the graph itself -- that only a tag can
+publish, that the uploader waits for the jobs producing what it uploads, that
+the gate is between the two, and that the testing workflow stays unable to
 publish.  The workflows are parsed by hand rather than with PyYAML: the suite's
 dependency set has no YAML parser, and adding one to the application's
 requirements to read three CI files is a poor trade for what is a handful of
 indentation rules.
 """
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 
-WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOWS = ROOT / ".github" / "workflows"
+
+# The job name both publishing workflows use for the release gate.
+GATE_JOB = "tests"
 
 # Each workflow that can publish, mapped to the job whose artifacts its
 # uploader attaches.  The uploader has to wait on that job; there is nothing
@@ -312,3 +320,102 @@ def test_the_test_workflow_cannot_publish_anything():
     assert jobs, "the test workflow has no jobs"
     for name, job in jobs.items():
         assert GATE not in job["if"], f"{name} is gated on a tag, which this workflow never has"
+
+
+@pytest.mark.parametrize("workflow", ["build.yml", "desktop.yml"])
+def test_each_publisher_gates_its_release_on_the_suites(workflow):
+    """A tag that never ran test.yml still has to pass the same suites.
+
+    A branch push runs test.yml; a tag pushed on its own runs no check at all.
+    The gate job repeats the release-critical suites inside each publishing
+    workflow, and `release` needs it, so publishing cannot start on a red tree.
+    """
+    jobs = jobs_of(workflow)
+    assert GATE_JOB in jobs, f"{workflow} has no `{GATE_JOB}` job"
+    assert GATE in jobs[GATE_JOB]["if"], (
+        f"{workflow}'s {GATE_JOB} job is not limited to tagged refs"
+    )
+    assert reaches(jobs, "release", GATE_JOB), (
+        f"{workflow}'s release job does not wait for the {GATE_JOB} gate"
+    )
+    body = jobs[GATE_JOB]["body"]
+    assert "python -m pytest tests -q" in body, f"{workflow}'s gate does not run pytest"
+    assert "npm test" in body, f"{workflow}'s gate does not run the desktop unit tests"
+    assert "cargo test --locked" in body, f"{workflow}'s gate does not run cargo test"
+
+
+def test_the_standard_tauri_entry_generates_the_version_override():
+    """`tauri.conf.json` keeps a placeholder version; the entry point fills it.
+
+    A bare `npm exec tauri build` produced `ClipSync_0.1.0_*` because only CI
+    and `scripts/build-tauri.ps1` wrote the real version into
+    `build/tauri-package.json`.  `npm run tauri -- build` goes through
+    `scripts/tauri.mjs`, which runs the same generator CI runs before the build
+    args are forwarded, and leaves `dev` untouched.
+    """
+    package = json.loads((ROOT / "desktop" / "package.json").read_text(encoding="utf-8"))
+    tauri_script = package["scripts"]["tauri"]
+    assert "scripts/tauri.mjs" in tauri_script, (
+        f"the standard tauri entry is `{tauri_script}`, not the generator wrapper"
+    )
+    wrapper = (ROOT / "scripts" / "tauri.mjs").read_text(encoding="utf-8")
+    assert "make-package-config.py" in wrapper, "the wrapper does not run the generator"
+    assert '"--config"' in wrapper, "the wrapper does not point tauri at the generated config"
+
+
+def test_the_browser_suite_has_a_runner():
+    """The e2e scripts existed and no workflow ever ran them.
+
+    One of the two was known to be failing for a while and nothing noticed,
+    which is the failure mode a suite with no runner creates.  The job installs
+    Playwright's own browser and runs `npm run test:e2e`; this holds that pair
+    together.
+    """
+    jobs = jobs_of("test.yml")
+    assert "e2e" in jobs, "test.yml has no browser suite job"
+    body = jobs["e2e"]["body"]
+    assert "playwright install" in body, "the e2e job does not install a browser"
+    assert "npm run test:e2e" in body, "the e2e job does not run the browser suite"
+
+
+def test_the_python_suite_runs_on_all_three_desktop_platforms():
+    """The matrix has to name the platforms whose backends it claims to cover.
+
+    The job's own comment said the three clipboard backends needed three
+    runners while the matrix carried two; macOS was covered only by
+    monkeypatched Darwin tests on other systems.
+    """
+    body = text_of("test.yml")
+    assert "os: [windows-latest, ubuntu-latest, macos-latest]" in body, (
+        "the Python matrix no longer covers Windows, Linux and macOS"
+    )
+
+
+def test_the_package_config_generator_writes_the_version_override(tmp_path, monkeypatch):
+    """The wrapper's generator is what keeps a local build off `0.1.0`.
+
+    `tauri.conf.json` commits a placeholder version, so the value in
+    `build/tauri-package.json` is the one that ships.  The generator is run
+    against a temporary root rather than the repository, once per sidecar
+    shape, so this holds the version *and* the bundle key each staging shape
+    needs.
+    """
+    import importlib.util
+
+    script = ROOT / "scripts" / "make-package-config.py"
+    spec = importlib.util.spec_from_file_location("make_package_config", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module, "SIDECAR", tmp_path / "sidecar" / "clipsync-sidecar.exe")
+
+    assert module.main(["--shape", "onefile"]) == 0
+    written = json.loads((tmp_path / "build" / "tauri-package.json").read_text(encoding="utf-8"))
+    assert written["version"] == module.__version__
+    assert written["bundle"] == {"externalBin": ["binaries/clipsync-sidecar"]}
+
+    assert module.main(["--shape", "onedir"]) == 0
+    written = json.loads((tmp_path / "build" / "tauri-package.json").read_text(encoding="utf-8"))
+    assert written["bundle"] == {"resources": ["sidecar"]}

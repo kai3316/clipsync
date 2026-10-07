@@ -7,6 +7,12 @@ as a resource directory, then builds with `--config` pointing at it.  Building w
 gives `ClipSync_0.1.0_x64-setup.exe` and no sidecar, which is what a bare `npx tauri build`
 produced here.
 
+`scripts/tauri.mjs` is the standard `npm run tauri` entry: it runs this script
+for a `build` and forwards the generated `--config`, so the same override CI
+writes is what a local release build uses too.  `--shape auto` (the default)
+picks the onedir layout on macOS and wherever ``CLIPSYNC_SIDECAR_ONEDIR`` is
+set, and the onefile layout otherwise.
+
 # Why it refuses a sidecar older than the source
 
 `desktop/src-tauri/sidecar/` is gitignored, so it is whatever the last local build left
@@ -22,7 +28,9 @@ exact.  Anything newer than the binary is a source change the binary does not ha
 message says which -- the version file being the case that bit.
 """
 
+import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -54,12 +62,44 @@ def newer_sources(binary: Path) -> list[Path]:
     return sorted(found)
 
 
-def main() -> int:
-    # Windows stages the sidecar as a directory (CLIPSYNC_SIDECAR_ONEDIR=1 in CI), because
-    # a onefile build has nowhere to put the `_internal` tree beside it.
-    bundle = {"resources": ["sidecar"]}
+def is_onedir(shape: str) -> bool:
+    """Whether the sidecar is staged as a directory rather than one executable.
 
-    stale = newer_sources(SIDECAR)
+    ``auto`` is what the standard entry point uses: macOS always builds the
+    directory (the spec forces it), Windows/Linux follow the same
+    ``CLIPSYNC_SIDECAR_ONEDIR`` switch ``scripts/build-sidecar.ps1`` sets.  The
+    explicit shapes exist so a caller that has already staged one kind cannot
+    be handed a config for the other.
+    """
+    if shape == "onedir":
+        return True
+    if shape == "onefile":
+        return False
+    marker = os.environ.get("CLIPSYNC_SIDECAR_ONEDIR", "").strip().lower()
+    return sys.platform == "darwin" or marker not in ("", "0", "false")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument(
+        "--shape",
+        choices=("auto", "onedir", "onefile"),
+        default="auto",
+        help="which sidecar layout the bundle config should name (default: auto)",
+    )
+    args = parser.parse_args(argv)
+
+    # A onedir sidecar is staged beside the host as a bundle resource; a
+    # onefile is staged under `binaries/` for `externalBin`, which is the shape
+    # `scripts/build-sidecar.ps1` writes when `-OneDir` was not asked for.
+    onedir = is_onedir(args.shape)
+    bundle = (
+        {"resources": ["sidecar"]}
+        if onedir
+        else {"externalBin": ["binaries/clipsync-sidecar"]}
+    )
+
+    stale = newer_sources(SIDECAR) if onedir else []
     if stale:
         print(
             f"the staged sidecar is older than the sources it would be packaged with:\n"

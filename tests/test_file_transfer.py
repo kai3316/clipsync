@@ -35,6 +35,23 @@ from internal.sync.file_transfer import (
 )
 
 
+def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.01) -> bool:
+    """Poll *predicate* to a deadline instead of sleeping a fixed amount.
+
+    The receive path is synchronous, but a negative assertion still has to know
+    the work ran before absence means anything, and the sender side hands
+    chunks to a worker.  Every fixed sleep this file used was one of those two
+    waits; polling returns as soon as the predicate is true and keeps a
+    regression from turning into a false green.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
 @pytest.fixture
 def fast_stall_grace(monkeypatch):
     """Shrink the receiver's stall grace so gap tests do not sleep 5 s."""
@@ -97,8 +114,15 @@ class TestFileTransferManager:
         tid = self.mgr.send_file(path, self._broadcast_fn)
 
         self.mgr.handle_message("file_ack", {"transfer_id": tid}, self._broadcast_fn)
-        time.sleep(0.3)
 
+        assert _wait_until(
+            lambda: sum(
+                1
+                for i in range(len(self.sent_frames))
+                if self._decode_sent(i).get("msg_type") == "file_chunk"
+            )
+            == 3
+        ), "the three chunks never left"
         chunk_msgs = [
             self._decode_sent(i)
             for i in range(len(self.sent_frames))
@@ -204,11 +228,9 @@ class TestFileTransferManager:
             },
             self._broadcast_fn,
         )
-        time.sleep(0.1)
-
         # Check output file
         output_path = Path(self.output_dir) / "hello.txt"
-        assert output_path.exists()
+        assert _wait_until(lambda: output_path.exists()), "the file was never saved"
         assert output_path.read_bytes() == file_data
 
         # Check file_complete was sent
@@ -271,10 +293,13 @@ class TestFileTransferManager:
             },
             self._broadcast_fn,
         )
-        time.sleep(0.2)
-        self.mgr._send_as_frame = real_send
-
-        assert fired, "the injection point never ran"
+        try:
+            assert _wait_until(lambda: bool(fired)), "the injection point never ran"
+        finally:
+            self.mgr._send_as_frame = real_send
+        assert _wait_until(lambda: len(completions) == 1), (
+            f"the completion callback ran {len(completions)} times"
+        )
         statuses = [row.get("status") for row in self.mgr.get_history()]
         # One row, and it is the ending that got there first: the file did land,
         # and the refused cancel added nothing beside it.
@@ -315,10 +340,8 @@ class TestFileTransferManager:
                 self._broadcast_fn,
             )
 
-        time.sleep(0.1)
-
         output_path = Path(self.output_dir) / "out_of_order.bin"
-        assert output_path.exists()
+        assert _wait_until(lambda: output_path.exists()), "the file was never saved"
         assert output_path.read_bytes() == file_data
 
     def test_receive_file_name_collision(self):
@@ -346,13 +369,13 @@ class TestFileTransferManager:
             {"transfer_id": tid, "chunk_index": 0, "total_chunks": 1, "data": b64},
             self._broadcast_fn,
         )
-        time.sleep(0.1)
-
+        # Wait for the renamed file as the positive marker that the receive
+        # path finished; the original's contents are checked after it, so the
+        # assertion cannot pass because nothing ran yet.
+        renamed = Path(self.output_dir) / "collision (1).txt"
+        assert _wait_until(lambda: renamed.exists()), "the renamed file never landed"
         # Original still there
         assert existing.read_text() == "original"
-        # New file with (1) suffix
-        renamed = Path(self.output_dir) / "collision (1).txt"
-        assert renamed.exists()
         assert renamed.read_bytes() == file_data
 
     # ------------------------------------------------------------------
@@ -381,18 +404,17 @@ class TestFileTransferManager:
             {"transfer_id": tid, "chunk_index": 0, "total_chunks": 1, "data": b64},
             self._broadcast_fn,
         )
-        time.sleep(0.1)
-
+        # The error frame is the positive marker that finalization ran, so the
+        # absence below is a result rather than a race.
+        assert _wait_until(
+            lambda: any(
+                self._decode_sent(i).get("msg_type") == "file_complete"
+                and self._decode_sent(i).get("status") == "error_size_mismatch"
+                for i in range(len(self.sent_frames))
+            )
+        ), "no error_size_mismatch frame was sent"
         # File should NOT have been saved
         assert not (Path(self.output_dir) / "bad.txt").exists()
-
-        # Error status should have been sent
-        completes = [
-            self._decode_sent(i)
-            for i in range(len(self.sent_frames))
-            if self._decode_sent(i).get("msg_type") == "file_complete"
-        ]
-        assert any(c.get("status") == "error_size_mismatch" for c in completes)
 
     # ------------------------------------------------------------------
     # Invalid chunk data
@@ -418,9 +440,12 @@ class TestFileTransferManager:
             self._broadcast_fn,
         )
 
-        time.sleep(0.1)
-        # Transfer should still be in receiving state, file not created
+        # The chunk handler runs synchronously and rejects the decode before
+        # touching the temp file; the state check is the positive marker, so
+        # the absence below is not a race.
         assert not (Path(self.output_dir) / "b64.txt").exists()
+        with self.mgr._lock:
+            assert self.mgr._transfers[tid]["state"] == "receiving"
 
     # ------------------------------------------------------------------
     # Sender side: file_ack / file_reject / file_complete
@@ -454,8 +479,27 @@ class TestFileTransferManager:
         # Second ack (duplicate)
         self.mgr.handle_message("file_ack", {"transfer_id": tid}, self._broadcast_fn)
 
-        time.sleep(0.3)
-
+        assert _wait_until(
+            lambda: sum(
+                1
+                for i in range(len(self.sent_frames))
+                if self._decode_sent(i).get("msg_type") == "file_chunk"
+            )
+            == 1
+        ), "the first ack did not start the one send pass"
+        # The duplicate ack must not start a second pass.  Poll for that bad
+        # outcome rather than sleeping a fixed amount: a regression shows up as
+        # a second chunk immediately, and the healthy path still waits out the
+        # same short window the old sleep used.
+        assert not _wait_until(
+            lambda: sum(
+                1
+                for i in range(len(self.sent_frames))
+                if self._decode_sent(i).get("msg_type") == "file_chunk"
+            )
+            > 1,
+            timeout=0.3,
+        ), "the duplicate ack resent the chunks"
         chunk_msgs = [
             self._decode_sent(i)
             for i in range(len(self.sent_frames))
@@ -499,8 +543,13 @@ class TestFileTransferManager:
 
         # Should still have 1 chunk (the code forces total_chunks >= 1)
         self.mgr.handle_message("file_ack", {"transfer_id": tid}, self._broadcast_fn)
-        time.sleep(0.2)
 
+        assert _wait_until(
+            lambda: any(
+                self._decode_sent(i).get("msg_type") == "file_chunk"
+                for i in range(len(self.sent_frames))
+            )
+        ), "the empty file's chunk never left"
         chunk_msgs = [
             self._decode_sent(i)
             for i in range(len(self.sent_frames))
@@ -732,7 +781,12 @@ class TestStalledIncomingTransfer:
             self._feed(tid, idx, total)
         assert self.mgr.pause_transfer(tid, self._broadcast_fn) is True
 
-        time.sleep(fast_stall_grace * 6)  # long enough to stall, if it counted
+        # Drive the finalization the stall watchdog would have driven, instead
+        # of sleeping out its grace: it must notice the pause and leave the
+        # partial file and the retransmit budget alone.
+        with self.mgr._lock:
+            transfer = self.mgr._transfers[tid]
+        self.mgr._finalize_received_file(tid, transfer, total, self._broadcast_fn)
 
         # Through the manager's own builder: the partial file is named after a
         # digest of the id, not the id, because the id arrives from a peer and
@@ -752,7 +806,12 @@ class TestStalledIncomingTransfer:
         self._feed(tid, 0, total)
         assert self.mgr.pause_transfer(tid, self._broadcast_fn) is True
 
-        time.sleep(0.1)
+        # Age the pause instead of sleeping out the cap: this is the same
+        # clock comparison cleanup makes, without a wall-clock wait.
+        with self.mgr._lock:
+            self.mgr._transfers[tid]["_paused_at"] = (
+                time.time() - file_transfer_mod.PAUSED_MAX_SECONDS - 1
+            )
         self.mgr.cleanup_stale_transfers()
         with self.mgr._lock:
             assert tid not in self.mgr._transfers
@@ -798,8 +857,11 @@ class TestAPeerCannotChooseWhereBytesLand:
             },
             lambda data: None,
         )
-        time.sleep(0.2)
-
+        # The chunk handler is synchronous, and the landed file is the positive
+        # marker that the payload was written; the canary check runs after it,
+        # so it cannot pass because the write had not happened yet.
+        landed = out / "harmless.txt"
+        assert _wait_until(lambda: landed.exists()), "the honest payload never landed"
         assert not canary.exists(), "the payload was written outside the receive dir"
         # And what it did write is inside, under a name the id cannot steer.
         for path in out.glob(".*.part"):
