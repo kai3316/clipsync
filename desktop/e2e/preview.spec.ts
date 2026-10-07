@@ -769,3 +769,57 @@ test("the security card says what is and is not encrypted", async ({ page }) => 
   await expect(card.getByText(encryptedNote)).toBeVisible();
   await expect(card.getByText(warningNote)).toHaveCount(0);
 });
+
+
+/** A dialog's buttons are not flush against the field above them.
+ *
+ * Reported for the push-text dialog: "这个窗口按钮和文本直接靠的太近了".  The cause was general --
+ * `.modal p` carries a 24px bottom margin and `.modal label` carries none, while `.modal-actions`
+ * had no top margin -- so every dialog whose actions follow a *field* had a 0px gap, and the two
+ * that do are this one and 发送网址.
+ *
+ * Measured, both before and after: `gap=0` then `gap=20`.  A minimum is asserted rather than the
+ * exact figure, because the claim is "not touching" and pinning 20 would fail on the spacing being
+ * retuned, which is not the fault being guarded against.
+ */
+test("a dialog's buttons are not flush against the field above them", async ({ page }) => {
+  await open(page, 1280, 900);
+  await page.getByRole("button", { name: T("设备", "Devices"), exact: true }).click();
+  await page.waitForTimeout(300);
+
+  const gapFor = async (dialogSelector: string) =>
+    page.evaluate((selector) => {
+      const dialog = document.querySelector(selector);
+      const actions = dialog?.querySelector(".modal-actions") ?? null;
+      const above = actions?.previousElementSibling ?? null;
+      if (!actions || !above) return null;
+      return {
+        above: above.tagName.toLowerCase(),
+        gap: Math.round(
+          actions.getBoundingClientRect().top - above.getBoundingClientRect().bottom,
+        ),
+      };
+    }, dialogSelector);
+
+  // 推送文本: the one reported, and the wider of the two.
+  await page.getByRole("button", { name: T("推送文本", "Push text") }).click();
+  await page.waitForTimeout(250);
+  const pushed = await gapFor("dialog[aria-labelledby='push-text-title']");
+  expect(pushed, "the push-text dialog did not open, or has no actions row").not.toBeNull();
+  expect(pushed!.above).toBe("label");
+  expect(pushed!.gap, `the buttons sit ${pushed!.gap}px under the field`).toBeGreaterThanOrEqual(16);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+
+  // 发送网址, which shares the cause.
+  const urlButton = page
+    .locator(`.device-row button[aria-label='${T("发送网址", "Send URL")}']`)
+    .first();
+  expect(await urlButton.count(), "no device row offers 发送网址").toBeGreaterThan(0);
+  await urlButton.click();
+  await page.waitForTimeout(250);
+  const sent = await gapFor("dialog[aria-labelledby='send-url-title']");
+  expect(sent, "the send-url dialog did not open, or has no actions row").not.toBeNull();
+  expect(sent!.above).toBe("label");
+  expect(sent!.gap, `the buttons sit ${sent!.gap}px under the field`).toBeGreaterThanOrEqual(16);
+});

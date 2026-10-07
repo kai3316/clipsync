@@ -504,7 +504,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 /* The second line of the row: the chips, the note and a pairing's own controls.
    They start where the name starts and run to the row's right edge, so one
    vertical line holds the identity, the chips and the note field together. */
-.device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2 / -1; }
+.device-channels, .device-full, .device-row > .pairing-controls { grid-column: 2 / -1; }
 /* The test-connection report.  It keeps the row it had -- `device-full`, spanning the row --
    and the row is made cheap instead of being given away.
 
@@ -572,7 +572,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    behind an edit button — so it takes the width the column leaves, stopping at
    the same right edge the controls above it do, and wears the same control
    chrome as every field elsewhere. */
-.device-note { min-width: 0; min-height: var(--control); padding: 6px 10px; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+
 /* Removed devices are kept but set apart: a rule and a heading, rather than
    more rows of the same list. */
 .archived-devices { margin-top: 26px; border-top: 1px solid var(--line); }
@@ -657,6 +657,13 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    the window allows, and the about box's three buttons come to about 300px in
    the 288px the minimum window leaves inside it. */
 .modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+/* A dialog whose actions follow a *field* had them at 0px: .modal p carries a
+   24px bottom margin and .modal label carries none (only 14px 0 0), so the
+   button row sat flush against the textarea in 推送文本 and against the URL box in
+   发送网址.  Measured before and after rather than inferred: both read gap=0.
+   The margin is on the row, not on the label, because a label is used in dialogs
+   that put something else after it and this is about the row's own spacing. */
+.modal label + .modal-actions { margin-top: 20px; }
 /* A failed action reported inside a dialog: red type on the dialog's own
    surface, not the full-width band the page uses. */
 /* A dialog's own failure line.  Every dialog that can fail shows it with this
@@ -1613,7 +1620,7 @@ button.danger-outline:hover:not(:disabled),
      letter a line and a UUID down the page in three-character pieces. */
   .device-row { grid-template-columns: auto minmax(0, 1fr); }
   .device-row .row-actions { grid-row: 3; grid-column: 2; justify-self: start; }
-  .device-channels, .device-note, .device-full, .device-row > .pairing-controls { grid-column: 2; }
+  .device-channels, .device-full, .device-row > .pairing-controls { grid-column: 2; }
   .device-sync { grid-column: 2; grid-row: auto; justify-self: start; }
   .pagination { padding: 14px var(--page-gutter); }
   .bottom-status { flex-wrap: wrap; }

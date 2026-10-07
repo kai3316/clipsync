@@ -756,7 +756,9 @@ async function addToFavorites(item: HistoryItem) {
  * page lists nearby devices of its own, but reaching a device from the device
  * list was the legacy card's own action and there is no reason to make the
  * reader walk to another page to start a conversation with the row in front of
- * them.  重命名 writes the same alias the row's 设备备注 field does.
+ * them.  重命名 is the write the row has no editable control of its own for; it
+ * was a second entry point when the row carried a 设备备注 field, and with that
+ * field gone it is the only one.
  *
  * A device paired by internet code has none of the local half of that: there is
  * no link to dial and no certificate pinned to revoke, and its name is the
@@ -1822,9 +1824,9 @@ const relayUnpairDevice = ref<Device | null>(null);
 const purgeDevice = ref<Device | null>(null);
 const probeResults = ref<Record<string, DeviceProbeResult>>({});
 /** What the rename dialog is open on: a device on this machine's list, whose
- * alias is rewritten from the context menu (the row has its own 设备备注 field
- * for this, and the menu entry is the same write with a dialog in front of it,
- * which is what the legacy 重命名 was), or a peer on the internet-pairing page,
+ * alias is rewritten from the context menu (the row's name *is* the alias, and
+ * the menu entry is the write with a dialog in front of it, which is what the
+ * legacy 重命名 was), or a peer on the internet-pairing page,
  * whose local alias is rewritten from the peer line.  One dialog serves both
  * because the field and the two buttons are the same; only the call 保存 makes
  * differs.  The internet page used to ask with `window.prompt`, which neither
@@ -2396,19 +2398,24 @@ function localChannelState(device: Device) {
   return device.reconnecting ? "connecting" : (device.connection_state || "offline");
 }
 
-/** The state chip's words: one word for the four states a device can be in.
+/** The state chip's words: one word for each state in `device-row.ts`.
  *
- * 正在同步 is the new one, and it is the state that had no word before: paired
- * *and* reachable, which is the only combination where content actually moves
- * in both directions.  The statuses a handshake passes through are not here —
- * see `pairingInFlight`, which the row shows beside this chip while one is
- * live, because a request waiting on an answer is something to act on rather
- * than a state the device has settled into. */
+ * 正在同步 is the one that says content moves.  The other five are about a link or a pairing, and
+ * each is distinct: 发现 and 连接中 are not 离线, because the device is there — one has been seen
+ * and not dialed, the other is being dialed — and 离线 is a claim about the device rather than
+ * about the link.
+ *
+ * The statuses a handshake passes through are not here — see `pairingInFlight`,
+ * which the row shows beside this chip while one is live, because a request
+ * waiting on an answer is something to act on rather than a state the device has
+ * settled into. */
 function deviceStatusLabel(device: Device) {
   return ({
     syncing: t("正在同步"),
     connected: t("已连接"),
     paired: t("已配对"),
+    connecting: t("连接中"),
+    discovered: t("发现"),
     offline: t("离线"),
   } as Record<string, string>)[deviceStatus(device)] || t("离线");
 }
@@ -2419,14 +2426,24 @@ function deviceStatusState(device: Device) {
     syncing: "paired",
     connected: "online",
     paired: "paired",
+    // The in-flight shade, which `localChannelState` already uses for a retry and
+    // which is what separates "the link is being made" from both ends.
+    connecting: "connecting",
+    discovered: "connecting",
     offline: "offline",
   } as Record<string, string>)[deviceStatus(device)] || "offline";
 }
 /** The state chip's icon: the pairing shield where a pairing is half of what
- *  the word means, the plug where reachability is all of it. */
+ *  the word means, the plug where a link is what it is about.
+ *
+ * A positive list rather than "connected or offline gets the plug", which is how the first version
+ * was written: the two words added for 连接中 and 发现 would have fallen into the shield by not
+ * being named, and the shield claims a pairing on a row that has none. */
 function deviceStatusIcon(device: Device) {
   const status = deviceStatus(device);
-  return status === "connected" || status === "offline" ? Plug : ShieldCheck;
+  // 正在同步 and 已配对 are the two whose word contains the pairing.
+  if (status === "syncing" || status === "paired") return ShieldCheck;
+  return Plug;
 }
 /** What the one word cannot carry: which route it is reachable on, and what a
  *  retry is doing.  Both used to be a chip of their own. */
@@ -2499,11 +2516,6 @@ function relayLastSeen(device: Device) {
   if (!seen) return "";
   return t("最后在线 {when}", { when: dateTime(seen) });
 }
-async function saveDeviceNote(device: Device, event: Event) {
-  const note = (event.target as HTMLInputElement).value;
-  try { await bridge.setDeviceNote(device.id, note); await store.refresh(); }
-  catch (reason: any) { store.fail(reason?.message || t("保存设备备注失败")); }
-}
 /**
  * Turn this device's share of the clipboard on or off.
  *
@@ -2544,8 +2556,8 @@ async function renameThisDevice(name: string) {
   }
 }
 /** Confirm the alias the rename dialog collected.  A device's name goes through
- * the backend's one user-editable name per device — the alias the row's own
- * 设备备注 field writes — rather than inventing a second one; a peer on the
+ * the backend's one user-editable name per device — the same alias the row
+ * shows — rather than inventing a second one; a peer on the
  * internet-pairing page has its own local alias and its own call. */
 async function confirmRename() {
   const target = renameTarget.value;
@@ -5580,11 +5592,6 @@ async function translateText() {
                   <Download :size="12" />{{ t("版本 {version}", { version: device.version }) }}
                 </span>
               </span>
-              <!-- A note lives on a saved LAN peer, and an internet-paired
-                   device has none to hold one — its name is the alias the
-                   pairing card writes, so the field would be a box that saves
-                   nothing.  It gets the same dialog instead, from 重命名. -->
-              <input v-if="device.paired && !device.relay" class="device-note" :value="device.note || ''" maxlength="512" :placeholder="t('设备备注')" :aria-label="t('设备备注')" @change="saveDeviceNote(device, $event)" />
               <!-- Whether this machine's clipboard goes to this device.
                    On the row rather than in settings, because the question
                    ("which of these gets what I copy?") occurs to a user while
@@ -6130,9 +6137,9 @@ async function translateText() {
       <p class="muted">{{ t("{name} 的移除记录将被永久删除，此操作无法撤销。", { name: purgeDevice?.name }) }}</p>
       <div class="modal-actions"><button autofocus @click="purgeDevice = null">{{ t("取消") }}</button><button class="danger" :disabled="busy || !state.devices.some(device => device.id === purgeDevice?.id && device.archived)" @click="confirmPurge">{{ t("彻底删除") }}</button></div>
     </dialog>
-    <!-- The context menu 重命名 entry. The row has its own 设备备注 field
-         writing this same alias, so the dialog is a second way in — not a
-         second setting. -->
+    <!-- The context menu 重命名 entry. The row showed a 设备备注 field writing this
+         same alias until it was removed; the dialog is now the only way in — and
+         it was always a way in rather than a second setting. -->
     <dialog ref="renameDialog" aria-labelledby="rename-title" class="modal" @close="renameTarget = null">
       <button class="icon-button modal-close" :aria-label="t('关闭')" :title="t('关闭')" @click="renameTarget = null"><X :size="18" /></button>
       <h2 id="rename-title">{{ t("重命名设备") }}</h2>

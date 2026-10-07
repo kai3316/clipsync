@@ -145,8 +145,10 @@ export const EN: Record<string, string> = {
     "Devices on this network appear here on their own once ClipSync is running on them; for one that is not on it, add it with a pairing code under Internet pairing.",
   "设备": "Devices",
   "设备名称": "Device name",
-  "设备备注": "Device note",
-  "保存设备备注失败": "Could not save the device note",
+  // "设备备注" and "保存设备备注失败" were here for the row's own note field, which
+  // was removed.  `i18n.test.ts` fails on a catalog entry nothing in the shell
+  // uses, which is why they are gone rather than left for a feature that might
+  // come back: the rename dialog writes the same value under its own strings.
   // One device's share of the clipboard.  "Sync clipboard" rather than "send
   // clipboard", because the switch is read by a user deciding whether this
   // machine's copies belong on that machine at all.

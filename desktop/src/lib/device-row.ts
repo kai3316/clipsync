@@ -68,24 +68,51 @@ export function fileReachable(device: Device): boolean {
  * The row used to carry a pairing chip and a route chip side by side, so a
  * device that was paired *and* connected read as two chips that partly agreed
  * -- paired, and on the local link -- and the reader had to combine them.
- * There are four states a device can be in, and each is one word:
+ * There are six states a device can be in, and each is one word:
  *
- *   syncing    paired and reachable — content moves in both directions
- *   connected  reachable, not paired — chat and files work, nothing syncs
- *   paired     paired, not reachable — known, and nothing is flowing
- *   offline    neither
+ *   syncing     paired and linked — content moves in both directions
+ *   connected   linked, not paired — chat and files work, nothing syncs
+ *   paired      paired, not linked — known, and nothing is flowing
+ *   connecting  a dial is in flight — the link is being made
+ *   discovered  seen on this network, neither paired nor linked
+ *   offline     nothing heard from it
  *
- * Reaching for `chatReachable` rather than repeating the test: it is already the
- * "a conversation would connect" rule, and the same routes carry both.
+ * **Linked is its own predicate, and not `chatReachable`.**  It reached for that
+ * function, which is the "would a conversation connect" rule and deliberately generous: it accepts
+ * a device that is only discovered, because an invitation is the thing that dials it.  Reusing it
+ * here gave 已连接 — a word promising content is moving — to a device nothing had connected to.
+ * Reported as "every device on my network reads as connected", which is this line's fault.
  *
- * A handshake in flight is not one of the four: it is something the user has to
+ * The two are still related, and the relation is one-directional: every linked device is
+ * reachable, and a reachable one need not be linked.  `chatReachable` remains the chat button's
+ * rule, because a device can be worth dialing without being connected to.
+ *
+ * The extra two words are not invented here.  `connectionLabel` already answers the sidecar's four
+ * `connection_state` values with 已发现 / 连接中 / 在线 / 离线, and treats *seen* and *offline* as
+ * different things — the state chip was the only surface that conflated them.
+ *
+ * A handshake in flight is not one of the six: it is something the user has to
  * answer, not a state the device settled into, so callers keep showing
  * `pairingInFlight` separately. */
-export function deviceStatus(device: Device): "syncing" | "connected" | "paired" | "offline" {
+export function localLinkEstablished(device: Device): boolean {
+  if (device.relay) return device.connection_state !== "offline";
+  return (
+    Boolean(device.relay_paired && device.relay_online) || device.connection_state === "online"
+  );
+}
+
+export function deviceStatus(
+  device: Device,
+): "syncing" | "connected" | "paired" | "connecting" | "discovered" | "offline" {
   const paired = Boolean(device.paired || device.relay_paired);
-  const reachable = chatReachable(device);
-  if (paired) return reachable ? "syncing" : "paired";
-  return reachable ? "connected" : "offline";
+  const linked = localLinkEstablished(device);
+  if (paired) return linked ? "syncing" : "paired";
+  if (linked) return "connected";
+  // Reachable but not linked: a dial in flight, or a device only seen.  Each gets
+  // its own word, because 离线 is a claim about the device and these are claims
+  // about the link.
+  if (device.connection_state === "connecting") return "connecting";
+  return device.connection_state === "discovered" ? "discovered" : "offline";
 }
 
 /** What this list calls the device.
