@@ -81,25 +81,41 @@ jobs:
 
           What is new in this release:
 
-          - **The log level setting now actually applies to the file.**  The
-            rotating handler started at DEBUG whatever the setting said, so a
-            machine set to INFO still wrote every frame and rotated its 5 MB
-            files several times a day.  It now starts at INFO and follows the
-            settings page live (DEBUG/INFO/WARNING/ERROR).
+          - **The update button says what it is doing.**  It used to write its note only *after* the
+            request came back -- and the request is answered by the other machine, so a device that
+            was slow, asleep or refusing left the row blank for the whole round trip.  Reported as
+            "点了显示正在传输但没有反应，一直点好几下", and the log shows exactly that: three
+            identical asks at 19:52:12, 19:52:16 and 19:53:06.  The note is now written before the
+            request goes out and replaced by the real answer, and the button already carried a
+            spinner.
 
-          - **Collected device logs are bounded.**  `Downloads/ClipSync-logs`
-            had no sweep: every collection added a file.  It now keeps the
-            newest five per device and drops anything older than 30 days.
+          - **A device row no longer flickers while anything is happening.**  Every button on the
+            row was disabled by `busy`, which is `pending || refreshing || !ready` -- and a refresh
+            runs on each sidecar event behind a 60 ms debounce, so any activity at all disabled and
+            re-enabled the whole row.  Reported as "win 上点完按钮界面会一直闪".  Both update buttons
+            now depend only on their own request and on whether the device can be dialled.
 
-          - **A test run no longer writes into the real log.**
-            `CLIPSYNC_LOG_DIR` keeps the suite's sidecars out of the log the
-            developer reads about their own machine.
+          - **A refusal says which build was held back.**  "It has no installer to send" was
+            misleading in both halves: the sending device *does* have one, and the advice -- go and
+            check for updates here -- points at the wrong machine.  What actually happens is that a
+            device's cache holds the build it upgraded *from*, so it lags the running version by one
+            and can be ahead while having nothing newer to give.  The row now names the build and
+            says the sending device has to upgrade itself first, and the button's tooltip says so in
+            advance.  This is also why an update from a device that has just upgraded can fail.
 
-          - **Fewer presence flaps.**  A device was reported lost after two
-            missed presence answers (20 seconds); it now needs six (60
-            seconds), a Removed record inside the grace window defers to the
-            presence sweep, and a browse that asks and hears nobody while peers
-            were known rebuilds itself instead of silently emptying the list.
+          - **A CI-only failure in the mDNS browse repair is fixed.**  `_last_browse_rebuild` was
+            initialised to `0.0` and compared against `time.monotonic()`, whose zero is *boot* rather
+            than the epoch.  On a machine up for longer than the 300-second cooldown the arithmetic
+            works out and the first repair passes -- which is every developer machine -- while on a
+            fresh CI runner the never-rebuilt state read as "rebuilt a moment ago" and blocked the
+            repair.  `float("-inf")` is the honest initial value.  The other monotonic timestamps in
+            the tree were audited for the same shape and are safe.
+
+          - **One more log line stopped repeating a fact that cannot change.**  A macOS reverse-DNS
+            name (`...ip6.arpa`) was written once per address enumeration -- and the network watcher
+            runs one twice a minute -- which came to **1078 lines in one Mac's log and 1254 in the
+            other** for a value that cannot change while the process lives.  It is said once per
+            process now, which is as often as it can change.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
