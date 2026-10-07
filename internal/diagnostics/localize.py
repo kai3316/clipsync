@@ -48,6 +48,7 @@ ITEM_LABEL_KEYS = {
     "history_db_size": "diag.v2.item.history_db_size",
     "disk_free": "diag.v2.item.disk_free",
     "transfers": "diag.v2.item.transfers",
+    "update_cache": "diag.v2.item.update_cache",
 }
 
 FALLBACK_LOCALE = "en"

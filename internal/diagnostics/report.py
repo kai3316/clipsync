@@ -27,6 +27,7 @@ from pathlib import Path
 
 from internal.data.logs import log_path
 from internal.platform import friendly_platform_name
+from internal.system import updater
 from internal.version import __version__
 
 # A failure in one of these makes the overall summary "fail"; anything else
@@ -825,11 +826,14 @@ def _group_network(cfg, ctx) -> dict:
     web_enabled = bool(getattr(cfg, "web_enabled", False))
     web_port = ctx.get("web_port", 0)
     if not web_enabled:
+        # `ok`, not `warn`.  Remote access off is the default state of a working install, and a
+        # warning for it made the summary read 存在警告 on a machine with nothing wrong.  The item
+        # stays -- the page should still say what is off -- and the sentence explains it.
         items.append(
             item(
                 "web_service",
-                "warn",
-                "Disabled",
+                "ok",
+                "Disabled (optional)",
                 detail_key="diag.v2.item.web_service.off.detail",
                 hint="Enable remote access in Settings → Remote access to control this device from a phone or browser.",  # noqa: E501
                 hint_key="diag.v2.item.web_service.off.hint",
@@ -893,11 +897,14 @@ def _group_internet(cfg, relay_state, pending_count) -> dict:
             )
         )
     else:
+        # Off is a setting, not a fault -- see the web companion above.  What the reader still
+        # needs is the answer to "is internet sync working", and for a machine that has it switched
+        # off that answer is "it is off", not "something is wrong".
         items.append(
             item(
                 "internet_enabled",
-                "warn",
-                "Disabled",
+                "ok",
+                "Disabled (optional)",
                 detail_key="diag.v2.item.internet_enabled.off.detail",
                 hint="Enable internet sync in Settings → Internet sync to sync across networks.",  # noqa: E501
                 hint_key="diag.v2.item.internet_enabled.off.hint",
@@ -934,21 +941,28 @@ def _group_internet(cfg, relay_state, pending_count) -> dict:
             )
         )
     else:
+        # The consequence of the setting above, and reported as the setting is: a relay that is off
+        # *because* internet sync is off is not a separate fault.  A machine with internet sync on
+        # and a relay that is off still reaches the `error` branch, which is a real one.
         items.append(
             item(
                 "relay_state",
-                "warn",
+                "ok",
                 "Relay off (internet sync disabled)",
                 detail_key="diag.v2.item.relay_state.off.detail",
             )
         )
 
     brokers = [b for b in getattr(cfg, "relay_brokers", []) if isinstance(b, str) and b]
+    internet_on = bool(getattr(cfg, "internet_sync_enabled", False))
     if not brokers:
+        # `fail` when internet sync is on -- a relay with no brokers cannot work -- and `ok` when it
+        # is off, where having none configured is simply consistent with the setting.  The first
+        # version reported both the same way.
         items.append(
             item(
                 "brokers",
-                "fail",
+                "fail" if internet_on else "ok",
                 "No brokers configured",
                 detail_key="diag.v2.item.brokers.fail.detail",
                 hint="Add at least one public MQTT relay in Settings → Internet sync.",
@@ -1114,6 +1128,52 @@ def _group_filesystem(cfg, history, file_transfer=None) -> dict:
         items.append(
             item(
                 "disk_free", "warn", "Unavailable", detail_key="diag.v2.item.unavailable.detail"
+            )
+        )
+    # The update cache, which is what this machine can hand a peer that cannot reach the release
+    # server.  `ok` either way: having nothing cached is a normal state -- a machine that has never
+    # upgraded has none -- and the useful fact is *which* build is held, because that is what
+    # decides whether an update can be sent.  Measured, a cache that lags the running build makes a
+    # device refuse every request with `cached_not_newer`, and nothing on this page used to say so.
+    try:
+        cached = updater.get_cached_asset()
+        if cached:
+            name = os.path.basename(cached)
+            version = updater.version_in_asset_name(name) or ""
+            items.append(
+                item(
+                    "update_cache",
+                    "ok",
+                    f"{version} ({name})" if version else name,
+                    detail_key="diag.v2.item.update_cache.ok.detail",
+                    detail_params={"name": name, "version": version or "?"},
+                    hint=(
+                        "This is the build this machine can send to another device on the network."
+                    ),
+                    hint_key="diag.v2.item.update_cache.ok.hint",
+                )
+            )
+        else:
+            items.append(
+                item(
+                    "update_cache",
+                    "ok",
+                    "Nothing cached",
+                    detail_key="diag.v2.item.update_cache.empty.detail",
+                    hint=(
+                        "Nothing to send to a peer yet. This machine keeps the installer its own "
+                        "upgrade downloaded, so one appears after it has updated at least once."
+                    ),
+                    hint_key="diag.v2.item.update_cache.empty.hint",
+                )
+            )
+    except Exception:
+        items.append(
+            item(
+                "update_cache",
+                "warn",
+                "Unavailable",
+                detail_key="diag.v2.item.unavailable.detail",
             )
         )
     # Transfers, as one line rather than a group of two counts.  It lives here because its
