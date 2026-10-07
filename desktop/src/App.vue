@@ -2704,6 +2704,15 @@ function offerNote(device: Device, reason: string) {
 async function fetchDeviceUpdate(device: Device) {
   if (fetchBusyId.value) return;
   fetchBusyId.value = device.id;
+  // Said before the request goes out, not after it comes back.  The ask is answered by the peer,
+  // which means the round trip is however long that device takes -- and a click with nothing on
+  // screen for that long reads as a button that did not work, which is how it was reported: the
+  // click appeared to start a transfer and then nothing happened, so it was clicked several more
+  // times.  The note is replaced by the real answer below.
+  updateNotes.value = {
+    ...updateNotes.value,
+    [device.id]: t("正在向 {name} 索取安装包…", { name: device.name }),
+  };
   try {
     await bridge.fetchDeviceUpdate(device.id);
     updateNotes.value = {
@@ -5511,7 +5520,7 @@ async function translateText() {
                      own upgrade kept, so a machine that has none to send has
                      nothing to offer, and says why rather than reaching for the
                      network: the device being offered can download it itself. -->
-                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('本机还没有安装包可发送：本机只保留自己升级时下载的那一个，对方可自行检查更新')" :disabled="busy || !!updateBusyId || !device.update_cached || !canDial(device)" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
+                <button v-if="device.update_available" class="icon-button" :aria-label="t('发送更新')" :title="device.update_cached ? t('把本机的安装包发送给该设备') : t('本机还没有可发送的安装包：本机只保留自己升级时下载的那一个，若它比对方旧就不会发送，对方可自行检查更新')" :disabled="!!updateBusyId || !device.update_cached || !canDial(device)" @click="offerDeviceUpdate(device)"><FileUp :size="18" :class="{ spinning: updateBusyId === device.id }" /></button>
                 <!-- The mirror of the button above, and the direction the
                      feature is meant to run in: this device is the one behind,
                      so this is the side with a reason to click.  It asks the
@@ -5520,7 +5529,7 @@ async function translateText() {
                      can be staged.  Shown only when the peer really is ahead —
                      same platform, newer version — which is what the sidecar
                      decided for this row. -->
-                <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="busy || !!fetchBusyId || !canDial(device)" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
+                <button v-if="device.update_fetchable" class="icon-button" :aria-label="t('获取更新')" :title="t('从该设备获取新版本安装包并安装')" :disabled="!!fetchBusyId || !canDial(device)" @click="fetchDeviceUpdate(device)"><Download :size="18" :class="{ spinning: fetchBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('移除设备')" :title="t('移除设备')" :disabled="busy" @click="forgetDevice = device"><Trash2 :size="18" /></button>
               </div>
               <!-- A row of its own, made cheap: the class trims the padding that made a

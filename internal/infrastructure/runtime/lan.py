@@ -1707,7 +1707,7 @@ class LanRuntime:
                 str(pid)[:12],
                 cached_version,
             )
-            self._say_no_update_here(pid, "cached_not_newer")
+            self._say_no_update_here(pid, "cached_not_newer", os.path.basename(cached))
             return
         # The digest travels with the transfer because the asking device may have
         # no route to the release server at all -- that is the whole reason it is
@@ -1839,12 +1839,17 @@ class LanRuntime:
         except Exception:
             logger.debug("Could not report an update verdict", exc_info=True)
 
-    def _say_no_update_here(self, pid: str, reason: str = "") -> None:
+    def _say_no_update_here(self, pid: str, reason: str = "", asset: str = "") -> None:
         """Tell a peer that asked for an update that this machine has none.
 
         *reason* is a short code rather than a sentence: the asking device is
         the one that knows what to say to its own user, and it may be running a
         different build with its own wording for each case.
+
+        *asset* names the cached file that was refused, and travels only for
+        ``cached_not_newer``.  That case is the one where the reader needs to see
+        *what* was held back -- a build they already run -- because the other
+        reasons all point at a different action.
         """
         try:
             self.transport.send_to_peer(
@@ -1856,6 +1861,7 @@ class LanRuntime:
                         "os": _local_platform()[0],
                         "arch": _local_platform()[1],
                         "reason": reason,
+                        "asset": asset,
                     },
                     source_device=self.config.device_id,
                 ),

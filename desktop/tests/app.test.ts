@@ -2008,7 +2008,7 @@ describe("history rendering", () => {
       vi.mocked(bridge.updateDownload).mockClear();
       const send = app.get('[aria-label="发送更新"]');
       expect(send.attributes("disabled")).toBeDefined();
-      expect(send.attributes("title")).toContain("本机还没有安装包可发送");
+      expect(send.attributes("title")).toContain("本机还没有可发送的安装包");
       await send.trigger("click");
       await flushPromises();
       expect(bridge.offerDeviceUpdate).not.toHaveBeenCalled();
@@ -2567,4 +2567,109 @@ describe("the window's right-click menus", () => {
     expect(bridge.copyHistory).toHaveBeenLastCalledWith("a");
   });
 
+});
+
+
+describe("the update button on a device row", () => {
+  /** The two devices the update cases need: one ahead of us, one behind. */
+  async function devicesPage(app: VueWrapper) {
+    await flushPromises();
+    await app.get('[aria-label="设备"]').trigger("click");
+    await flushPromises();
+  }
+
+  it("says the request is on its way before the peer answers", async () => {
+    // The ask is answered by the other machine, so the row must not wait for it to say anything.
+    // A `deferred` rather than a resolved mock: with a resolved one the note is replaced in the
+    // same tick and the interim message is never observable, which is how this went unnoticed.
+    let release: (value: { sent: boolean }) => void = () => {};
+    const pending = new Promise<{ sent: boolean }>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "n", name: "Newer", paired: true, connection_state: "online",
+        pairing_status: "", pairing_code: null, sas: null,
+        update_available: false, update_fetchable: true },
+    ] });
+    vi.mocked(bridge.fetchDeviceUpdate).mockReturnValue(pending);
+
+    const app = mount(App);
+    try {
+      await devicesPage(app);
+      const fetch = app.get('[aria-label="获取更新"]');
+      await fetch.trigger("click");
+      await flushPromises();
+
+      // Before the peer has answered.  `flushPromises` drains the microtasks that are ready; the
+      // deferred promise is deliberately not among them.
+      expect(app.text()).toContain("正在向 Newer 索取安装包");
+      expect(app.text()).not.toContain("已向 Newer 索取安装包");
+
+      release({ sent: true });
+      await flushPromises();
+      // And the real answer replaces it rather than sitting beside it.
+      expect(app.text()).toContain("已向 Newer 索取安装包");
+      expect(app.text()).not.toContain("正在向 Newer 索取安装包");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("is not disabled by a background refresh", async () => {
+    // `busy` is `state.pending || state.refreshing || !ready`, and a refresh runs on every sidecar
+    // event -- so binding this button to it made the whole row flicker while anything was
+    // happening.  What the button must respect is its own request and whether the device answers.
+    //
+    // The store is held *busy* for the assertion, not merely left alone: with `busy` false the old
+    // binding would pass this test, and the point is that a control must not change state because
+    // something unrelated is happening.  `state.pending` is one of the three things `busy` is made
+    // of, and any store action sets it -- `pushText` is used because it needs nothing from the
+    // device list and holds the flag open until its command answers.
+    let releaseBusy: (value: { ok: boolean; len: number; sent: boolean }) => void = () => {};
+    vi.mocked(bridge.pushText).mockReturnValue(
+      new Promise<{ ok: boolean; len: number; sent: boolean }>((resolve) => {
+        releaseBusy = resolve;
+      }),
+    );
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "n", name: "Newer", paired: true, connection_state: "online",
+        pairing_status: "", pairing_code: null, sas: null,
+        update_available: false, update_fetchable: true },
+      { id: "t", name: "Older", paired: true, connection_state: "online",
+        pairing_status: "", pairing_code: null, sas: null,
+        update_available: true, update_cached: true },
+    ] });
+
+    const app = mount(App);
+    try {
+      await devicesPage(app);
+      const fetch = app.get('[aria-label="获取更新"]');
+      const send = app.get('[aria-label="发送更新"]');
+      expect(fetch.attributes("disabled")).toBeUndefined();
+      expect(send.attributes("disabled")).toBeUndefined();
+
+      // Something else entirely is in flight, which is what `busy` reports.
+      await app.get('[aria-label="推送文本"]').trigger("click");
+      await flushPromises();
+      const box = app.get('[aria-label="要推送的文本"]');
+      await box.setValue("x");
+      // Found and asserted rather than optional-chained: a lookup that quietly found nothing
+      // would leave the store un-busy and the assertions below would pass for the wrong reason,
+      // which is worse than failing.
+      const confirm = app.findAll("button").find((b) => b.text() === t("推送"));
+      expect(confirm, "the push-text confirm button was not found").toBeDefined();
+      await confirm!.trigger("click");
+      await flushPromises();
+
+      // Nothing about either button changed, which is the whole claim: a control must not change
+      // state because something unrelated is happening.
+      expect(fetch.attributes("disabled")).toBeUndefined();
+      expect(send.attributes("disabled")).toBeUndefined();
+
+      releaseBusy({ ok: true, len: 1, sent: false });
+      await flushPromises();
+    } finally {
+      app.unmount();
+    }
+  });
 });

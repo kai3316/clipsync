@@ -145,6 +145,11 @@ export const EN: Record<string, string> = {
     "Devices on this network appear here on their own once ClipSync is running on them; for one that is not on it, add it with a pairing code under Internet pairing.",
   "设备": "Devices",
   "设备名称": "Device name",
+  "正在向 {name} 索取安装包…": "Asking {name} for its installer…",
+  "{name} 保留的安装包（{asset}）不比本机新，所以没有可发送的更新；它需要先自己升级一次":
+    "The installer {name} kept ({asset}) is not newer than this build, so it has no update to send; it needs to upgrade itself first",
+  "本机还没有可发送的安装包：本机只保留自己升级时下载的那一个，若它比对方旧就不会发送，对方可自行检查更新":
+    "No updater to send yet: this machine keeps only the one its own upgrade downloaded, and it is not sent when it is older than the peer's build — that device can check for updates itself",
   // "设备备注" and "保存设备备注失败" were here for the row's own note field, which
   // was removed.  `i18n.test.ts` fails on a catalog entry nothing in the shell
   // uses, which is why they are gone rather than left for a feature that might
