@@ -731,6 +731,12 @@ def test_the_skipped_name_is_still_explained(monkeypatch, caplog):
     """Said once, at debug: a reader should learn why `getfqdn()` contributed nothing."""
     import logging
 
+    # The "said" flag is module state, because the fact it guards is about the machine and cannot
+    # change while the process lives.  A test that reads the line therefore has to own the flag:
+    # another test enumerating addresses first leaves it set, and this then finds no line at all --
+    # which is exactly how it passed alone and failed in the suite.
+    monkeypatch.setattr(discovery_module, "_skipped_names_said", False)
+
     monkeypatch.setattr(discovery_module.socket, "gethostname", lambda: "host-a")
     monkeypatch.setattr(discovery_module.socket, "getfqdn", lambda: THE_REVERSE_NAME)
     monkeypatch.setattr(

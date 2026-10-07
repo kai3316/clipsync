@@ -111,6 +111,11 @@ _SERVICE_INFO_TIMEOUT_MS = 1000
 # user is waiting on.
 HOSTNAME_LOOKUP_TIMEOUT = 2.0
 
+# Whether the skipped-name line has been written.  Module state rather than a flag on the caller:
+# the skip is a property of what `getfqdn()` returns on this machine, so it is the same fact every
+# time and there is one log to hold it.
+_skipped_names_said = False
+
 
 def _is_resolvable_name(name: str) -> bool:
     """Whether a host name is worth handing to the resolver.
@@ -172,9 +177,17 @@ def _resolved_host_addresses(timeout: float) -> list[str]:
                 # worth asking about 408 times in one log.
                 logger.debug("Address lookup for %r failed: %s", name, exc)
         if skipped:
-            # Said once per enumeration rather than once per name, and at a level that does
-            # not fill a user's log with a fact that never changes.
-            logger.debug("Skipped unresolvable names: %s", ", ".join(repr(n) for n in skipped))
+            # Once per *process*, not once per enumeration.  It was written once per
+            # enumeration, which the network watcher runs twice a minute -- measured, 1078 lines in
+            # one Mac's log for a name that cannot change while the process lives.  The fact is
+            # about the machine, so it is learned once.
+            global _skipped_names_said
+            if not _skipped_names_said:
+                _skipped_names_said = True
+                logger.debug(
+                    "Skipped unresolvable names: %s",
+                    ", ".join(repr(n) for n in skipped),
+                )
 
     worker = threading.Thread(target=_worker, daemon=True, name="lan-address-lookup")
     worker.start()
