@@ -2210,7 +2210,10 @@ async fn install_verified_update(
                     app.restart();
                 }
                 Err(err) => {
-                    emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
+                    emit_update_state(
+                        app,
+                        json!({"phase": "failed", "error": err.localized_message()}),
+                    );
                     reveal_staged_update(bridge).await
                 }
             };
