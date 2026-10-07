@@ -81,53 +81,25 @@ jobs:
 
           What is new in this release:
 
-          - **Peer updates now install the signed release, on every desktop
-            platform.**  A machine that already has the installer can pass it to
-            another on the same LAN.  The receiver checks the release's minisign
-            signature before anything runs; a blob that only matches the sender's
-            own checksum is staged for the reader, never executed.  Online and
-            offline (release manifest unreachable) both install from the staged
-            bytes: Windows runs the verified NSIS installer, macOS swaps the
-            `.app`, and Linux installs the AppImage or runs the signed
-            `.deb`/`.rpm` through the system authentication prompt.
+          - **The log level setting now actually applies to the file.**  The
+            rotating handler started at DEBUG whatever the setting said, so a
+            machine set to INFO still wrote every frame and rotated its 5 MB
+            files several times a day.  It now starts at INFO and follows the
+            settings page live (DEBUG/INFO/WARNING/ERROR).
 
-          - **The unauthenticated update-execution path is closed.**  Previously
-            a same-LAN device that merely completed an identity handshake could
-            get a `*-setup.exe` auto-run whenever the published release digest
-            was out of reach.  Auto-install now requires a release-verified or
-            signed peer payload *and* the release signature; everything else
-            stages the file and waits for the reader.
+          - **Collected device logs are bounded.**  `Downloads/ClipSync-logs`
+            had no sweep: every collection added a file.  It now keeps the
+            newest five per device and drops anything older than 30 days.
 
-          - **Internet pairing can no longer be re-keyed by a later hello.**  A
-            hello claiming an already-confirmed device cannot replace its pinned
-            DH key, and a freshly generated code cannot rebind an existing
-            device id.
+          - **A test run no longer writes into the real log.**
+            `CLIPSYNC_LOG_DIR` keeps the suite's sidecars out of the log the
+            developer reads about their own machine.
 
-          - **Relay replay and timestamp hardening.**  The duplicate cache now
-            covers the full 30-minute timestamp window, and new envelopes carry
-            an HMAC over the timestamp so a relay can no longer move it.
-
-          - **Reconnect discipline.**  The fast ladder stays capped at 30
-            seconds; after the ten fast attempts the steady retry is five
-            minutes instead of 30 seconds, and a successful reconnect clears the
-            failure streak so the next outage warns again.
-
-          - **Web companion.**  API calls authenticate with
-            `Authorization: Bearer`, so the token stays out of request URLs;
-            clearing the token no longer opens writes to DNS-rebinding
-            hostnames, and rejected requests drain their bodies cleanly.
-
-          - **Desktop.**  Error banners go through one normalisation path;
-            update and log notices show translated titles; restarting the
-            sidecar no longer leaves the old one running.
-
-          - **One identity-frame implementation, one source of truth for
-            setting ranges**, plus the ARM64 Linux `.deb` cache fix.
-
-          - **Release engineering.**  macOS joins the test matrix, a Chromium
-            e2e job runs in CI, and a tag-only gate re-runs the release-critical
-            suites before anything is published; `npm run tauri` fills the real
-            version override.
+          - **Fewer presence flaps.**  A device was reported lost after two
+            missed presence answers (20 seconds); it now needs six (60
+            seconds), a Removed record inside the grace window defers to the
+            presence sweep, and a browse that asks and hears nobody while peers
+            were known rebuilds itself instead of silently emptying the list.
 
           Still true from 1.0.34, and repeated because it is the question a
           returning user asks first:
