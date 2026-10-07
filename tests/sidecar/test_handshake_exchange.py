@@ -13,6 +13,7 @@ channels and a function make the ordering something that can be asserted.
 
 import contextlib
 import socket
+import struct
 import sys
 import threading
 from pathlib import Path
@@ -23,11 +24,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from internal.security.handshake import (  # noqa: E402
     PROOF_VERSION,
     decode_identity,
+    encode_identity,
     exchange_identity,
     proof_state,
+    recv_frame,
+    send_frame,
     should_refuse_unproven,
 )
 from internal.security.pairing import PairingManager  # noqa: E402
+from internal.transport.connection import (  # noqa: E402
+    MAX_FRAME_SIZE,
+    TransportManager,
+)
 
 
 class MemoryChannel:
@@ -306,3 +314,213 @@ class Thief(PairingManager):
             device_name=self._claimed_name,
             fingerprint=self._own_fingerprint,
         )
+
+
+class CaptureChannel:
+    """A channel that keeps what was written to it, for byte-level assertions."""
+
+    def __init__(self):
+        self.data = bytearray()
+
+    def sendall(self, payload):
+        self.data += payload
+
+
+class BytesChannel:
+    """A channel that hands out one buffer, ``recv``-sized, like a socket."""
+
+    def __init__(self, data):
+        self.buffer = bytes(data)
+        self.timeout = None
+
+    def recv(self, size):
+        chunk, self.buffer = self.buffer[:size], self.buffer[size:]
+        return chunk
+
+    def settimeout(self, value):
+        self.timeout = value
+
+    def gettimeout(self):
+        return self.timeout
+
+
+class TestProductionAndTheExchangeShareOneFrame:
+    """The connection layer's identity frame is handshake.py's frame.
+
+    Production used to carry its own encoder and parser beside
+    ``handshake.encode_identity``/``decode_identity`` -- the same loop written
+    twice, which is how a wire format drifts while every test stays green.  These
+    drive the production entry points against the exchange's: byte for byte for
+    the encoder, field for field for the parser, and in both directions across
+    the two.
+    """
+
+    def _frame(self, manager, **fields):
+        capture = CaptureChannel()
+        TransportManager._send_identity(
+            capture, manager.get_identity().certificate_pem, **fields
+        )
+        return bytes(capture.data)
+
+    def test_send_identity_writes_exactly_what_encode_identity_writes(self, tmp_path):
+        victim, _peer = paired_pair(tmp_path)
+        fields = {
+            "nonce": "n" * 64,
+            "proof": "ab" * 64,
+            "listen_port": 45731,
+            "device_name": "Desk",
+            "no_auto_pairing": True,
+            "version": PROOF_VERSION,
+        }
+        expected = CaptureChannel()
+        send_frame(
+            expected,
+            encode_identity(victim.get_identity().certificate_pem, **fields),
+        )
+        assert self._frame(victim, **fields) == bytes(expected.data)
+
+    def test_the_frame_is_still_the_documented_bytes(self, tmp_path):
+        """The refactor must not quietly re-order or re-spell the head.
+
+        Built from the literal field names rather than from either encoder, so
+        this test says what "the same frame" means: version, nonce, proof, port,
+        name, then the PEM, then the no-pairing marker.
+        """
+        victim, _peer = paired_pair(tmp_path)
+        cert = victim.get_identity().certificate_pem
+        head = (
+            "#clipsync-v=1\n"
+            "#clipsync-nonce=" + "n" * 64 + "\n"
+            "#clipsync-proof=" + "ab" * 64 + "\n"
+            "#clipsync-listen=45731\n"
+            "#clipsync-name=Desk\n"
+        )
+        body = (head + cert + "\n#clipsync-no-pairing").encode()
+        assert self._frame(
+            victim,
+            nonce="n" * 64,
+            proof="ab" * 64,
+            listen_port=45731,
+            device_name="Desk",
+            no_auto_pairing=True,
+            version=1,
+        ) == struct.pack(">I", len(body)) + body
+
+    def test_identity_payload_reads_every_field_decode_identity_reads(self, tmp_path):
+        victim, _peer = paired_pair(tmp_path)
+        name = "\u4e66\u623f\u7684\u7b14\u8bb0\u672c"
+        frame = self._frame(
+            victim,
+            nonce="n" * 64,
+            proof="ab" * 64,
+            listen_port=45731,
+            device_name=name,
+            no_auto_pairing=True,
+            version=7,
+        )
+        body = frame[4:]
+        production = TransportManager._identity_payload(body)
+        decoded = decode_identity(body)
+        assert production == (
+            decoded[0],
+            decoded[5],
+            decoded[3],
+            decoded[4],
+            decoded[1],
+            decoded[2],
+            decoded[6],
+        )
+        cert, no_auto_pairing, listen_port, device_name, nonce, proof, version = production
+        assert cert == victim.get_identity().certificate_pem
+        assert no_auto_pairing is True
+        assert listen_port == 45731
+        assert device_name == name
+        assert nonce == "n" * 64
+        assert proof == "ab" * 64
+        assert version == 7
+
+    def test_recv_identity_reads_what_the_exchange_writes(self, tmp_path):
+        victim, _peer = paired_pair(tmp_path)
+        frame = self._frame(victim, nonce="n" * 64, version=PROOF_VERSION)
+        assert recv_frame(BytesChannel(frame)) == frame[4:]
+        assert TransportManager._recv_identity(BytesChannel(frame)) == frame[4:]
+
+    def test_a_frame_from_the_oldest_build_reads_the_same_both_ways(self, tmp_path):
+        victim, _peer = paired_pair(tmp_path)
+        frame = self._frame(victim)
+        assert TransportManager._identity_payload(frame[4:]) == (
+            victim.get_identity().certificate_pem,
+            False,
+            0,
+            "",
+            "",
+            "",
+            0,
+        )
+        assert decode_identity(frame[4:]) == (
+            victim.get_identity().certificate_pem,
+            "",
+            "",
+            0,
+            "",
+            False,
+            0,
+        )
+
+    def test_a_field_whose_value_cannot_be_read_is_consumed_both_ways(self, tmp_path):
+        victim, _peer = paired_pair(tmp_path)
+        cert = victim.get_identity().certificate_pem
+        body = (f"#clipsync-v=not-a-number\n#clipsync-listen=also-not\n{cert}").encode()
+        assert TransportManager._identity_payload(body) == (cert, False, 0, "", "", "", 0)
+        assert decode_identity(body) == (cert, "", "", 0, "", False, 0)
+
+    def test_the_long_fields_are_capped_at_the_same_lengths(self, tmp_path):
+        victim, _peer = paired_pair(tmp_path)
+        cert = victim.get_identity().certificate_pem
+        body = (
+            "#clipsync-nonce=" + "n" * 300 + "\n"
+            "#clipsync-proof=" + "p" * 600 + "\n"
+            "#clipsync-name=" + "N" * 200 + "\n"
+            + cert
+        ).encode()
+        _cert, _no_auto, _port, name, nonce, proof, _version = (
+            TransportManager._identity_payload(body)
+        )
+        assert (len(nonce), len(proof), len(name)) == (128, 512, 64)
+        decoded = decode_identity(body)
+        assert (len(decoded[1]), len(decoded[2]), len(decoded[4])) == (128, 512, 64)
+
+    def test_the_transport_cap_is_not_silently_the_handshake_default(self):
+        """The transport accepted a larger frame before the parser was shared.
+
+        ``handshake.recv_frame``'s own ceiling is 1 MiB; ``_recv_identity`` used
+        to accept up to the transport's 10 MiB.  The explicit ``max_frame`` is
+        what keeps that from becoming a hidden tightening.
+        """
+        body = b"x" * ((1 << 20) + 1)
+        frame = struct.pack(">I", len(body)) + body
+        assert recv_frame(BytesChannel(frame)) is None
+        assert TransportManager._recv_identity(BytesChannel(frame)) == body
+
+    def test_a_zero_length_or_oversized_frame_is_refused(self):
+        assert TransportManager._recv_identity(BytesChannel(b"\x00\x00\x00\x00")) is None
+        oversized = struct.pack(">I", MAX_FRAME_SIZE + 1)
+        assert TransportManager._recv_identity(BytesChannel(oversized)) is None
+
+    def test_the_wire_prefixes_have_one_definition(self):
+        """The format literals live in connection.py, not in two modules."""
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "internal"
+            / "security"
+            / "handshake.py"
+        ).read_text(encoding="utf-8")
+        for literal in (
+            "#clipsync-v=",
+            "#clipsync-nonce=",
+            "#clipsync-proof=",
+            "#clipsync-listen=",
+            "#clipsync-name=",
+            "#clipsync-no-pairing",
+        ):
+            assert literal not in source, f"{literal} is defined in handshake.py too"

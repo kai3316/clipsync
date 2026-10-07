@@ -20,7 +20,10 @@ Devices that have never met must pair once through the normal flow first.
 
 Replay protection: every envelope carries a wall-clock timestamp; envelopes
 outside +/- RELAY_TS_WINDOW seconds are dropped, and exact duplicate blobs are
-dropped via a bounded LRU of recent ciphertext hashes.
+dropped via a bounded cache of recent ciphertext hashes kept for that same
+window.  The timestamp is also bound into the envelope with a keyed MAC, so an
+envelope whose ``ts`` was edited in flight fails authentication; a v1 envelope
+from an older build carries no MAC and is still accepted.
 
 Size cap: a frame too large for its envelope to fit under the payload cap is
 refused (the relay path is for clipboard text/images/small payloads; files
@@ -69,6 +72,10 @@ MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to publish anything larger than this
 # rather than written down, so it cannot drift when the payload cap moves.
 #   3/4 of the payload (base64's ratio), less the GCM tag, less room for the
 #   JSON shell — the largest frame whose envelope still fits under the cap.
+#   The shell reservation is a named constant because the envelope grew a
+#   ``mac`` field: a budget that kept reserving the old shell would pass a
+#   max-size frame the broker then drops, which is the failure this whole
+#   derivation exists to prevent.
 #
 # The envelope is not the whole packet either.  A broker's published limit is on
 # the PUBLISH packet, and in front of the payload sit the topic (a 2-byte length
@@ -81,6 +88,10 @@ MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to publish anything larger than this
 # it.  That is how the shipped default lost every chunk: the number was right
 # and what it was subtracted from was wrong.
 PUBLISH_OVERHEAD_BYTES = 64
+# Room for the envelope's JSON shell: braces, ``v``, ``ts`` (epoch seconds with
+# milliseconds), ``data``, and the ``mac`` key with its 64 hex characters.  A
+# timestamp that needs a few more digits than today's still fits.
+ENVELOPE_SHELL_BYTES = 160
 
 
 def frame_limit_for(max_payload: int) -> int:
@@ -91,13 +102,22 @@ def frame_limit_for(max_payload: int) -> int:
     same derivation as :data:`MAX_RELAY_FRAME`, for a relay whose limit is not
     this build's default: see ``Config.relay_max_message_bytes``.
     """
-    return (max(64, int(max_payload)) - PUBLISH_OVERHEAD_BYTES - 64) * 3 // 4 - 16
+    return (
+        max(64, int(max_payload)) - PUBLISH_OVERHEAD_BYTES - ENVELOPE_SHELL_BYTES
+    ) * 3 // 4 - 16
 
 
 # Derived rather than written down, so the two cannot drift apart.
 MAX_RELAY_FRAME = frame_limit_for(MAX_RELAY_PAYLOAD)
 
-_SEEN_CAP = 512  # recent ciphertext hashes remembered
+# Recent ciphertext hashes remembered for duplicate suppression.  The old 512
+# was small enough that a busy window evicted an envelope's own hash before its
+# timestamp window closed, which let a replayed frame be treated as new: the
+# entry's TTL is now that window and the cap is only the memory backstop.
+# 32768 is sized for a chatty half hour (a few MiB of Python objects) and would
+# need an average of ~18 frames/second sustained for the whole window before a
+# live entry could be evicted.
+_SEEN_CAP = 32768
 
 # The QoS a subscription asks for.  Delivery QoS is the *lower* of the publish's
 # and the subscription's, so subscribing at the default 0 threw away the
@@ -411,6 +431,23 @@ def netpair_passphrase_error(pw: str) -> str | None:
     return None
 
 
+def _timestamp_mac(key: bytes, ts: float) -> str:
+    """HMAC-SHA256 binding an envelope's ``ts`` field to its channel key.
+
+    ``repr`` of a float round-trips through ``json`` exactly (both use the
+    shortest representation), so both ends compute the same bytes for a value
+    that crossed the wire and was parsed back.  The rest of the envelope needs
+    no such help: ``data`` is an AES-GCM ciphertext whose tag covers its
+    contents, while ``ts`` was authenticated by nothing at all — anyone able
+    to rewrite the envelope could slide the timestamp into a fresh window and
+    have a recorded frame accepted as new.  Older builds ignore the extra
+    field, and envelopes from older builds carry no ``mac`` and keep working.
+    """
+    return hmac.new(
+        key, b"relay-ts" + repr(float(ts)).encode("ascii"), hashlib.sha256
+    ).hexdigest()
+
+
 def pack_envelope(
     frame_bytes: bytes, key: bytes, now: float, max_frame: int | None = None
 ) -> bytes:
@@ -422,11 +459,13 @@ def pack_envelope(
     limit = MAX_RELAY_FRAME if max_frame is None else max_frame
     if len(frame_bytes) > limit:
         raise ValueError(f"frame too large for relay: {len(frame_bytes)} > {limit}")
+    ts = round(float(now), 3)
     ct = encrypt(frame_bytes, key)
     env = {
         "v": ENVELOPE_VERSION,
-        "ts": round(float(now), 3),
+        "ts": ts,
         "data": base64.b64encode(ct).decode("ascii"),
+        "mac": _timestamp_mac(key, ts),
     }
     return json.dumps(env, separators=(",", ":")).encode("ascii")
 
@@ -449,6 +488,19 @@ def open_envelope_ex(blob: bytes, key: bytes, now: float) -> tuple[bytes | None,
     if not isinstance(ts, (int, float)) or abs(now - float(ts)) > RELAY_TS_WINDOW:
         logger.debug("Relay envelope rejected (timestamp out of window)")
         return None, "window"
+    # A ``mac`` that is present must authenticate.  Its absence is a v1
+    # envelope from a build that predates the field, which has to stay
+    # readable; a value of the wrong shape, or ``null``, is an edit and is
+    # refused rather than treated as the legacy case.
+    if "mac" in env:
+        mac = env.get("mac")
+        if (
+            not isinstance(mac, str)
+            or not mac.isascii()
+            or not hmac.compare_digest(mac, _timestamp_mac(key, float(ts)))
+        ):
+            logger.debug("Relay envelope rejected (timestamp MAC mismatch)")
+            return None, "auth"
     try:
         ct = base64.b64decode(env.get("data", ""))
     except Exception:
@@ -756,7 +808,7 @@ class RelayTransport:
         self._stop = threading.Event()
         self._wakeup = threading.Event()
         self._subscribed: set[str] = set()
-        self._seen: OrderedDict[str, None] = OrderedDict()
+        self._seen: OrderedDict[str, float] = OrderedDict()
         self._connected_on_broker: int | None = None
         self._state = STATE_OFF
         # index -> publish-only connection to every broker the primary is NOT
@@ -1327,17 +1379,51 @@ class RelayTransport:
             logger.debug("relay channel key for %s is unusable", topic, exc_info=True)
             return []
 
+    def _remember_blob(self, blob: bytes) -> bool:
+        """Remember one envelope blob; True when it was already seen recently.
+
+        The cache is insertion-ordered, so the front is the closest to expiry:
+        draining from the front drops everything that has aged out and stops at
+        the first entry still inside the window.  An entry lives one window from
+        ``max(received_at, ts)``, not merely from receipt: a sender whose clock
+        runs ahead is accepted for up to a window into the future, and a replay
+        inside that extra span would otherwise outlive the hash that refuses it.
+        The cap is only the memory backstop after the expiry sweep.  Called
+        under the transport's lock because the receive callbacks share it.
+        """
+        now = time.time()
+        blob_hash = hashlib.sha256(blob).hexdigest()
+        keep_until = now + RELAY_TS_WINDOW
+        try:
+            ts = json.loads(blob).get("ts")
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                keep_until = max(now, float(ts)) + RELAY_TS_WINDOW
+        except Exception:
+            pass  # not an envelope shape; the receive-time window is all of it
+        with self._lock:
+            expiry = self._seen.get(blob_hash)
+            if expiry is not None and expiry > now:
+                return True  # exact duplicate (broker redelivery / our own echo)
+            if expiry is not None:
+                # Aged out.  A replay of it cannot pass the timestamp check the
+                # TTL was sized around, so forgetting it re-opens nothing.
+                del self._seen[blob_hash]
+            while self._seen:
+                oldest = next(iter(self._seen.values()))
+                if oldest > now:
+                    break
+                self._seen.popitem(last=False)
+            self._seen[blob_hash] = keep_until
+            while len(self._seen) > _SEEN_CAP:
+                self._seen.popitem(last=False)
+            return False
+
     def _on_message(self, client, userdata, msg):
         keys = self._decrypt_keys(msg.topic)
         if not keys:
             return
-        blob_hash = hashlib.sha256(bytes(msg.payload)).hexdigest()
-        with self._lock:
-            if blob_hash in self._seen:
-                return  # exact duplicate (broker redelivery / our own echo)
-            self._seen[blob_hash] = None
-            while len(self._seen) > _SEEN_CAP:
-                self._seen.popitem(last=False)
+        if self._remember_blob(bytes(msg.payload)):
+            return  # exact duplicate within the replay window
         frame = None
         reasons = []
         key_index = 0

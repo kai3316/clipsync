@@ -253,3 +253,59 @@ def test_address_lookup_does_not_wait_out_a_stalled_resolver(monkeypatch):
     assert "192.168.44.7" in addresses
 
 
+# --- the steady retry interval ---
+def test_the_reconnect_ladder_ends_at_five_minutes():
+    """The fast tier is capped at 30s; the steady tier is five minutes, not thirty seconds.
+
+    Measured: at 30 seconds a laptop asleep with its lid shut produced 259 failed attempts in
+    three hours.  The interval's job is now the peer that comes back *without* answering mDNS,
+    because the presence loop dials every peer it sees (`_peer_found`) and so covers the
+    ordinary case.
+
+    Asserted as the whole ladder, because the fast attempts are what the old comment was
+    about: a Wi-Fi outage of a minute or two should still be recovered quickly, and a test
+    that only checked the cap would not notice if they went away.
+    """
+    from internal.transport.connection import (
+        FAST_RECONNECT_CAP,
+        MAX_RECONNECT_ATTEMPTS,
+        MAX_RECONNECT_BACKOFF,
+        MIN_RECONNECT_DELAY,
+        TransportManager,
+    )
+
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._reconnect_attempts = {}
+    manager._reconnect_timers = {}
+    manager._peer_addresses = {"peer": ("127.0.0.1", 1)}
+    manager._running = True
+    manager._max_reconnect_attempts = MAX_RECONNECT_ATTEMPTS
+    # _schedule_reconnect prunes the worker/connection registries it keeps.
+    manager._workers = set()
+    manager._connections = set()
+
+    delays = []
+    for _ in range(MAX_RECONNECT_ATTEMPTS + 4):
+        manager._schedule_reconnect("peer")
+        timer = manager._reconnect_timers["peer"]
+        delays.append(round(timer.interval))
+        timer.cancel()
+        assert "peer" in manager._reconnect_timers, "scheduling must leave a live timer"
+
+    # The full fast ladder: 3, 3, 4, 8, 16, then the 30s cap for the rest of the budget.
+    fast = delays[:MAX_RECONNECT_ATTEMPTS]
+    assert fast == [3, 3, 4, 8, 16, 30, 30, 30, 30, 30], fast
+    assert fast[0] == MIN_RECONNECT_DELAY
+    assert max(fast) == FAST_RECONNECT_CAP
+    assert FAST_RECONNECT_CAP == 30
+    # Ten fast attempts span ~3 minutes (184s) before the steady tier takes over.
+    assert sum(fast) == 184
+
+    # Every attempt past the budget is the same five-minute steady interval.
+    steady = delays[MAX_RECONNECT_ATTEMPTS:]
+    assert steady, "the ladder produced no attempts past the budget"
+    assert set(steady) == {MAX_RECONNECT_BACKOFF}, steady
+    assert MAX_RECONNECT_BACKOFF == 300, (
+        "the steady interval was reduced without a measurement to justify it"
+    )

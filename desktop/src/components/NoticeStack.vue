@@ -44,6 +44,22 @@ function title(name: string): string {
     // every event above: this table is what words a notice, so a title that
     // arrived already translated could not be re-worded here.
     case "ui.data_recovery": return t("数据修复");
+    // The two answers to an update this window asked a device for, or that
+    // a peer offered: which device spoke and what it will do.  Both arrive
+    // long after the click, and the title has to name the area rather than
+    // show the wire name `update.peer_unavailable` on screen.
+    case "update.peer_unavailable":
+    case "update.peer_notice": return t("软件更新");
+    // A log this window asked a device for: it arrived, the device keeps
+    // its log to itself, or it could not be filed here.  All three are the
+    // same row's answer, and a notice with no title is a machine string.
+    case "log.collected":
+    case "log.failed":
+    case "log.unavailable": return t("设备日志");
+    // An internet pairing completing on the other device, minutes after the
+    // code was submitted from this one; the card re-reads its peers, and
+    // this is what tells the reader which area moved.
+    case "netpair.peer.changed": return t("互联网配对");
     default: return name;
   }
 }

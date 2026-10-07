@@ -525,23 +525,93 @@ def test_a_peer_coming_back_ends_the_streak(caplog):
     """So a peer that goes away a second time is announced a second time.
 
     Without the reset, the second outage would be silent -- which is the other half of the
-    trade: one warning per *cycle*, not one per process.
+    trade: one warning per *cycle*, not one per process.  The reset here is the production
+    helper the successful-connect path calls; the test does not edit the dict itself.
     """
     manager = object.__new__(TransportManager)
     manager._lock = threading.RLock()
     manager._reconnect_timers = {}
     manager._connect_failures = {}
+    manager._reconnect_attempts = {}
+    manager._cert_pin_blocked = {}
 
     with caplog.at_level(logging.DEBUG, logger="internal.transport.connection"):
+        # The peer disappears; the first dial fails and a retry is pending.
         manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
         manager._reconnect_timers["peer"] = object()
         manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        manager._connect_failures["real-peer"] = 7  # same peer under its real id
 
-        # The peer answers: the reconnect bookkeeping is cleared, streak included.
+        # The retry fires and connects.  The timer that dialled is gone, and the success
+        # path clears both id forms through the same helper connection.py calls.
         manager._reconnect_timers.pop("peer", None)
-        manager._connect_failures.pop("peer", None)
+        manager._clear_reconnect_state("peer", "real-peer")
+        assert "peer" not in manager._connect_failures
+        assert "real-peer" not in manager._connect_failures
 
+        # The peer goes away again; this is a new cycle's first failure.
         manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
 
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 2, "each cycle gets its own warning"
+    assert manager._connect_failures["peer"] == 1
+
+
+def test_the_first_failure_after_a_successful_reconnect_is_a_warning(caplog):
+    """A peer that goes away again is news, even though it failed before.
+
+    Regression: the successful-connect path cleared ``_reconnect_attempts`` but not
+    ``_connect_failures``, so the first failure of the cycle after a recovery saw a stale
+    streak and was logged at DEBUG.  The one line a reader needs -- 'it went away again' --
+    was the one the reset forgot.
+    """
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._reconnect_timers = {}
+    manager._connect_failures = {}
+    manager._reconnect_attempts = {}
+    manager._cert_pin_blocked = {}
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.connection"):
+        # First outage: a burst of failed dials leaves a long streak.
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        manager._reconnect_timers["peer"] = object()
+        for _ in range(4):
+            manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        assert manager._connect_failures["peer"] == 5
+
+        # The retry fires and the dial succeeds; production runs this same reset for both
+        # id forms before it announces the connection.
+        manager._reconnect_timers.pop("peer", None)
+        manager._clear_reconnect_state("peer", "real-peer")
+        assert "peer" not in manager._connect_failures
+        assert "real-peer" not in manager._connect_failures
+
+        # Second outage: nothing pending and no stale streak, so the first failure warns.
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+
+    attempts = [r for r in caplog.records if "connect failed" in r.getMessage()]
+    warnings = [r for r in attempts if r.levelno >= logging.WARNING]
+    assert len(warnings) == 2, [r.getMessage() for r in attempts]
+    assert warnings[-1].levelno == logging.WARNING
+    assert manager._connect_failures["peer"] == 1
+
+
+def test_a_disconnect_callback_for_an_absent_peer_is_a_no_op():
+    """``_on_peer_disconnected`` must not delete a key that is already gone.
+
+    A disconnect can race a manual removal, and the callback can arrive with no connection
+    object to identify the entry by; falling through to a bare ``del`` would raise KeyError
+    on a path that has nothing left to do.
+    """
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._running = True
+    manager._peers = {}
+    manager._pairing_mgr = MockPairingManager()
+
+    # Neither the id lookup nor the object lookup finds an entry, and conn is None.
+    manager._on_peer_disconnected("peer", None)
+    manager._on_peer_disconnected("peer", object())
+
+    assert manager._peers == {}

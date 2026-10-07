@@ -47,6 +47,20 @@ def is_provisional_key(peer_id) -> bool:
     )
 
 
+def is_provisional_owner(owner) -> bool:
+    """True while a netpair secret's owner is not a confirmed device id.
+
+    A code this machine generated is owned by ``pending:<code>`` and a code it
+    typed is owned by the 4-char tag ``enter`` wrote; neither names a device
+    yet, so the hello that answers the code is what re-keys the entry to the
+    sender's real id.  A real 12-hex device id matches neither shape, which is
+    what separates a confirmed channel from a pairing still in flight.
+    """
+    return isinstance(owner, str) and (
+        owner.startswith("pending:") or is_provisional_key(owner)
+    )
+
+
 class InternetPairingService:
     PENDING_TTL = 10 * 60
 
@@ -124,6 +138,30 @@ class InternetPairingService:
         merged.update(dict(self.config.netpair_secrets or {}))
         return merged
 
+    def _channel_for_topic(self, topic: str) -> tuple[str | None, str | None]:
+        """The ``(owner, secret)`` behind one of our netpair topics.
+
+        One lookup answers both, because a caller that took the secret from one
+        definition and the owner from another could disagree about whose channel
+        a frame arrived on.  A confirmed owner wins over a provisional one when
+        the same secret is somehow held by both: the confirmed binding is the
+        stricter of the two answers and the one a hello has to satisfy.
+        """
+        if not topic:
+            return None, None
+        from internal.transport.relay import netpair_topic
+
+        provisional = None
+        for owner, secret in self._all_secrets().items():
+            if not secret or netpair_topic(secret) != topic:
+                continue
+            if is_provisional_owner(owner):
+                if provisional is None:
+                    provisional = (owner, secret)
+                continue
+            return owner, secret
+        return provisional if provisional is not None else (None, None)
+
     def secret_for_topic(self, topic: str) -> str | None:
         """The netpair secret behind a relay topic, or None when it is not ours.
 
@@ -131,13 +169,7 @@ class InternetPairingService:
         self-declared sender — is what says a frame belongs to one of our
         pairing channels.
         """
-        if not topic:
-            return None
-        from internal.transport.relay import netpair_topic
-        for secret in self._all_secrets().values():
-            if secret and netpair_topic(secret) == topic:
-                return secret
-        return None
+        return self._channel_for_topic(topic)[1]
 
     def netpair_password(self) -> str:
         """The passphrase layered onto every netpair channel key.
@@ -615,25 +647,90 @@ class InternetPairingService:
         is ignored rather than guessed at.  Returns what the runtime has to act
         on; ``reply`` is the half that is easy to lose, since without it the
         enterer waits on a frame that never comes.
+
+        The frame is readable by anyone who holds the code-derived secret, so
+        the checks below treat it as data rather than as identity.  A confirmed
+        channel accepts only its owner as ``source_device``; a hello that
+        repeats the pinned DH key exactly is idempotent and accepted (that is
+        how a generator re-delivers a confirmation reply the enterer missed),
+        and anything that would move a channel, replace its key or strip it
+        back to the code-derived key is dropped before any state changes.  A
+        code this machine has just generated or entered cannot re-bind a device
+        that is already confirmed under a different secret either; the
+        supported way to pair it again is to remove it first.
         """
         ignored = {"accepted": False, "role": "", "peer_id": "", "secret": "", "reply": False}
-        secret = self.secret_for_topic(topic)
+        owner, secret = self._channel_for_topic(topic)
+        own_id = str(getattr(self.config, "device_id", "") or "")
         if secret is None or not isinstance(source_device, str) or not source_device:
             return ignored
-        if source_device == self.config.device_id:
+        if source_device == own_id:
             # Entering one's own code on one's own machine pairs nothing.
             return ignored
-        own_id = str(getattr(self.config, "device_id", "") or "")
+        # A confirmed channel belongs to exactly one device id, and a hello is
+        # a frame anyone holding the code-derived secret can mint: a source
+        # that is not the owner may not move the pairing or replace its key.
+        # Only a provisional entry (a code we generated, or the 4-char tag
+        # ``enter`` wrote) is re-keyed to the source that has just answered it.
+        provisional = is_provisional_owner(owner)
+        if not provisional and source_device != owner:
+            return ignored
+        # A pending channel must not rebind a device that is already confirmed.
+        # A new pairing code is held by whoever is meant to pair with it (and,
+        # if it leaks, by anyone), so a hello on that channel that names a
+        # confirmed owner must not move that owner's secret to the new code:
+        # doing so cuts the real peer off its channel and lets the new code's
+        # holder answer on the confirmed id.  Re-pairing an existing device
+        # means removing it first (``unpair``), which is what drops the old
+        # secret and its pinned key.
+        existing_secrets = self.config.netpair_secrets or {}
+        if (
+            provisional
+            and not is_provisional_owner(source_device)
+            and source_device in existing_secrets
+            and existing_secrets[source_device] != secret
+        ):
+            return ignored
         if incoming_tag == netpair_device_tag(own_id):
             role, reply = "generator", True
-            for code in [c for c, s in self._pending.items() if s == secret]:
-                self._pending.pop(code, None)
         elif incoming_tag == own_id:
             role, reply = "enterer", False
-            for key in [k for k, v in (self.config.netpair_secrets or {}).items() if v == secret]:
-                self.config.netpair_secrets.pop(key, None)
         else:
             return ignored
+        # Validate, and match a pin, before touching any state.  Once an owner
+        # has a key the hello may only repeat it exactly: a different, empty or
+        # malformed value must not replace it or make the channel fall back to
+        # the code-derived key.  A confirmed pair with no pin yet may adopt a
+        # valid key (that is how a pre-key-agreement pairing is upgraded); a
+        # provisional one keeps the legacy tolerance for peers that predate the
+        # key agreement and send no ``dh_pub`` at all.  The confirmation reply
+        # to a code this machine entered keeps that tolerance too: it is the
+        # frame that completes the wait, the runtime may already have re-keyed
+        # that wait to the sender's real id, and with no pin there is no key the
+        # empty value could strip.
+        from internal.security.keyexchange import is_public_key
+
+        dh_pub_valid = is_public_key(dh_pub)
+        pinned = self.peer_dh_key(owner) or self.peer_dh_key(source_device)
+        if pinned and dh_pub != pinned:
+            return ignored
+        if not pinned and not provisional and not dh_pub_valid and role != "enterer":
+            return ignored
+        # Accepted from here on: only now is state allowed to change.
+        if role == "generator":
+            for code in [c for c, s in self._pending.items() if s == secret]:
+                self._pending.pop(code, None)
+        else:
+            # Re-key the provisional entry the entered code wrote.  Only
+            # provisional entries (or the source itself, when the confirmation
+            # repeats) are moved; an unrelated confirmed owner that happens to
+            # share the secret is left alone.
+            for key in [
+                k
+                for k, v in (self.config.netpair_secrets or {}).items()
+                if v == secret and (is_provisional_owner(k) or k == source_device)
+            ]:
+                self.config.netpair_secrets.pop(key, None)
         self.config.netpair_secrets[source_device] = secret
         self._waiting_since.pop(source_device, None)
         self.note_hello(source_device, name or "")

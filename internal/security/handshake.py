@@ -19,13 +19,11 @@ import struct
 
 logger = logging.getLogger(__name__)
 
-# The largest frame the identity exchange will read, matching the transport's own
-# cap: the certificate plus its comment lines, and nothing legitimate beyond it.
+# The default ceiling for :func:`recv_frame`: the certificate plus its comment
+# lines, and nothing legitimate beyond it.  The connection layer passes its own,
+# larger transport cap explicitly rather than having this one silently replace
+# it (see ``TransportManager._recv_identity``).
 MAX_IDENTITY_FRAME = 1 << 20
-
-NONCE_PREFIX = "#clipsync-nonce="
-PROOF_PREFIX = "#clipsync-proof="
-VERSION_PREFIX = "#clipsync-v="
 
 # The first handshake version that promises a proof of key possession.
 #
@@ -107,20 +105,36 @@ def encode_identity(
     not know them loads the same certificate -- a PEM parser scans for the BEGIN
     line -- and a frame from a build older than a field is that older frame
     exactly.
+
+    The field names are the transport's wire format, defined once in
+    ``internal/transport/connection.py``; this module owns the encoding and
+    decoding of that format, and the connection layer delegates to it.
     """
-    from internal.transport.connection import NO_PAIRING_MARKER, _sanitize_peer_str
+    # Imported at call time because ``connection.py`` imports this module.
+    from internal.transport.connection import (
+        HANDSHAKE_VERSION_PREFIX,
+        LISTEN_PORT_PREFIX,
+        NAME_PREFIX,
+        NO_PAIRING_MARKER,
+        NONCE_PREFIX,
+        PROOF_PREFIX,
+        _sanitize_peer_str,
+    )
 
     head = ""
     if version:
-        head += f"{VERSION_PREFIX}{int(version)}\n"
+        head += f"{HANDSHAKE_VERSION_PREFIX}{int(version)}\n"
     if nonce:
         head += f"{NONCE_PREFIX}{nonce}\n"
     if proof:
         head += f"{PROOF_PREFIX}{proof}\n"
     if listen_port:
-        head += f"#clipsync-listen={int(listen_port)}\n"
+        head += f"{LISTEN_PORT_PREFIX}{int(listen_port)}\n"
     if device_name:
-        head += f"#clipsync-name={_sanitize_peer_str(device_name, 128)}\n"
+        # A comment line ends at the newline, so a name that carries one would
+        # end the field early and leave the rest of it at the head of the PEM.
+        # Sanitizing drops the control characters with it.
+        head += f"{NAME_PREFIX}{_sanitize_peer_str(device_name, 128)}\n"
     text = head + cert_pem
     if no_auto_pairing:
         text += NO_PAIRING_MARKER
@@ -136,9 +150,12 @@ def decode_identity(data):
     what a frame from an older build looks like.
     """
     from internal.transport.connection import (
+        HANDSHAKE_VERSION_PREFIX,
         LISTEN_PORT_PREFIX,
         NAME_PREFIX,
         NO_PAIRING_MARKER,
+        NONCE_PREFIX,
+        PROOF_PREFIX,
         _sanitize_peer_str,
     )
 
@@ -153,9 +170,9 @@ def decode_identity(data):
         head, sep, rest = text.partition("\n")
         if not sep or not rest:
             break
-        if head.startswith(VERSION_PREFIX):
+        if head.startswith(HANDSHAKE_VERSION_PREFIX):
             with contextlib.suppress(ValueError):
-                version = max(0, int(head[len(VERSION_PREFIX) :]))
+                version = max(0, int(head[len(HANDSHAKE_VERSION_PREFIX) :]))
         elif head.startswith(NONCE_PREFIX):
             nonce = _sanitize_peer_str(head[len(NONCE_PREFIX) :], 128)
         elif head.startswith(PROOF_PREFIX):
@@ -176,8 +193,14 @@ def send_frame(channel, payload):
     channel.sendall(struct.pack(">I", len(payload)) + payload)
 
 
-def recv_frame(channel):
-    """One frame, or None when the peer closed or sent something unreadable."""
+def recv_frame(channel, max_frame=MAX_IDENTITY_FRAME):
+    """One frame, or None when the peer closed or sent something unreadable.
+
+    *max_frame* is the ceiling the length prefix is checked against.  The
+    connection layer passes its own transport cap through it, so the identity
+    exchange and the transport cannot disagree about how large an identity
+    frame may be.
+    """
     header = b""
     while len(header) < 4:
         chunk = channel.recv(4 - len(header))
@@ -185,7 +208,7 @@ def recv_frame(channel):
             return None
         header += chunk
     length = struct.unpack(">I", header)[0]
-    if length == 0 or length > MAX_IDENTITY_FRAME:
+    if length == 0 or length > max_frame:
         return None
     body = b""
     while len(body) < length:

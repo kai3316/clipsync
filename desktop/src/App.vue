@@ -414,7 +414,7 @@ async function clearPassword() {
     settings.value.password_set = result.password_set === true;
     securityPassword.value = "";
     securityPasswordConfirm.value = "";
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { securityBusy.value = false; }
 }
 async function confirmFactoryReset() {
@@ -427,7 +427,7 @@ async function confirmFactoryReset() {
     await bridge.factoryReset();
   } catch (error) {
     securityBusy.value = false;
-    state.error = error as any;
+    store.setError(error);
   }
 }
 const companion = ref<Awaited<ReturnType<typeof bridge.companionStatus>> | null>(null);
@@ -469,7 +469,7 @@ async function refreshCompanion() {
     companion.value = result;
     companionPort.value = companion.value.port;
   } catch (error) {
-    if (generation === companionGeneration) state.error = error as any;
+    if (generation === companionGeneration) store.setError(error);
   }
 }
 async function configureCompanion(enabled: boolean, rotateToken = false, clearToken = false) {
@@ -487,7 +487,7 @@ async function configureCompanion(enabled: boolean, rotateToken = false, clearTo
     companionPort.value = companion.value.port;
   } catch (error) {
     if (generation !== companionGeneration) return;
-    state.error = error as any;
+    store.setError(error);
     await refreshCompanion();
   } finally { companionBusy.value = false; }
 }
@@ -538,7 +538,7 @@ async function saveTranslationKey(clear = false) {
       : { set_translate_key: translationKey.value }) as { translate_key_set: boolean };
     settings.value.translate_key_set = result.translate_key_set;
     translationKey.value = "";
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { translationKeyBusy.value = false; }
 }
 // Language names stay in their own language, except the two the catalog can
@@ -594,7 +594,7 @@ async function openTranslateItem(item: HistoryItem) {
     translateItemResult.value = "";
     translateItemOpen.value = true;
   } catch (error) {
-    state.error = error as any;
+    store.setError(error);
   } finally { translateItemReading.value = false; }
 }
 /** Whether a history row is a web link, and so gets the legacy 在浏览器打开.
@@ -1261,7 +1261,7 @@ async function runTranslateItem() {
     if (generation !== translateItemGeneration) return;
     translateItemResult.value = String(result.translated || "");
   } catch (error) {
-    if (generation === translateItemGeneration) state.error = error as any;
+    if (generation === translateItemGeneration) store.setError(error);
   } finally { translateItemBusy.value = false; }
 }
 const aiTools = ref<Array<{ key: string; label: string }>>([]);
@@ -2084,7 +2084,7 @@ async function applyLanguage(code: string) {
     // is what stops the picker from returning next launch.
     await bridge.updateSettings({ language: code });
     if (settingsLoaded.value) settings.value.language = code;
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
 }
 async function chooseLanguage(code: string) {
   languagePromptOpen.value = false;
@@ -2867,7 +2867,7 @@ async function loadLogs(lines = logCount.value) {
     logLines.value = result.logs;
     logProblems.value = result.problems ?? [];
     logCount.value = lines;
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { logsBusy.value = false; }
 }
 async function openLogs() {
@@ -2894,7 +2894,7 @@ async function exportLogs() {
     // The host opens a native save dialog; the sidecar copies the log there.
     const result = await bridge.exportLogs(logExportFilename());
     if (!result.cancelled) logExportMessage.value = t("已导出：{path}", { path: result.path });
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { logsExporting.value = false; }
 }
 const qrDialog = useDialog(qrOpen);
@@ -2910,7 +2910,7 @@ async function openCompanionQr() {
     qrUrl.value = result.url || "";
     if (result.ok && result.qr) qrImage.value = result.qr;
     else qrMessage.value = result.error === "COMPANION_NOT_RUNNING" ? t("手机服务未启动") : t("二维码不可用");
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { qrBusy.value = false; }
 }
 /** Hand a local file to the phone, the legacy 发送文件到手机按钮.
@@ -2931,7 +2931,7 @@ async function shareFileToPhone() {
     if (!path) return;
     const result = await bridge.shareFileToPhone(path);
     qrShareMessage.value = t("已发送到手机：{name}", { name: result.name });
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { qrShareBusy.value = false; }
 }
 // The phone's panel has no window of its own: its QR and send-URL buttons
@@ -2952,7 +2952,7 @@ async function openAboutLink(target: "homepage" | "releases") {
   try {
     const result = await bridge.openAboutLink(target);
     aboutMessage.value = t("已在浏览器打开：{url}", { url: result.url });
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { aboutBusy.value = false; }
 }
 const restartDialog = useDialog(restartOpen);
@@ -3029,7 +3029,7 @@ async function repairDiagnostics(kind: DiagnosticAction) {
     const result = await store.repairDiagnostics(kind);
     if (!result) return;
     if (result.ok === false) {
-      state.error = { code: "DIAG_REPAIR_FAILED", message: result.error || t("无法打开系统设置"), retryable: false };
+      store.setError({ code: "DIAG_REPAIR_FAILED", message: result.error || t("无法打开系统设置"), retryable: false });
       return;
     }
     store.toast("ui.settings", kind === "firewall" ? t("已请求修复防火墙规则") : t("已打开本地网络权限设置"));
@@ -3422,7 +3422,7 @@ onMounted(() => {
     }
   })
     .then((off) => { offMenuAction = off; })
-    .catch((error) => { state.error = error as any; });
+    .catch((error) => { store.setError(error); });
   // A file dropped on the window is the transfers page's own 发送文件 intent
   // with the picker already answered, so the paths are handed to that page and
   // it is opened — the device is still named there, because a send is the one
@@ -3561,7 +3561,7 @@ async function loadAiProfiles() {
     aiCustomPaths.value = Array.isArray(profiles.custom_paths) ? (profiles.custom_paths as string[]).join("\n") : "";
     aiProfilesSaved.value = aiProfilesFormSnapshot();
     aiProfilesLoaded.value = true;
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
 }
 async function saveAiProfiles() {
   if (aiProfilesBusy.value || !aiProfilesLoaded.value) return;
@@ -3572,7 +3572,7 @@ async function saveAiProfiles() {
       aiCustomPaths.value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean),
     );
     aiProfilesSaved.value = aiProfilesFormSnapshot();
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { aiProfilesBusy.value = false; }
 }
 /** What the AI page does on the way in.
@@ -3726,7 +3726,7 @@ async function hydrateSettings() {
     settingsEditedCards.value = {};
     settingsLoaded.value = true;
   }
-  catch (error) { state.error = error as any; }
+  catch (error) { store.setError(error); }
   finally { settingsLoading = false; }
 }
 /** Fold in a settings change made while this page is on screen.
@@ -3896,7 +3896,7 @@ async function saveSettings() {
     settingsEditedCards.value = {};
     settingsSaved.value = true;
     await store.refresh();
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { settingsBusy.value = false; }
 }
 async function refreshAiLocal() {
@@ -3905,7 +3905,7 @@ async function refreshAiLocal() {
     aiLocalItems.value = Array.isArray(result.entries) ? result.entries : [];
     aiLocalPage.value = 0;
     aiMessage.value = t("已读取 {count} 个配置项", { count: aiItemCount(aiLocalItems.value) });
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
 }
 /** The runtime's per-peer inventory answer in the shape the picker and the list
  * read it in. */
@@ -3976,7 +3976,7 @@ async function refreshAiRemote(requestRefresh = true) {
       aiRemoteMessage.value = t("已读取 {count} 个远程配置项", { count: aiItemCount(entries) });
     }
   } catch (error) {
-    if (generation === aiInventoryGeneration) state.error = error as any;
+    if (generation === aiInventoryGeneration) store.setError(error);
   }
 }
 async function previewAiRemote(item: Record<string, any>) {
@@ -3988,7 +3988,7 @@ async function previewAiRemote(item: Record<string, any>) {
     if (generation !== aiRemoteGeneration) return;
     aiRemoteMessage.value = String(result.content || t("空文件"));
   } catch (error) {
-    if (generation === aiRemoteGeneration) state.error = error as any;
+    if (generation === aiRemoteGeneration) store.setError(error);
   }
 }
 /** Why a pull was refused, in words, for the codes whose raw form is a name
@@ -4049,7 +4049,7 @@ async function pullAiRemote(items: Array<Record<string, any>>, mode = "copy") {
       finishAiPull();
     }
   } catch (error) {
-    if (generation === aiRemoteGeneration) state.error = error as any;
+    if (generation === aiRemoteGeneration) store.setError(error);
   }
 }
 
@@ -4102,7 +4102,7 @@ watch(() => state.aiFileEvent, (update) => {
 
 async function openAiLocal(item: Record<string, any>) {
   try { await bridge.aiLocal("open", String(item.tool || ""), String(item.root || ""), String(item.rel_path || "")); }
-  catch (error) { state.error = error as any; }
+  catch (error) { store.setError(error); }
 }
 async function readAiLocal(item: Record<string, any>) {
   if (aiMutationBusy.value) return;
@@ -4120,7 +4120,7 @@ async function readAiLocal(item: Record<string, any>) {
     aiEditorContent.value = String(result.content || "");
     aiSavedContent.value = aiEditorContent.value;
   } catch (error) {
-    if (generation === aiReadGeneration) state.error = error as any;
+    if (generation === aiReadGeneration) store.setError(error);
   }
 }
 async function saveAiLocal() {
@@ -4133,7 +4133,7 @@ async function saveAiLocal() {
     aiSavedContent.value = content;
     aiMessage.value = t("配置已保存");
     await refreshAiLocal();
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { aiMutationBusy.value = false; }
 }
 async function trashAiLocal(item: Record<string, any>) {
@@ -4150,12 +4150,12 @@ async function trashAiLocal(item: Record<string, any>) {
     await refreshAiLocal();
     aiMessage.value = t("配置已移入回收区");
     aiTrashItem.value = null;
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { aiMutationBusy.value = false; }
 }
 async function refreshBackups() {
   try { backups.value = (await bridge.listBackups()).backups; }
-  catch (error) { state.error = error as any; }
+  catch (error) { store.setError(error); }
 }
 /** 刷新备份, which reports what the folder holds. */
 async function refreshBackupsNow() {
@@ -4173,7 +4173,7 @@ async function refreshInternetPairing() {
     }
     for (const peerId of known) void delivery.load(peerId);
   }
-  catch (error) { state.error = error as any; }
+  catch (error) { store.setError(error); }
 }
 /** The internet card's own refresh, and now the only one over that read.  The
  * send list had a second button asking the same question — the ledger it
@@ -4204,7 +4204,7 @@ async function toggleInternetSync(enabled: boolean) {
     // would show the old value and save it again on the next 保存.
     settings.value.internet_sync_enabled = enabled;
     await refreshInternetPairing();
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally { internetSyncBusy.value = false; }
 }
 async function generateInternetPairing() {
@@ -4213,7 +4213,7 @@ async function generateInternetPairing() {
     internetPairing.value.generated_code = result.code;
     internetPairingMessage.value = t("配对码已生成");
     internetPairingFailed.value = false;
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
 }
 /** Why the sidecar refused a pairing code, in the reader's language.
  *
@@ -4304,18 +4304,18 @@ async function createBackup() {
     const result = await bridge.createBackup();
     backupMessage.value = t("备份已创建：{path}", { path: result.backup_path });
     await refreshBackups();
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
 }
 async function openDataFolder(which: "data" | "backups") {
   try {
     const result = await bridge.openDataFolder(which);
     backupMessage.value = t("已打开：{path}", { path: result.folder });
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
 }
 async function restoreBackup() {
   if (restoreBusy.value) return;
   try { restorePath.value = await bridge.chooseFile("backup"); }
-  catch (error) { state.error = error as any; }
+  catch (error) { store.setError(error); }
 }
 /** Offer one of the listed backups for restore, the way the legacy panel did.
  *
@@ -4338,7 +4338,7 @@ async function confirmRestoreBackup() {
     backupMessage.value = t("恢复完成：{result}", { result: JSON.stringify(result) });
     restorePath.value = null;
     await store.refresh();
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
   finally {
     // Even a partial restore can change configuration.
     settingsLoaded.value = false;
@@ -4350,7 +4350,7 @@ async function exportHistory(format: string) {
   try {
     const result = await bridge.exportHistory(format);
     backupMessage.value = t("导出完成：{name}", { name: result.filename || result.filepath });
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
 }
 async function importHistory() {
   const path = await bridge.chooseFile("history");
@@ -4359,7 +4359,7 @@ async function importHistory() {
     const result = await bridge.importHistory(path);
     backupMessage.value = t("导入完成：{result}", { result: JSON.stringify(result) });
     await store.refresh();
-  } catch (error) { state.error = error as any; }
+  } catch (error) { store.setError(error); }
 }
 async function translateText() {
   if (!translationText.value.trim() || translationBusy.value) return;
@@ -4370,7 +4370,7 @@ async function translateText() {
     if (generation !== translationGeneration) return;
     translationResult.value = String(result.translated || "");
   } catch (error) {
-    if (generation === translationGeneration) state.error = error as any;
+    if (generation === translationGeneration) store.setError(error);
   } finally { translationBusy.value = false; }
 }
 </script>

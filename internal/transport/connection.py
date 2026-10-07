@@ -26,8 +26,16 @@ from internal.protocol.codec import (
 from internal.security.encryption import is_encrypted
 from internal.security.handshake import (
     PROOF_VERSION,
+    decode_identity,
+    encode_identity,
     proof_state,
     should_refuse_unproven,
+)
+from internal.security.handshake import (
+    recv_frame as _recv_handshake_frame,
+)
+from internal.security.handshake import (
+    send_frame as _send_handshake_frame,
 )
 from internal.security.pairing import CertificateChangedError, PairingManager, fingerprint_pem
 from internal.transport.ids import peer_id_hash
@@ -48,7 +56,19 @@ MAX_FRAME_SIZE = 10 * 1024 * 1024  # 10 MB
 FRAME_HEADER_SIZE = 4
 DATA_TIMEOUT = 30.0  # socket read timeout
 MAX_RECONNECT_ATTEMPTS = 10
-MAX_RECONNECT_BACKOFF = 30
+# Ceiling for the fast ladder.  Attempts climb from MIN_RECONNECT_DELAY (3, 3, 4, 8, 16) and
+# then hold at 30s, so the ten fast attempts span 184s (~3 minutes) before the steady interval
+# below takes over.  This cap is deliberately separate from MAX_RECONNECT_BACKOFF: a short
+# Wi-Fi/router hiccup should still be retried on the old fast schedule, while a peer that is
+# gone for longer gets the quieter steady poll.
+FAST_RECONNECT_CAP = 30
+# The steady interval once the fast attempts are spent.  It was 30 seconds, on the argument that
+# mDNS never re-announces a peer whose registration did not change -- an argument the presence
+# loop has since answered, because it now queries every peer and dials on every sighting
+# (`_peer_found`).  What is left for this interval is a peer that comes back *without* answering
+# mDNS, and for that a bounded wait is enough.  Measured: 259 attempts over three hours at 30
+# seconds, none of which could succeed, against 36 at five minutes.
+MAX_RECONNECT_BACKOFF = 300
 MIN_RECONNECT_DELAY = (
     3  # minimum 3s before first reconnect to allow accept_loop to resolve bidirectional races
 )
@@ -1042,26 +1062,20 @@ class TransportManager:
         arriving before the application's first is a shape the reading side does
         not expect.  See `internal/security/handshake.py`.
         """
-        head = ""
-        if version:
-            head += f"{HANDSHAKE_VERSION_PREFIX}{int(version)}\n"
-        if nonce:
-            head += f"{NONCE_PREFIX}{nonce}\n"
-        if proof:
-            head += f"{PROOF_PREFIX}{proof}\n"
-        if listen_port:
-            head += f"{LISTEN_PORT_PREFIX}{int(listen_port)}\n"
-        if device_name:
-            # A comment line ends at the newline, so a name that carries one
-            # would end the field early and leave the rest of it at the head of
-            # the PEM.  Sanitizing drops the control characters with it.
-            head += f"{NAME_PREFIX}{_sanitize_peer_str(device_name, 128)}\n"
-        text = head + cert_pem
-        if no_auto_pairing:
-            text += NO_PAIRING_MARKER
-        data = text.encode("utf-8")
-        frame = struct.pack(">I", len(data)) + data
-        sock.sendall(frame)
+        # The bytes are `handshake.encode_identity`'s, so the wire format has a
+        # single definition; this method only owns the socket.  Byte-for-byte
+        # what the inline encoder used to write, pinned by the contract tests in
+        # tests/sidecar/test_handshake_exchange.py.
+        frame = encode_identity(
+            cert_pem,
+            nonce=nonce,
+            proof=proof,
+            listen_port=listen_port,
+            device_name=device_name,
+            no_auto_pairing=no_auto_pairing,
+            version=version,
+        )
+        _send_handshake_frame(sock, frame)
 
     @staticmethod
     def _identity_payload(
@@ -1070,51 +1084,23 @@ class TransportManager:
         """Split an identity frame into its fields and the certificate.
 
         Returns ``(cert_pem, no_auto_pairing, listen_port, device_name, nonce,
-        proof)``.  The marker and the leading comment lines are removed before the
-        PEM reaches a parser or a pin, so a frame that carries them is
-        byte-for-byte the frame that did not.
+        proof, version)`` -- the order this module's callers read, which is not
+        ``handshake.decode_identity``'s order.  The scan itself is
+        :func:`internal.security.handshake.decode_identity`; this adapter only
+        reshapes its result, so the wire format has one parser.  The marker and
+        the leading comment lines are removed before the PEM reaches a parser
+        or a pin, so a frame that carries them is byte-for-byte the frame that
+        did not.
 
         A field that is absent is reported as its "unknown" — 0, or "" — which is
         what every frame from a build older than that field looks like.  The name
         is decoded as UTF-8: device names are the user's to write, and this
         application's users write them in Chinese.
         """
-        text = data.decode("utf-8", errors="replace")
-        no_auto_pairing = text.endswith(NO_PAIRING_MARKER)
-        if no_auto_pairing:
-            text = text[: -len(NO_PAIRING_MARKER)]
-        listen_port = 0
-        device_name = ""
-        nonce = ""
-        proof = ""
-        version = 0
-        # The lines before the PEM, in whatever order a sender wrote them.  The
-        # scan stops at the first line that is not one of ours — the PEM's own
-        # BEGIN — so a certificate that contains text resembling a prefix
-        # cannot have its body consumed.
-        while True:
-            head, sep, rest = text.partition("\n")
-            if not sep or not rest:
-                break
-            # A line of ours whose value cannot be read is consumed like any
-            # other: it is not the PEM's BEGIN line, so leaving it in place
-            # would only put a comment in front of the certificate.
-            if head.startswith(HANDSHAKE_VERSION_PREFIX):
-                with contextlib.suppress(ValueError):
-                    version = max(0, int(head[len(HANDSHAKE_VERSION_PREFIX) :]))
-            elif head.startswith(NONCE_PREFIX):
-                nonce = _sanitize_peer_str(head[len(NONCE_PREFIX) :], 128)
-            elif head.startswith(PROOF_PREFIX):
-                proof = _sanitize_peer_str(head[len(PROOF_PREFIX) :], 512)
-            elif head.startswith(LISTEN_PORT_PREFIX):
-                with contextlib.suppress(ValueError):
-                    listen_port = max(0, int(head[len(LISTEN_PORT_PREFIX) :]))
-            elif head.startswith(NAME_PREFIX):
-                device_name = _sanitize_peer_str(head[len(NAME_PREFIX) :])
-            else:
-                break
-            text = rest
-        return text, no_auto_pairing, listen_port, device_name, nonce, proof, version
+        cert_pem, nonce, proof, listen_port, device_name, no_auto_pairing, version = (
+            decode_identity(data)
+        )
+        return cert_pem, no_auto_pairing, listen_port, device_name, nonce, proof, version
 
     @staticmethod
     def _restore_timeout(sock: ssl.SSLSocket, timeout: float | None) -> None:
@@ -1133,26 +1119,17 @@ class TransportManager:
 
     @staticmethod
     def _recv_identity(sock: ssl.SSLSocket, timeout: float = 10.0) -> bytes | None:
-        """Read the first frame from the peer — expected to be their cert PEM."""
+        """Read the first frame from the peer — expected to be their cert PEM.
+
+        The framing loop is :func:`internal.security.handshake.recv_frame`;
+        ``MAX_FRAME_SIZE`` is passed explicitly so the transport's own cap, not
+        the handshake module's smaller default, decides how large an identity
+        frame may be.  The socket timeout around the read stays here.
+        """
         prev_timeout = sock.gettimeout()
         sock.settimeout(timeout)
         try:
-            header = b""
-            while len(header) < FRAME_HEADER_SIZE:
-                chunk = sock.recv(FRAME_HEADER_SIZE - len(header))
-                if not chunk:
-                    return None
-                header += chunk
-            frame_len = struct.unpack(">I", header)[0]
-            if frame_len == 0 or frame_len > MAX_FRAME_SIZE:
-                return None
-            data = b""
-            while len(data) < frame_len:
-                chunk = sock.recv(frame_len - len(data))
-                if not chunk:
-                    return None
-                data += chunk
-            return data
+            return _recv_handshake_frame(sock, max_frame=MAX_FRAME_SIZE)
         except Exception as e:
             logger.warning("Failed to read identity frame: %s", e)
             return None
@@ -1817,18 +1794,13 @@ class TransportManager:
                 for c in to_stop:
                     c.stop()
 
-                # Success clears the reconnect backoff for both the hashed and
-                # real id under the lock — every other _reconnect_attempts
-                # mutation takes the lock, so a racing _schedule_reconnect in
-                # the disconnect thread must not interleave with these pops
-                # (a lost update would leave a stale backoff running).
-                with self._lock:
-                    self._reconnect_attempts.pop(peer_id, None)
-                    self._reconnect_attempts.pop(real_peer_id, None)
-                    # A working TLS session means the pin matches again, so any
-                    # earlier cert-pin block is stale.
-                    self._cert_pin_blocked.pop(peer_id, None)
-                    self._cert_pin_blocked.pop(real_peer_id, None)
+                # Success ends the outage: clear the backoff, the failure
+                # streak and any stale cert-pin block for both the hashed and
+                # real id.  Everything is popped under the lock (the helper
+                # takes it), so a racing _schedule_reconnect in the disconnect
+                # thread cannot interleave with these pops -- a lost update
+                # would leave a stale backoff running.
+                self._clear_reconnect_state(peer_id, real_peer_id)
                 logger.info(
                     "[%s] connected [%s] (%s:%d)", peer_name, real_peer_id[:12], address, port
                 )
@@ -2208,9 +2180,11 @@ class TransportManager:
         carries ``attempts`` (reconnect attempts already initiated, always
         inside the fast budget) and ``max_attempts``.
 
-        A peer past that budget is not listed at all.  Past it the transport is
-        on slow retry — one dial every ``MAX_RECONNECT_BACKOFF`` seconds, for as
-        long as the peer stays away — and that is a background poll rather than
+        "Fast" is the ladder capped at ``FAST_RECONNECT_CAP`` seconds per
+        attempt; its ten attempts span about three minutes.  A peer past that
+        budget is not listed at all.  Past it the transport is on slow retry —
+        one dial every ``MAX_RECONNECT_BACKOFF`` seconds, for as long as the
+        peer stays away — and that is a background poll rather than
         a reconnection anyone is waiting on.  Reported anyway (capped at the
         ceiling, as the counter used to be), it kept every front end saying
         重连中 10/10 for as long as the peer was gone, so the state the row is
@@ -2244,13 +2218,17 @@ class TransportManager:
                         current = _v
                         break
             if current is None:
+                # Nothing to remove: the entry is already gone.  When both
+                # ``current`` and ``conn`` are None there is not even an object
+                # to locate the entry by, and falling through to delete the key
+                # would raise KeyError.
                 logger.info(
                     "[%s] disconnect: already removed from _peers (conn=%s)",
                     peer_id[:12],
                     hex(id(conn)) if conn else "N/A",
                 )
                 return
-            elif conn is not None and current is not conn:
+            if conn is not None and current is not conn:
                 # Disconnect is from a stale connection that was already
                 # replaced by a newer one (e.g. during bidirectional connection
                 # race). Don't delete the good connection.
@@ -2261,13 +2239,14 @@ class TransportManager:
                     hex(id(current)),
                 )
                 return
-            else:
-                logger.info(
-                    "[%s] disconnect from current connection (conn=%s) — removing from _peers",
-                    peer_id[:12],
-                    hex(id(conn)) if conn else "N/A",
-                )
-                del self._peers[peer_id]
+            logger.info(
+                "[%s] disconnect from current connection (conn=%s) — removing from _peers",
+                peer_id[:12],
+                hex(id(conn)) if conn else "N/A",
+            )
+            # Existence guard instead of a bare `del`: a duplicate disconnect
+            # callback must not turn "already removed" into a KeyError.
+            self._peers.pop(peer_id, None)
         # A peer that explicitly rejected this connection (forgotten/removed)
         # must not be reconnected to — clear the saved address and stop the
         # connect/reject/reconnect loop.  Deliberately NOT added to
@@ -2312,6 +2291,20 @@ class TransportManager:
                     peer_id[:12],
                 )
 
+    def _clear_reconnect_state(self, peer_id: str, real_peer_id: str) -> None:
+        """Forget a peer's reconnect, failure-streak and cert-pin state on success.
+
+        Both id forms are cleared because discovery may have dialled the hashed
+        mDNS id while the established connection is keyed by the real device id.
+        Clearing ``_connect_failures`` here is what makes the first failure of
+        the *next* cycle a WARNING again instead of a silent DEBUG retry.
+        """
+        with self._lock:
+            for pid in {peer_id, real_peer_id}:
+                self._reconnect_attempts.pop(pid, None)
+                self._connect_failures.pop(pid, None)
+                self._cert_pin_blocked.pop(pid, None)
+
     def _log_connect_failure(self, peer_id: str, peer_name: str, error) -> None:
         """Say the first failure of a cycle, and keep the rest quiet.
 
@@ -2320,9 +2313,13 @@ class TransportManager:
         expected to fail, so it is DEBUG; the attempt that *starts* a cycle is the one that says a
         peer went away, and that stays a WARNING.
 
-        Two things end a cycle: the peer coming back (the attempts counter is cleared) and the
-        retry machinery giving up on it.  Both clear the streak, so a peer that goes away a second
-        time is announced a second time.
+        One thing ends a cycle: the peer coming back, where the success path's
+        ``_clear_reconnect_state`` clears the streak for both id forms, so a
+        peer that goes away a second time is announced a second time.  There is
+        deliberately no second ending: past the retry budget the transport does
+        not give up on the peer, it keeps it on the steady
+        :data:`MAX_RECONNECT_BACKOFF` poll, so only a reconnect (or the user
+        disconnecting/removing the peer) clears the streak.
         """
         with self._lock:
             pending = peer_id in self._reconnect_timers
@@ -2345,13 +2342,24 @@ class TransportManager:
                 return
             attempts = self._reconnect_attempts.get(peer_id, 0)
             if attempts >= self._max_reconnect_attempts:
-                # Past the fast-retry budget, downgrade to a slow fixed
-                # interval instead of clearing the saved address.  On an
+                # Past the fast-retry budget, downgrade to the steady fixed
+                # interval instead of clearing the saved address.  The fast
+                # ladder is unchanged and capped at FAST_RECONNECT_CAP, so its
+                # ten attempts still span ~3 minutes; MAX_RECONNECT_BACKOFF is
+                # the wait between dials after that budget is spent.  On an
                 # always-on desktop a Wi-Fi/router outage longer than ~3
                 # minutes used to exhaust every attempt and leave the pair
-                # disconnected until an app restart — mDNS never re-announces
-                # a peer whose registration did not change, so nothing else
-                # would re-trigger the connection.
+                # disconnected until an app restart.
+                #
+                # That reason has since been answered from the other side: the
+                # presence loop queries every peer every ten seconds and
+                # `_peer_found` dials on each sighting, so a peer that is merely
+                # unreachable on a working network reconnects without this timer
+                # at all.  What the interval is for now is a peer that comes back
+                # *without* answering mDNS -- a privacy setting, multicast
+                # filtered upstream, a router that re-segmented -- and five
+                # minutes bounds that wait.  At 30 seconds it also produced 259
+                # failed attempts in three hours for a sleeping laptop.
                 if attempts == self._max_reconnect_attempts:
                     logger.warning(
                         "[%s] fast reconnect budget exhausted (%d attempts) "
@@ -2362,7 +2370,10 @@ class TransportManager:
                     )
                 delay = MAX_RECONNECT_BACKOFF
             else:
-                delay = max(MIN_RECONNECT_DELAY, min(2**attempts, MAX_RECONNECT_BACKOFF))
+                # Fast ladder: 3, 3, 4, 8, 16, then 30s for the rest of the
+                # budget.  The cap is FAST_RECONNECT_CAP, not the steady
+                # MAX_RECONNECT_BACKOFF used above.
+                delay = max(MIN_RECONNECT_DELAY, min(2**attempts, FAST_RECONNECT_CAP))
             self._reconnect_attempts[peer_id] = attempts + 1
             if attempts < self._max_reconnect_attempts:
                 logger.debug(

@@ -243,6 +243,54 @@ def test_settings_round_trip_and_unknown_field_rejection(app):
         Dispatcher(app).call("settings.update", {"private_key_pem": "secret"})
 
 
+def test_settings_numeric_bounds_are_derived_from_the_config_schema():
+    """One bound, one table.
+
+    The sidecar settings surface, the config loader and the HTTP settings API all
+    enforce the same numeric limits.  They used to be hand-written three times,
+    and the copies had already disagreed (``max_reconnect_attempts`` 100 here and
+    1000 in the restore path; ``web_history_limit`` 500 here and 100000 there).
+    This pins the derivation rather than the numbers: every bound the sidecar
+    accepts comes from ``config.FIELD_RANGES``, with only the shared privileged
+    port floor applied to ``port``, and the HTTP API's table agrees.
+    """
+    from internal.config.config import FIELD_RANGES, PRIVILEGED_PORT_FLOOR
+    from internal.web.api.settings import _RANGE_LIMITS
+
+    bounds = rpc.NUMERIC_SETTINGS_BOUNDS
+    assert bounds, "the numeric settings table is empty"
+    assert set(_RANGE_LIMITS) == set(FIELD_RANGES)
+    for name, (kinds, low, high) in bounds.items():
+        expected_low = (
+            max(FIELD_RANGES[name][0], PRIVILEGED_PORT_FLOOR)
+            if name == "port"
+            else FIELD_RANGES[name][0]
+        )
+        assert (low, high) == (expected_low, FIELD_RANGES[name][1]), name
+        assert _RANGE_LIMITS[name] == (low, high), name
+        rule_kinds, constraint = rpc._settings_numeric_rules()[name]
+        assert rule_kinds == kinds, name
+        assert constraint(low) and constraint(high), name
+        assert not constraint(low - 1) and not constraint(high + 1), name
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("port", 1023),
+        ("sync_debounce", 0.04),
+        ("clipboard_poll_interval", 0.09),
+        ("transfer_timeout", 4),
+        ("relay_max_message_bytes", 32 * 1024 - 1),
+        ("relay_max_bytes_per_second", 4 * 1024 - 1),
+    ],
+)
+def test_numeric_settings_refuse_a_value_below_the_config_floor(app, field, value):
+    """The bound the parity test reads is the one the handler actually applies."""
+    with pytest.raises(ApplicationError):
+        Dispatcher(app).call("settings.update", {field: value})
+
+
 def test_every_field_the_window_settings_form_sends_is_accepted(app):
     """The settings page submits its whole form in one call.
 

@@ -127,7 +127,9 @@ var ClipsyncWS = (function () {
      * Establish the WebSocket connection.
      */
     _doConnect: function () {
-      // Build URL with token
+      // The WebSocket API cannot set request headers, so the handshake token
+      // still travels in the URL.  The server also accepts Bearer there for
+      // non-browser clients; this page has no way to use it.
       var fullUrl = _url;
       if (_token) {
         var sep = fullUrl.indexOf('?') !== -1 ? '&' : '?';

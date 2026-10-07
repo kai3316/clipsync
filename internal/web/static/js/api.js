@@ -1,7 +1,9 @@
 /* ═══════════════════════════════════════════════════════════════════
    ClipSync HTTP API Client
-   Typed wrapper around the ClipSync REST API. All API calls
-   automatically add the auth token as a query parameter.
+   Typed wrapper around the ClipSync REST API.  API calls authenticate with
+   `Authorization: Bearer <token>`, so the token is not put in the request
+   URL; `?token=` stays accepted for the first page load, the static asset
+   tags and the download links, none of which can set a request header.
 
    Usage:
      ClipsyncAPI.init('http://192.168.1.100:9580', 'my-token');
@@ -40,8 +42,8 @@ var ClipsyncAPI = (function () {
    * hang the preview modal.
    */
   function _previewAiConfig(body) {
-    var url = _baseUrl + '/api/aiconfig/preview?token=' +
-      encodeURIComponent(_token);
+    // Bearer rather than ?token=: this POST never carries the token in its URL.
+    var url = _baseUrl + '/api/aiconfig/preview';
     var options = {
       method: 'POST',
       headers: {
@@ -50,6 +52,9 @@ var ClipsyncAPI = (function () {
       },
       body: JSON.stringify(body),
     };
+    if (_token) {
+      options.headers['Authorization'] = 'Bearer ' + _token;
+    }
 
     var controller = null;
     var timeoutId = null;
@@ -327,9 +332,9 @@ var ClipsyncAPI = (function () {
      * @returns {Promise<{ok: boolean, name: string, size: number}>}
      */
     uploadFile: function (file, deviceId) {
-      // Build the URL with token
-      var sep = '/api/upload'.indexOf('?') !== -1 ? '&' : '?';
-      var url = _baseUrl + '/api/upload' + sep + 'token=' + encodeURIComponent(_token);
+      // Multipart body: only an Authorization header is added, never a manual
+      // Content-Type (the browser has to set the multipart boundary itself).
+      var url = _baseUrl + '/api/upload';
 
       var formData = new FormData();
       formData.append('file', file);
@@ -338,6 +343,9 @@ var ClipsyncAPI = (function () {
       }
 
       var options = { method: 'POST', body: formData };
+      if (_token) {
+        options.headers = { 'Authorization': 'Bearer ' + _token };
+      }
       // Stall guard — not a fixed deadline. The server reads the WHOLE body
       // before it responds, so a flat 15s timeout killed any slow-but-working
       // multi-megabyte send. Scale by size instead: 15s base (a dead small
@@ -1232,6 +1240,8 @@ var ClipsyncAPI = (function () {
      * @returns {string}
      */
     chatDownloadUrl: function (transferId) {
+      // A link target, not a fetch(): a navigation cannot set an
+      // Authorization header, so this URL keeps the query token.
       var sep = '/api/chat/download'.indexOf('?') !== -1 ? '&' : '?';
       return _baseUrl + '/api/chat/download' + sep +
         'transfer_id=' + encodeURIComponent(transferId) +
@@ -1266,9 +1276,7 @@ var ClipsyncAPI = (function () {
      * @returns {Promise<Object>} Parsed JSON response
      */
     _fetch: function (method, path, body, timeoutMs) {
-      // Build URL with token
-      var sep = path.indexOf('?') !== -1 ? '&' : '?';
-      var url = _baseUrl + path + sep + 'token=' + encodeURIComponent(_token);
+      var url = _baseUrl + path;
 
       var options = {
         method: method,
@@ -1276,6 +1284,14 @@ var ClipsyncAPI = (function () {
           'Accept': 'application/json',
         },
       };
+
+      if (_token) {
+        // Bearer rather than ?token=: the API URL carries no secret, so it
+        // cannot leak through logs, history or a Referer.  The page, its
+        // static <script>/<link> tags and the download links still use
+        // ?token= -- a subresource or a navigation cannot set a header.
+        options.headers['Authorization'] = 'Bearer ' + _token;
+      }
 
       if (body !== undefined && body !== null) {
         options.headers['Content-Type'] = 'application/json';

@@ -1819,9 +1819,22 @@ body.light .upload-btn {
 
   /* ── API helpers ───────────────────────────────────────────── */
 
+  // Link and download targets (an <a href> navigation) cannot set an
+  // Authorization header, so they keep the token in the URL.
   function apiUrl(path) {
     var sep = path.indexOf('?') !== -1 ? '&' : '?';
     return HOST + path + sep + 'token=' + encodeURIComponent(TOKEN);
+  }
+
+  // fetch() calls authenticate with `Authorization: Bearer`, so the token
+  // stays out of their URLs.  The page itself is still opened with ?token=
+  // (the QR bootstrap) and the static asset tags still carry it.
+  function authHeaders(headers) {
+    var merged = Object.assign({}, headers || {});
+    if (TOKEN) {
+      merged['Authorization'] = 'Bearer ' + TOKEN;
+    }
+    return merged;
   }
 
   var REQUEST_TIMEOUT = 8000;
@@ -1848,7 +1861,7 @@ body.light .upload-btn {
   }
 
   function getJson(path) {
-    return fetchWithTimeout(apiUrl(path)).then(function (r) {
+    return fetchWithTimeout(HOST + path, { headers: authHeaders(null) }).then(function (r) {
       if (!r.ok) {
         var e = new Error('HTTP ' + r.status);
         e.status = r.status;
@@ -1863,7 +1876,9 @@ body.light .upload-btn {
   // the send flow and file delete so both treat 403 identically.  getJson
   // (used by the polling refresh paths) keeps its own error-throwing behavior.
   function apiFetch(path, opts) {
-    return fetchWithTimeout(apiUrl(path), opts).then(function (r) {
+    var options = Object.assign({}, opts || {});
+    options.headers = authHeaders(opts && opts.headers);
+    return fetchWithTimeout(HOST + path, options).then(function (r) {
       return r.json().then(function (data) {
         return { status: r.status, data: data };
       });
@@ -2573,7 +2588,8 @@ body.light .upload-btn {
 
       var xhr = new XMLHttpRequest();
       uploadXhr = xhr;
-      xhr.open('POST', apiUrl('/api/upload'));
+      xhr.open('POST', HOST + '/api/upload');
+      if (TOKEN) xhr.setRequestHeader('Authorization', 'Bearer ' + TOKEN);
       xhr.upload.onprogress = function (e) {
         if (e.lengthComputable) {
           var pct = Math.round(((uploadedBytes + e.loaded) / totalBytes) * 100);
@@ -3383,7 +3399,8 @@ body.light .upload-btn {
     // Plain XHR rather than fetchWithTimeout: an 8s abort cap is fine for
     // API calls but kills large uploads mid-flight.
     var xhr = new XMLHttpRequest();
-    xhr.open('POST', apiUrl('/api/upload'));
+    xhr.open('POST', HOST + '/api/upload');
+    if (TOKEN) xhr.setRequestHeader('Authorization', 'Bearer ' + TOKEN);
     xhr.onload = function () {
       var data = null;
       try { data = JSON.parse(xhr.responseText); } catch (e) { /* ignore */ }

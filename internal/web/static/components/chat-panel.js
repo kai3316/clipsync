@@ -778,10 +778,12 @@
         // window, so it is never a user-visible error.  Direct fetch because
         // js/api.js has no typed wrapper for this endpoint yet.
         var base = ((this.store && this.store.serverUrl) || '').replace(/\/+$/, '');
-        fetch(base + '/api/chat/typing?token=' +
-            encodeURIComponent((this.store && this.store.token) || ''), {
+        var token = (this.store && this.store.token) || '';
+        var headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+        fetch(base + '/api/chat/typing', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: headers,
           body: JSON.stringify({ session_id: sid, typing: !!typing }),
         }).catch(function (e) {
           console.debug('[ClipSync] typing report failed:', e);
@@ -903,16 +905,17 @@
       _uploadForChat: function (file) {
         var base = (this.store && this.store.serverUrl) || '';
         if (base) base = base.replace(/\/+$/, '');
-        var sep = '/api/upload'.indexOf('?') !== -1 ? '&' : '?';
-        var url = base + '/api/upload' + sep +
-          'token=' + encodeURIComponent((this.store && this.store.token) || '') +
-          '&purpose=chat';
+        var url = base + '/api/upload?purpose=chat';
+        var token = (this.store && this.store.token) || '';
         var formData = new FormData();
         formData.append('file', file);
         // Mirror ClipsyncAPI.uploadFile's 15s stall guard: a hung upload must
         // not leave sendingFile=true forever (the attach button stays
         // disabled) with no way to retry the same file.
         var options = { method: 'POST', body: formData };
+        if (token) {
+          options.headers = { 'Authorization': 'Bearer ' + token };
+        }
         var controller = null;
         var timeoutId = null;
         if (typeof AbortController !== 'undefined') {

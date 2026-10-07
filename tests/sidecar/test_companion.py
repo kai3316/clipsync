@@ -15,7 +15,7 @@ from tests.sidecar.test_application_runtime import Runtime
 def test_real_mobile_page_requires_token_and_releases_socket(tmp_path, monkeypatch):
     import json
     from urllib.error import HTTPError
-    from urllib.request import urlopen
+    from urllib.request import Request, urlopen
 
     from internal.clipboard.format import ClipboardContent, ContentType
     from internal.clipboard.history_db import ClipboardHistoryDB
@@ -49,6 +49,14 @@ def test_real_mobile_page_requires_token_and_releases_socket(tmp_path, monkeypat
             payload = json.load(response)
         assert payload["total"] == 1
         assert "shared desktop history" in json.dumps(payload)
+        # The API also accepts Authorization: Bearer, so a client never has
+        # to put the token in the request URL.
+        bearer = Request(
+            base + "/api/history",
+            headers={"Authorization": "Bearer test-companion-secret"},
+        )
+        with urlopen(bearer, timeout=3) as response:
+            assert json.load(response)["total"] == 1
         assert adapter.stop()
         assert adapter.server._httpd is None
         # The device-page poll dies with the listener instead of outliving it.
@@ -179,7 +187,24 @@ def test_web_panel_settings_apply_live(controlled_companion):
     cleared = post_settings(base, rotated["web_token"], {"clear_web_token": True})
     assert cleared["web_token"] == ""
     assert load().web_token == ""
-    assert post_settings(base, "", {"device_name": "Phone 3"})["ok"]
+    # With no token left, a write still works from the companion's own IP
+    # origin, but a client with no browser origin signal at all is refused:
+    # nothing is left to separate curl from a DNS-rebinding page.
+    import json
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    with pytest.raises(HTTPError) as denied:
+        post_settings(base, "", {"device_name": "Phone 3"})
+    assert denied.value.code == 403
+    request = Request(
+        f"{base}/api/settings",
+        data=json.dumps({"device_name": "Phone 3"}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Origin": base},
+        method="POST",
+    )
+    with urlopen(request, timeout=5) as response:
+        assert json.load(response)["ok"] is True
 
 
 def test_web_panel_factory_reset_and_restart_reach_the_host(
@@ -337,6 +362,47 @@ def test_rpc_clear_token_serves_token_free_and_is_not_re_minted(controlled_compa
     again = rpc.call("companion.configure", {"enabled": True, "port": free_port()})
     assert again["token"]
     assert again["access_url"]
+
+
+def test_cleared_token_write_refuses_a_rebinding_host(controlled_companion):
+    """With auth off, only an IP origin this connection reached may write.
+
+    DNS rebinding makes Origin and Host the same host:port, so the
+    same-origin rule alone cannot see the attack; the tokenless gate also
+    requires the origin to be an IP literal for the address the request
+    was accepted on.
+    """
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    _, rpc = controlled_companion
+    rpc.call("companion.configure", {"enabled": True, "port": free_port()})
+    cleared = rpc.call("companion.configure", {"enabled": True, "clear_token": True})
+    assert cleared["url"] and "token=" not in cleared["url"]
+    base = f"http://127.0.0.1:{cleared['actual_port']}"
+    rebinding = f"evil.example:{cleared['actual_port']}"
+    request = Request(
+        f"{base}/api/window",
+        data=b'{"action": "close"}',
+        headers={
+            "Content-Type": "application/json",
+            "Host": rebinding,
+            "Origin": f"http://{rebinding}",
+        },
+        method="POST",
+    )
+    with pytest.raises(HTTPError) as denied:
+        urlopen(request, timeout=3)
+    assert denied.value.code == 403
+    # The QR code's own address is an IP literal, so the same write lands.
+    same = Request(
+        f"{base}/api/window",
+        data=b'{"action": "close"}',
+        headers={"Content-Type": "application/json", "Origin": base},
+        method="POST",
+    )
+    with urlopen(same, timeout=3) as response:
+        assert response.status == 200
 
 
 def test_rpc_bind_failure_reports_stopped_and_allows_retry(controlled_companion):

@@ -16,6 +16,7 @@
 """
 
 import contextlib
+import http.client
 import json
 import os
 import socket
@@ -320,17 +321,47 @@ def test_dialog_show_times_out_when_never_shown():
         assert dm._queued_dialogs == []
 
 
-def test_dialog_queued_flushed_response_window_starts_at_flush():
+def test_dialog_queued_flushed_response_window_starts_at_flush(monkeypatch):
     """A queued dialog's response window starts when it is flushed (shown),
-    not when it was created — a response arriving after the creation deadline
-    but within the post-flush window must still be accepted.
+    not when it was created.
 
-    Timing notes: the sleeps are sized so every critical margin is ~1s, so a
-    loaded CI runner stretching ``time.sleep`` a few tens of percent cannot
-    flake it.  With timeout=3s, queue≈2s (flush) and post-flush≈2s: the flush
-    must land before the 3s creation budget (2s slack) and the response must
-    land past that budget yet before the flush+3s window end (1s slack each).
+    This is asserted without wall-clock sleeps.  ``show()`` waits twice: once
+    for the dialog to be shown (the creation budget) and once for the response
+    (the post-flush budget).  The regression this pins is the second wait being
+    reduced by however long the dialog sat queued, so the test records the
+    timeout of both waits and requires the response one to be the full budget
+    *after* the flush, rather than whatever was left of the creation one.
     """
+    from internal.web import dialog as dialog_mod
+
+    waits: list[float | None] = []
+    real_event = threading.Event
+
+    class RecordingEvent:
+        """A threading.Event that records the timeout it was waited with."""
+
+        def __init__(self):
+            self._event = real_event()
+
+        def set(self):
+            self._event.set()
+
+        def is_set(self):
+            return self._event.is_set()
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return self._event.wait(timeout)
+
+    # dialog.py reaches for Event and Lock only through its own `threading`
+    # binding, so a namespace keeps the substitution local to that module
+    # instead of patching the global threading module the test itself uses.
+    monkeypatch.setattr(
+        dialog_mod,
+        "threading",
+        SimpleNamespace(Event=RecordingEvent, Lock=threading.Lock),
+    )
+
     state = {"deliver": False}
 
     class FlakyMgr:
@@ -347,25 +378,27 @@ def test_dialog_queued_flushed_response_window_starts_at_flush():
     t = threading.Thread(target=run)
     t.start()
 
-    # Wait until show() has queued the dialog (pending registered).
-    deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline:
-        with dm._lock:
-            if dm._pending:
-                dialog_id = next(iter(dm._pending))
-                break
-        time.sleep(0.005)
-    else:
-        pytest.fail("show() never registered a pending dialog")
+    # Wait until show() has queued the dialog and is blocked on its creation
+    # budget -- the first Event.wait call.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and len(waits) < 1:
+        time.sleep(0.001)
+    assert waits == [3.0], "show() never waited on its creation budget"
+    with dm._lock:
+        dialog_id = next(iter(dm._pending))
 
-    time.sleep(2.0)  # let the dialog sit queued (client absent) — flush at ~2s
     state["deliver"] = True
-    dm.flush_pending()  # shown at ~2s; response window = [2s, 5s]
-    time.sleep(2.0)  # handle at ~4s — past the 3s creation deadline, within
-    # the post-flush window (proves flush-based timing).
+    dm.flush_pending()
+
+    # The response wait must be a fresh full budget, not what is left of the
+    # creation one.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and len(waits) < 2:
+        time.sleep(0.001)
+    assert waits == [3.0, 3.0], f"post-flush wait was {waits!r}, not the full budget"
 
     ok = dm.handle_response(dialog_id, "ok")
-    t.join(timeout=6.0)
+    t.join(timeout=5.0)
 
     assert not t.is_alive(), "show() should have returned by now"
     assert ok is True
@@ -1215,3 +1248,322 @@ def test_starting_the_companion_resolves_no_names(monkeypatch):
         assert server.start() is True
     finally:
         server.stop()
+
+
+# ── Same-origin gate on state-changing requests ──────────────────────────────
+
+
+class _WriteCfg:
+    """The handler fields these tests read on the paths they take."""
+
+    def __init__(self, token):
+        self.web_enabled = True
+        self.web_token = token
+        self.web_port = 0
+        self.port = 0
+        self.language = "en"
+        self.device_id = "dev1"
+        self.device_name = "Dev"
+        self.file_receive_dir = "."
+        self.web_history_limit = 30
+        self.peers = {}
+
+
+@contextlib.contextmanager
+def _write_server(tmp_path, monkeypatch, token):
+    """A real companion on a loopback port, with the OS side effects stubbed."""
+    monkeypatch.setattr(web_server.WebServer, "_open_firewall", staticmethod(lambda *a, **k: True))
+    monkeypatch.setattr(web_server.WebServer, "_get_lan_ip", staticmethod(lambda: "127.0.0.1"))
+    cfg = _WriteCfg(token)
+    server = web_server.WebServer(cfg, _make_db(tmp_path), None)
+    try:
+        assert server.start() is True
+        cfg.web_port = server._httpd.server_address[1]
+        yield cfg
+    finally:
+        server.stop()
+
+
+def _http(port, method, path, body=None, headers=None):
+    """One request over a fresh connection; returns (status, headers, body)."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
+def test_cross_site_write_is_refused_when_the_token_was_cleared(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        status, headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Origin": "http://evil.example"},
+        )
+        assert status == 403
+        assert "Access-Control-Allow-Origin" not in headers
+
+
+def test_cross_site_write_is_refused_even_with_a_valid_token(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window?token=sekret",
+            body=_body({"action": "close"}),
+            headers={"Origin": "http://evil.example"},
+        )
+        assert status == 403
+
+
+def test_same_origin_write_still_works(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        origin = f"http://127.0.0.1:{cfg.web_port}"
+        status, headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window?token=sekret",
+            body=_body({"action": "close"}),
+            headers={"Origin": origin},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        # Same-origin reflection, never a wildcard: another site can never
+        # read a token-authenticated answer through this header.
+        assert headers.get("Access-Control-Allow-Origin") == origin
+
+
+def test_write_without_any_origin_signal_needs_the_token(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(
+            cfg.web_port, "POST", "/api/window?token=sekret", body=_body({"action": "close"})
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        status, _headers, _payload = _http(
+            cfg.web_port, "POST", "/api/window", body=_body({"action": "close"})
+        )
+        assert status == 403
+
+
+def test_sec_fetch_site_alone_cannot_authorise_a_tokenless_write(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        # Cross-site is refused, and so is same-origin: a rebound page's
+        # Sec-Fetch-Site also reads same-origin, so on its own it licenses
+        # nothing when there is no token to check.
+        for site in ("cross-site", "same-origin"):
+            status, _headers, _payload = _http(
+                cfg.web_port,
+                "POST",
+                "/api/window",
+                body=_body({"action": "close"}),
+                headers={"Sec-Fetch-Site": site},
+            )
+            assert status == 403
+
+
+def test_sec_fetch_site_still_decides_when_a_token_is_armed(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window?token=sekret",
+            body=_body({"action": "close"}),
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+
+
+def test_tokenless_referer_must_name_a_local_ip(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        # Same host:port in the Referer and Host is not enough: a rebinding
+        # host name has to be refused even when the two agree.
+        rebinding = f"evil.example:{cfg.web_port}"
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Host": rebinding, "Referer": f"http://{rebinding}/index.html"},
+        )
+        assert status == 403
+        # The QR code's own address is an IP literal, and it still works.
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Referer": f"http://127.0.0.1:{cfg.web_port}/index.html"},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+
+
+def test_tokenless_write_rejects_a_rebinding_hostname(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        # DNS rebinding produces exactly this: the attacker's name resolves
+        # to this machine, so Origin and Host agree on host:port.  The host
+        # name is the tell.
+        rebinding = f"evil.example:{cfg.web_port}"
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Host": rebinding, "Origin": f"http://{rebinding}"},
+        )
+        assert status == 403
+
+
+def test_tokenless_write_allows_ip_and_localhost_origins(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        origin = f"http://127.0.0.1:{cfg.web_port}"
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Origin": origin},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        # `localhost` is a name, but it always resolves to the loopback the
+        # connection arrived on, so it is accepted as well.
+        local = f"localhost:{cfg.web_port}"
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Host": local, "Origin": f"http://{local}"},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+
+
+def test_tokenless_write_without_a_browser_origin_is_refused(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        status, _headers, _payload = _http(
+            cfg.web_port, "POST", "/api/window", body=_body({"action": "close"})
+        )
+        assert status == 403
+
+def test_cross_site_delete_is_refused(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "DELETE",
+            "/api/files?name=notes.txt&token=sekret",
+            headers={"Origin": "http://evil.example"},
+        )
+        assert status == 403
+
+
+def test_get_and_static_assets_are_not_origin_gated(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(
+            cfg.web_port, "GET", "/?token=sekret", headers={"Origin": "http://evil.example"}
+        )
+        assert status == 200
+        assert b"<" in payload
+        status, _headers, _payload = _http(
+            cfg.web_port, "GET", "/icon-192.png", headers={"Origin": "http://evil.example"}
+        )
+        assert status == 200
+
+
+def test_cross_site_preflight_gets_no_permission(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        status, headers, _payload = _http(
+            cfg.web_port,
+            "OPTIONS",
+            "/api/window",
+            headers={
+                "Origin": "http://evil.example",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert status == 403
+        assert "Access-Control-Allow-Origin" not in headers
+
+
+def test_same_origin_preflight_echoes_its_own_origin(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        origin = f"http://127.0.0.1:{cfg.web_port}"
+        status, headers, _payload = _http(
+            cfg.web_port, "OPTIONS", "/api/window", headers={"Origin": origin}
+        )
+        assert status == 204
+        assert headers.get("Access-Control-Allow-Origin") == origin
+
+
+def test_query_token_still_authenticates(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(cfg.web_port, "GET", "/api/history?token=sekret")
+        assert status == 200
+        assert json.loads(payload)["total"] == 1
+
+
+def test_bearer_token_authenticates_reads(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "GET",
+            "/api/history",
+            headers={"Authorization": "Bearer sekret"},
+        )
+        assert status == 200
+        assert json.loads(payload)["total"] == 1
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "GET",
+            "/api/history",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        assert status == 403
+
+
+def test_bearer_token_authenticates_writes_but_origin_still_applies(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        origin = f"http://127.0.0.1:{cfg.web_port}"
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Authorization": "Bearer sekret", "Origin": origin},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Authorization": "Bearer sekret", "Origin": "http://evil.example"},
+        )
+        assert status == 403
+
+
+def test_ws_handshake_accepts_a_bearer_token(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        # Without an Upgrade header a passing token reaches the 426 branch
+        # and a failing one is refused at the gate -- enough to prove /ws
+        # reads the Authorization header and not only the query string.
+        status, _headers, _payload = _http(
+            cfg.web_port, "GET", "/ws", headers={"Authorization": "Bearer sekret"}
+        )
+        assert status == 426
+        status, _headers, _payload = _http(
+            cfg.web_port, "GET", "/ws", headers={"Authorization": "Bearer wrong"}
+        )
+        assert status == 403
+        status, _headers, _payload = _http(cfg.web_port, "GET", "/ws")
+        assert status == 403
+        status, _headers, _payload = _http(cfg.web_port, "GET", "/ws?token=sekret")
+        assert status == 426

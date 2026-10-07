@@ -10,6 +10,7 @@ ws.py, and serves static files from internal/web/static/.
 
 import contextlib
 import hmac
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -358,21 +359,192 @@ def _get_static_dir() -> str:
 # ── Token validation helper ─────────────────────────────────────
 
 
-def _validate_token(path: str, expected_token: str) -> bool:
-    """Check that the query string contains the expected token.
+def _bearer_token(headers) -> str:
+    """The ``Authorization: Bearer <token>`` value, or "" when there is none.
+
+    Header names are case-insensitive and the scheme may carry any amount of
+    whitespace, so the scheme is matched case-insensitively and the token is
+    stripped; anything that is not a Bearer credential is ignored.
+    """
+    if headers is None:
+        return ""
+    try:
+        value = headers.get("Authorization", "") or ""
+    except AttributeError:
+        return ""
+    parts = str(value).split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return ""
+
+
+def _query_tokens(path: str) -> list[str]:
+    """The ``?token=`` value, or [] unless exactly one was supplied.
+
+    The single-value rule is the old behaviour kept intact: a duplicated
+    token parameter is a malformed request, not a second chance to guess.
+    """
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+    tokens = params.get("token", [])
+    return tokens if len(tokens) == 1 else []
+
+
+def _validate_token(path: str, expected_token: str, headers=None) -> bool:
+    """Check the request's token, from ``Authorization: Bearer`` or ``?token=``.
+
+    Bearer is the preferred form for API calls: the token then never appears
+    in a request URL, so it cannot leak through logs, history or Referer.
+    The query form stays accepted because the page itself is opened with
+    ``?token=`` (the QR bootstrap) and browsers cannot set headers on
+    subresource loads or WebSocket handshakes.  This only keeps the token
+    out of API request URLs; the companion is still plain HTTP, so a LAN
+    eavesdropper can read the header (or the first-hop URL) in flight.
 
     When ``expected_token`` is empty the web companion treats auth as
-    disabled (the user cleared the token): every request passes.  This is
-    what makes the "Clear token" setting actually work — the QR code then
-    carries no token at all and would otherwise 403 forever.
+    disabled (the user cleared the token): every request passes here.  The
+    state-changing methods still require a local browser origin in that
+    case; see ``_empty_token_origin_is_local``.
     """
     if not expected_token:
         return True
-    qs = urllib.parse.urlparse(path).query
-    params = urllib.parse.parse_qs(qs)
-    tokens = params.get("token", [])
+    candidates = []
+    bearer = _bearer_token(headers)
+    if bearer:
+        candidates.append(bearer)
+    candidates.extend(_query_tokens(path))
     # Constant-time comparison to avoid leaking token bytes via timing.
-    return len(tokens) == 1 and hmac.compare_digest(tokens[0], expected_token)
+    return any(hmac.compare_digest(candidate, expected_token) for candidate in candidates)
+
+
+def _authority_parts(value: str) -> tuple[str, int] | None:
+    """(host, port) from an Origin or Referer URL, or None when it is not one.
+
+    The port defaults from the scheme: ``http://host`` in an Origin header means
+    port 80, never the port this server happens to listen on.
+    """
+    text_ = (value or "").strip()
+    if not text_:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(text_)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in ("http", "https") or not host:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return host.lower(), port
+
+
+def _host_header_parts(value: str) -> tuple[str, int | None] | None:
+    """(host, port or None) from a Host header, or None when unparseable.
+
+    A Host header carries no scheme, so it is parsed as a network-path
+    reference; a port that is not a number makes the whole header unusable,
+    because a request whose Host cannot be read cannot be matched at all.
+    """
+    text_ = (value or "").strip()
+    if not text_:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit("//" + text_)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    return host.lower(), port
+
+
+def _origin_matches_host(origin: str, host_header: str, server_port) -> bool:
+    """Whether *origin* names the same authority as this request's Host header.
+
+    Used by the state-changing methods: a page from another host or another
+    port is not allowed to drive this machine, whatever token it holds.  When
+    the Host header carries no port (an HTTP/1.0 client, a proxy that dropped
+    it), the port this server listens on is the one to compare against.
+    """
+    parsed_origin = _authority_parts(origin)
+    if parsed_origin is None:
+        return False
+    parsed_host = _host_header_parts(host_header)
+    if parsed_host is None:
+        return False
+    origin_host, origin_port = parsed_origin
+    host_host, host_port = parsed_host
+    if host_port is None:
+        host_port = server_port
+    return origin_host == host_host and host_port is not None and origin_port == host_port
+
+
+def _is_ip_literal(host: str) -> bool:
+    """Whether *host* is an IP address literal rather than a DNS name."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Whether *host* is a loopback literal (127.0.0.0/8 or ::1)."""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _accepted_local_host(handler) -> str:
+    """The address this request was accepted on, or "" when unavailable.
+
+    ``getsockname()`` on an accepted socket is the local address the client
+    actually reached, which is exactly what the empty-token check wants: it
+    cannot be influenced by a Host header or a rebinding DNS answer.
+    """
+    try:
+        return str(handler.connection.getsockname()[0])
+    except (AttributeError, IndexError, OSError):
+        return ""
+
+
+def _empty_token_origin_is_local(
+    origin: str, host_header: str, server_port, local_host: str
+) -> bool:
+    """Whether a no-token write's browser origin names this machine by IP.
+
+    With the token cleared there is no secret left to authenticate a browser
+    request, so the only thing that separates this machine's own pages from
+    a DNS-rebinding attack is the *kind* of host the origin names.  The
+    origin must still match the request's Host, and then:
+
+    * ``localhost`` is accepted only when the connection itself arrived on
+      the loopback interface;
+    * any other host must be an IP literal equal to the address this request
+      was accepted on (or another loopback literal on a loopback connection).
+
+    A host name -- the rebound ``evil.com``, but also a legitimate
+    ``my-pc.local`` or a reverse-proxied name -- is refused.  The QR code
+    and the local dashboard both address the companion by IP, so they keep
+    working; see the residual note in ``internal/web/static/js/api.js``.
+    """
+    parsed_origin = _authority_parts(origin)
+    if parsed_origin is None:
+        return False
+    if not _origin_matches_host(origin, host_header, server_port):
+        return False
+    origin_host = parsed_origin[0]
+    local_host = (local_host or "").lower()
+    if origin_host == "localhost":
+        return _is_loopback_host(local_host)
+    if not _is_ip_literal(origin_host):
+        return False
+    if origin_host == local_host:
+        return True
+    return _is_loopback_host(origin_host) and _is_loopback_host(local_host)
 
 
 # ── Safe request body reader ─────────────────────────────────────
@@ -1327,7 +1499,60 @@ class WebServer:
                     self.close_connection = True
 
             def _token_ok(inner_self) -> bool:  # noqa: N805
-                return _validate_token(inner_self.path, cfg.web_token)
+                return _validate_token(inner_self.path, cfg.web_token, inner_self.headers)
+
+            def _write_origin_ok(inner_self) -> bool:  # noqa: N805
+                """Whether a state-changing request may proceed.
+
+                With the token armed the request must be same-origin (Origin,
+                else Sec-Fetch-Site, else Referer); a client with no browser
+                origin signal at all is left to the token check the caller
+                makes next.  A cross-site request is refused whatever token
+                it carries.
+
+                With the token cleared there is no secret left, so the only
+                thing that separates this machine's own pages from a
+                DNS-rebinding page is the kind of host the browser names.  A
+                browser source signal is required, it must be same-origin,
+                and its host must be an IP literal this request was accepted
+                on (or localhost over the loopback); a host name -- the
+                rebound ``evil.com``, or a legitimate ``my-pc.local`` -- is
+                refused.  See ``_empty_token_origin_is_local``.
+                """
+                origin = inner_self.headers.get("Origin")
+                host = inner_self.headers.get("Host", "")
+                referer = inner_self.headers.get("Referer") or inner_self.headers.get("Referrer")
+                if cfg.web_token:
+                    if origin:
+                        return _origin_matches_host(origin, host, cfg.web_port)
+                    site = (inner_self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+                    if site:
+                        return site in ("same-origin", "none")
+                    if referer:
+                        return _origin_matches_host(referer, host, cfg.web_port)
+                    return inner_self._token_ok()
+                source = origin or referer
+                if not source:
+                    # No browser signal and no secret: a rebinding page would
+                    # look exactly like this, so it is refused.
+                    return False
+                return _empty_token_origin_is_local(
+                    source, host, cfg.web_port, _accepted_local_host(inner_self)
+                )
+
+            def _send_allow_origin(inner_self):  # noqa: N805
+                """Echo the request Origin only when it is this same origin.
+
+                The API answers are token-authenticated, so a wildcard would
+                let any page that can reach the port read them.  A same-origin
+                caller does not need CORS at all, but echoing its own origin
+                keeps the header for clients that expect one.
+                """
+                origin = inner_self.headers.get("Origin")
+                if origin and _origin_matches_host(
+                    origin, inner_self.headers.get("Host", ""), cfg.web_port
+                ):
+                    inner_self.send_header("Access-Control-Allow-Origin", origin)
 
             def _companion_client_ok(inner_self) -> bool:  # noqa: N805
                 """Allow the request when the companion serves it.
@@ -1415,6 +1640,43 @@ class WebServer:
                 _i18n_cache[locale] = result
                 return result
 
+            def _drain_rejected_body(inner_self, limit: int = 65536) -> None:  # noqa: N805
+                """Read a rejected request's body so the 403 is not lost.
+
+                A response written while the client's body is still unread
+                makes Windows reset the connection, and the reset can discard
+                the response before the client reads it.  Draining a bounded
+                prefix first keeps a rejection readable; a larger body still
+                closes, and a client that stalls is cut off after a second
+                rather than holding a worker for the full request timeout.
+                """
+                try:
+                    declared = int(inner_self.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    declared = 0
+                if declared <= 0:
+                    return
+                try:
+                    previous = inner_self.connection.gettimeout()
+                    inner_self.connection.settimeout(1.0)
+                except OSError:
+                    previous = None
+                remaining = min(declared, limit)
+                try:
+                    while remaining > 0:
+                        chunk = inner_self.rfile.read(min(remaining, 8192))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                except OSError:
+                    inner_self.close_connection = True
+                finally:
+                    if previous is not None:
+                        with contextlib.suppress(OSError):
+                            inner_self.connection.settimeout(previous)
+                if declared > limit:
+                    inner_self.close_connection = True
+
             def _send_json(inner_self, data, status=200):  # noqa: N805
                 body = json.dumps(data, ensure_ascii=False).encode("utf-8")
                 inner_self.send_response(status)
@@ -1426,7 +1688,7 @@ class WebServer:
                 # response without one hangs until it times out.
                 inner_self.send_header("Content-Length", str(len(body)))
                 inner_self.send_header("Cache-Control", "no-cache")
-                inner_self.send_header("Access-Control-Allow-Origin", "*")
+                inner_self._send_allow_origin()
                 inner_self.send_header("Referrer-Policy", "no-referrer")
                 inner_self.send_header("X-Content-Type-Options", "nosniff")
                 inner_self.end_headers()
@@ -1531,7 +1793,7 @@ class WebServer:
                 inner_self.send_response(status)
                 for key, val in headers.items():
                     inner_self.send_header(key, val)
-                inner_self.send_header("Access-Control-Allow-Origin", "*")
+                inner_self._send_allow_origin()
                 inner_self.end_headers()
                 if status == 200:
                     try:
@@ -1769,8 +2031,22 @@ class WebServer:
             # ── HTTP method handlers ─────────────────────────────
 
             def do_OPTIONS(inner_self):  # noqa: N805
+                # A preflight is a browser asking permission to make a
+                # cross-origin request; only this same origin gets one.  The
+                # response names that origin rather than a wildcard, so the
+                # header can never let another site read a token-authenticated
+                # answer.
+                origin = inner_self.headers.get("Origin")
+                if origin and not _origin_matches_host(
+                    origin, inner_self.headers.get("Host", ""), cfg.web_port
+                ):
+                    inner_self.send_response(403)
+                    inner_self.send_header("Content-Length", "0")
+                    inner_self.end_headers()
+                    return
                 inner_self.send_response(204)
-                inner_self.send_header("Access-Control-Allow-Origin", "*")
+                if origin:
+                    inner_self.send_header("Access-Control-Allow-Origin", origin)
                 inner_self.send_header(
                     "Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"
                 )
@@ -2077,7 +2353,7 @@ class WebServer:
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
                     inner_self.send_header("Cache-Control", "no-cache")
-                    inner_self.send_header("Access-Control-Allow-Origin", "*")
+                    inner_self._send_allow_origin()
                     inner_self.end_headers()
                     with contextlib.suppress(OSError):
                         inner_self.wfile.write(body_bytes)
@@ -2104,10 +2380,17 @@ class WebServer:
 
                 # Companion off → local dashboard only (LAN/phones get 403).
                 if not inner_self._companion_client_ok():
+                    inner_self._drain_rejected_body()
                     inner_self._send_json({"error": "remote access disabled"}, 403)
                     return
 
+                if not inner_self._write_origin_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "cross-origin request refused"}, 403)
+                    return
+
                 if not inner_self._token_ok():
+                    inner_self._drain_rejected_body()
                     inner_self._send_json({"error": "invalid token"}, 403)
                     return
 
@@ -2330,7 +2613,7 @@ class WebServer:
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
                     inner_self.send_header("Cache-Control", "no-cache")
-                    inner_self.send_header("Access-Control-Allow-Origin", "*")
+                    inner_self._send_allow_origin()
                     inner_self.end_headers()
                     with contextlib.suppress(OSError):
                         inner_self.wfile.write(body_bytes)
@@ -2348,10 +2631,17 @@ class WebServer:
 
                 # Companion off → local dashboard only (mirror do_POST).
                 if not inner_self._companion_client_ok():
+                    inner_self._drain_rejected_body()
                     inner_self._send_json({"error": "remote access disabled"}, 403)
                     return
 
+                if not inner_self._write_origin_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "cross-origin request refused"}, 403)
+                    return
+
                 if not inner_self._token_ok():
+                    inner_self._drain_rejected_body()
                     inner_self._send_json({"error": "invalid token"}, 403)
                     return
 
@@ -2388,7 +2678,7 @@ class WebServer:
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
                     inner_self.send_header("Cache-Control", "no-cache")
-                    inner_self.send_header("Access-Control-Allow-Origin", "*")
+                    inner_self._send_allow_origin()
                     inner_self.end_headers()
                     with contextlib.suppress(OSError):
                         inner_self.wfile.write(body_bytes)
@@ -2406,10 +2696,17 @@ class WebServer:
 
                 # Companion off → local dashboard only (mirror do_POST).
                 if not inner_self._companion_client_ok():
+                    inner_self._drain_rejected_body()
                     inner_self._send_json({"error": "remote access disabled"}, 403)
                     return
 
+                if not inner_self._write_origin_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "cross-origin request refused"}, 403)
+                    return
+
                 if not inner_self._token_ok():
+                    inner_self._drain_rejected_body()
                     inner_self._send_json({"error": "invalid token"}, 403)
                     return
 
@@ -2446,7 +2743,7 @@ class WebServer:
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
                     inner_self.send_header("Cache-Control", "no-cache")
-                    inner_self.send_header("Access-Control-Allow-Origin", "*")
+                    inner_self._send_allow_origin()
                     inner_self.end_headers()
                     with contextlib.suppress(OSError):
                         inner_self.wfile.write(body_bytes)

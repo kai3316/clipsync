@@ -20,6 +20,7 @@ from internal.application.events import EventJournal
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.config.config import Config, PeerInfo
 from internal.infrastructure.persistence.relay_delivery import RelayDeliveryQueue
+from internal.infrastructure.runtime.internet_pairing import InternetPairingService
 from internal.infrastructure.runtime.lan import LanRuntime
 from internal.infrastructure.runtime.relay_delivery import (
     ACK_WINDOW,
@@ -32,8 +33,10 @@ from internal.protocol.codec import (
     encode_frame,
     encode_message,
 )
+from internal.security.keyexchange import generate_keypair
 from internal.sync.nearby_chat import ChatManager
 from internal.transport.relay import (
+    decode_netpair_code,
     derive_key,
     derive_topic,
     frame_limit_for,
@@ -408,6 +411,9 @@ def test_a_confirmed_hello_reports_the_peer_paired_and_online(relay_rig):
                 "msg_type": "netpair_hello",
                 "peer_id": netpair_device_tag(runtime.config.device_id),
                 "device_name": "Remote",
+                # A confirmed hello with no DH half is refused (see the
+                # identity/key guard tests below), so this one carries a key.
+                "dh_pub": generate_keypair()[1],
                 "ts": time.time(),
             },
             source_device="remote",
@@ -422,6 +428,302 @@ def test_a_confirmed_hello_reports_the_peer_paired_and_online(relay_rig):
     assert rows[0]["status"] == "paired"
     assert rows[0]["online"] is True
     assert abs(rows[0]["last_seen"] - time.time()) < 30
+
+
+# ----------------------------------------- netpair hello identity/key guards
+#
+# The hello carries the sender's DH public key, and the channel it arrived on
+# proves only that the sender knows the code-derived secret: anyone who cracked
+# the 35-bit code holds that.  These tests pin the guards that stop such a frame
+# from moving a confirmed pair to another source, replacing its pinned key, or
+# stripping the key so the channel falls back to the code-derived one.
+
+
+def netpair_rig(monkeypatch, tmp_path, pinned=True):
+    """A real service over an isolated config with ``remote`` confirmed.
+
+    The service's own X25519 private half is set, so nothing here reaches the
+    disk through ``ensure_netpair_dh_key``; every save the service makes is
+    counted instead.
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    secret = generate_netpair_secret()
+    config.netpair_secrets = {"remote": secret}
+    if pinned:
+        config.netpair_peer_keys = {"remote": generate_keypair()[1]}
+    saves = []
+    service = InternetPairingService(config, lambda: saves.append(None))
+    return SimpleNamespace(
+        config=config,
+        service=service,
+        secret=secret,
+        saves=saves,
+        pinned=config.netpair_peer_keys.get("remote", ""),
+        topic=netpair_topic(secret),
+    )
+
+
+def test_a_confirmed_peer_cannot_replace_its_pinned_dh_key(monkeypatch, tmp_path):
+    rig = netpair_rig(monkeypatch, tmp_path)
+    attacker_public = generate_keypair()[1]
+    assert attacker_public != rig.pinned
+    before = rig.service.netpair_keys_for_topic(rig.topic)
+
+    result = rig.service.handle_hello(
+        "remote", rig.config.device_id, "Remote", rig.topic, dh_pub=attacker_public
+    )
+
+    assert result == {
+        "accepted": False,
+        "role": "",
+        "peer_id": "",
+        "secret": "",
+        "reply": False,
+    }
+    assert rig.config.netpair_peer_keys == {"remote": rig.pinned}
+    assert rig.config.netpair_secrets == {"remote": rig.secret}
+    assert rig.service.topic_identity(rig.topic) == "remote"
+    assert rig.service.netpair_keys_for_topic(rig.topic) == before
+    assert rig.saves == []
+
+
+@pytest.mark.parametrize("dh_pub", ["", "not-a-key"])
+@pytest.mark.parametrize("source_device", ["remote", "somebody-else"])
+def test_an_empty_or_invalid_dh_pub_cannot_downgrade_a_confirmed_channel(
+    monkeypatch, tmp_path, source_device, dh_pub
+):
+    rig = netpair_rig(monkeypatch, tmp_path)
+    before = rig.service.netpair_keys_for_topic(rig.topic)
+    # The agreed key first, the code key after it only so the handshake can be
+    # read; losing the first entry is the downgrade this test refuses.
+    assert len(before) == 2
+
+    result = rig.service.handle_hello(
+        source_device, rig.config.device_id, "Remote", rig.topic, dh_pub=dh_pub
+    )
+
+    assert result["accepted"] is False
+    assert rig.service.netpair_keys_for_topic(rig.topic) == before
+    assert rig.config.netpair_peer_keys == {"remote": rig.pinned}
+    assert rig.config.netpair_secrets == {"remote": rig.secret}
+    assert rig.saves == []
+
+
+def test_a_confirmed_secret_cannot_move_to_a_different_source_device(monkeypatch, tmp_path):
+    rig = netpair_rig(monkeypatch, tmp_path)
+
+    result = rig.service.handle_hello(
+        "somebody-else",
+        rig.config.device_id,
+        "Remote",
+        rig.topic,
+        dh_pub=generate_keypair()[1],
+    )
+
+    assert result["accepted"] is False
+    assert set(rig.config.netpair_secrets) == {"remote"}
+    assert rig.config.netpair_secrets["remote"] == rig.secret
+    assert "somebody-else" not in rig.config.netpair_peer_keys
+    assert rig.service.topic_identity(rig.topic) == "remote"
+    assert rig.saves == []
+
+
+def test_a_duplicate_hello_repeating_the_pinned_key_is_accepted(monkeypatch, tmp_path):
+    """A repeated hello cannot move a channel, and is how a reply is re-sent.
+
+    The confirmation reply is a single best-effort publish, so a repeated
+    hello has to stay a no-op on state while a generator is still allowed to
+    answer it again.  Re-saving the unchanged state is the acceptable part.
+    """
+    rig = netpair_rig(monkeypatch, tmp_path)
+    before = rig.service.netpair_keys_for_topic(rig.topic)
+
+    enterer = rig.service.handle_hello(
+        "remote", rig.config.device_id, "Remote", rig.topic, dh_pub=rig.pinned
+    )
+    generator = rig.service.handle_hello(
+        "remote",
+        netpair_device_tag(rig.config.device_id),
+        "Remote",
+        rig.topic,
+        dh_pub=rig.pinned,
+    )
+
+    assert enterer == {
+        "accepted": True,
+        "role": "enterer",
+        "peer_id": "remote",
+        "secret": rig.secret,
+        "reply": False,
+    }
+    assert generator["accepted"] is True
+    assert generator["role"] == "generator" and generator["reply"] is True
+    assert rig.config.netpair_peer_keys == {"remote": rig.pinned}
+    assert rig.config.netpair_secrets == {"remote": rig.secret}
+    assert rig.service.netpair_keys_for_topic(rig.topic) == before
+    assert len(rig.saves) == 2
+
+
+def test_a_confirmed_pair_without_a_pin_adopts_a_valid_key(monkeypatch, tmp_path):
+    rig = netpair_rig(monkeypatch, tmp_path, pinned=False)
+    new_public = generate_keypair()[1]
+
+    result = rig.service.handle_hello(
+        "remote", rig.config.device_id, "Remote", rig.topic, dh_pub=new_public
+    )
+
+    assert result["accepted"] is True
+    assert rig.config.netpair_peer_keys == {"remote": new_public}
+
+
+def test_a_confirmed_hello_without_a_valid_key_is_rejected(monkeypatch, tmp_path):
+    """A confirmed channel does not fall back to the code key by omission.
+
+    The confirmation reply to a code this machine entered is the one exception
+    (an old build cannot send a key at all); every other hello on a confirmed
+    channel must carry a usable key or the pairing is left as it was.
+    """
+    rig = netpair_rig(monkeypatch, tmp_path, pinned=False)
+    before = rig.service.netpair_keys_for_topic(rig.topic)
+
+    result = rig.service.handle_hello(
+        "remote",
+        netpair_device_tag(rig.config.device_id),
+        "Remote",
+        rig.topic,
+        dh_pub="",
+    )
+
+    assert result["accepted"] is False
+    assert rig.config.netpair_peer_keys == {}
+    assert rig.config.netpair_secrets == {"remote": rig.secret}
+    assert rig.service.netpair_keys_for_topic(rig.topic) == before
+    assert rig.saves == []
+
+
+@pytest.mark.parametrize("dh_pub", ["", "not-a-key"])
+def test_a_generated_code_still_pairs_with_a_legacy_peer(monkeypatch, tmp_path, dh_pub):
+    """Peers that predate the key agreement send no usable ``dh_pub``."""
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    config.internet_sync_enabled = True
+    saves = []
+    service = InternetPairingService(config, lambda: saves.append(None))
+    code = service.generate()["code"]
+    _, secret = decode_netpair_code(code)
+    entering = "b1b2b3b4b5b6"
+
+    result = service.handle_hello(
+        entering,
+        netpair_device_tag(config.device_id),
+        "Enterer",
+        netpair_topic(secret),
+        dh_pub=dh_pub,
+    )
+
+    assert result == {
+        "accepted": True,
+        "role": "generator",
+        "peer_id": entering,
+        "secret": secret,
+        "reply": True,
+    }
+    assert config.netpair_secrets == {entering: secret}
+    assert config.netpair_peer_keys == {}
+    assert service.status()["generated_code"] is None
+
+
+def test_a_waited_entry_still_re_keys_with_a_legacy_peer(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    peer_id = "b1b2b3b4b5b6"
+    secret = generate_netpair_secret()
+    tag = netpair_device_tag(peer_id)
+    config.netpair_secrets = {tag: secret}
+    service = InternetPairingService(config, lambda: None)
+
+    result = service.handle_hello(
+        peer_id, config.device_id, "Generator", netpair_topic(secret), dh_pub=""
+    )
+
+    assert result == {
+        "accepted": True,
+        "role": "enterer",
+        "peer_id": peer_id,
+        "secret": secret,
+        "reply": False,
+    }
+    assert config.netpair_secrets == {peer_id: secret}
+    assert config.netpair_peer_keys == {}
+
+
+def test_a_legacy_confirmation_reply_still_completes_a_waited_pairing(
+    monkeypatch, tmp_path
+):
+    """The reply an old build sends after a code we entered carries no key.
+
+    The runtime re-keys the provisional tag to the sender's real id before the
+    hello reaches this service (``note_relay_source``), so by the time it is
+    handled the owner looks confirmed.  With no pinned key the empty ``dh_pub``
+    is the legacy reply rather than a downgrade: there is no agreed key for it
+    to strip.
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    generator = "a1a2a3a4a5a6"
+    secret = generate_netpair_secret()
+    tag = netpair_device_tag(generator)
+    config.netpair_secrets = {tag: secret}
+    service = InternetPairingService(config, lambda: None)
+
+    # What the runtime's inbound path does before handing over the hello.
+    moved = service.note_relay_source(generator)
+    result = service.handle_hello(
+        generator, config.device_id, "Generator", netpair_topic(secret), dh_pub=""
+    )
+
+    assert moved is True
+    assert result == {
+        "accepted": True,
+        "role": "enterer",
+        "peer_id": generator,
+        "secret": secret,
+        "reply": False,
+    }
+    assert config.netpair_secrets == {generator: secret}
+    assert config.netpair_peer_keys == {}
+
+
+def test_a_new_code_cannot_silently_replace_an_existing_devices_pinned_key(
+    monkeypatch, tmp_path
+):
+    """A provisional channel must not become a way to re-key a confirmed id."""
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    config.internet_sync_enabled = True
+    pinned = generate_keypair()[1]
+    config.netpair_peer_keys = {"remote": pinned}
+    service = InternetPairingService(config, lambda: None)
+    code = service.generate()["code"]
+    _, secret = decode_netpair_code(code)
+
+    result = service.handle_hello(
+        "remote",
+        netpair_device_tag(config.device_id),
+        "Remote",
+        netpair_topic(secret),
+        dh_pub=generate_keypair()[1],
+    )
+
+    assert result["accepted"] is False
+    assert config.netpair_peer_keys == {"remote": pinned}
+    assert config.netpair_secrets == {}
 
 
 # ------------------------------------------------- chat and files over the relay

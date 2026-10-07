@@ -243,7 +243,8 @@ describe('the api client sends the batch body', () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0].options.method).toBe('PATCH');
-    expect(seen[0].url).toContain('/api/favorites?token=token-1');
+    expect(seen[0].url).not.toContain('token=');
+    expect(seen[0].options.headers.Authorization).toBe('Bearer token-1');
     expect(JSON.parse(seen[0].options.body)).toEqual({ updates });
   });
 

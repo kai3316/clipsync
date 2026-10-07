@@ -428,7 +428,9 @@ def _cleanup_stale_temps():
 # had drifted apart: the same field was (1, 65535) on load and (1024, 65535) over
 # HTTP, and a restored ``web_history_limit`` of 100000 was accepted by the
 # restore and then silently clamped to 500 by the next load.  A bound written
-# twice is a bound that disagrees.
+# twice is a bound that disagrees.  The sidecar IPC surface now derives its
+# numeric bounds from ``FIELD_RANGES`` as well (see
+# ``adapters/sidecar/rpc.py``), so every reader of a bound reads this table.
 #
 # Rule shapes:
 #   (kind, lo, hi)  a numeric field, clamped into the inclusive range
@@ -537,6 +539,13 @@ FIELD_RULES: dict[str, tuple] = {
 FIELD_RANGES: dict[str, tuple[int, int]] = {
     name: (rule[1], rule[2]) for name, rule in FIELD_RULES.items() if len(rule) == 3
 }
+
+# The floor the network surfaces (the HTTP settings API and the sidecar IPC)
+# apply to ``port``.  The config loader's own floor stays 1: a low port already
+# in config.json is a working configuration and is left alone, while a client
+# asking this machine over HTTP/IPC to bind 80 is asking for a bind it will not
+# be allowed to make after a restart.
+PRIVILEGED_PORT_FLOOR = 1024
 
 # Sentinel returned by _validate_field when a value must be skipped.
 _SKIP_FIELD = object()
