@@ -14,6 +14,7 @@ from internal.adapters.sidecar.favorites import dispatch_favorites, valid_entry_
 from internal.application.bootstrap import SidecarApplication
 from internal.application.errors import ApplicationError
 from internal.application.use_cases.history import KINDS, SORTS
+from internal.config.config import FIELD_RANGES, PRIVILEGED_PORT_FLOOR
 from internal.transport.peer_id import id_forms
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,62 @@ def validate_params(params: dict, fields: dict[str, tuple], required: tuple = ()
         kinds = kind if isinstance(kind, tuple) else (kind,)
         if type(value) not in kinds or not constraint(value):
             raise ApplicationError("VALIDATION_ERROR", f"Invalid parameter: {key}")
+
+
+# The numeric bounds the sidecar settings surface accepts, derived from the
+# config schema that owns them (``config.FIELD_RULES`` -> ``FIELD_RANGES``).
+# They used to be written out here as well -- beside the identical tables in the
+# config loader, backup restore and the HTTP settings API -- and the copies had
+# already drifted (``max_reconnect_attempts`` was 100 here and 1000 in the
+# restore path; ``web_history_limit`` was 500 here and 100000 there).  A bound
+# written twice is a bound that disagrees.
+#
+# Only the fields the sidecar already accepts appear here; this is not a second
+# settings surface, just those bounds looked up instead of repeated.
+_NUMERIC_SETTINGS_TYPES: dict[str, object] = {
+    "history_max_entries": int,
+    "history_max_age_days": (int, float),
+    "port": int,
+    "web_history_limit": int,
+    "sync_debounce": (int, float),
+    "clipboard_poll_interval": (int, float),
+    "transfer_timeout": (int, float),
+    "max_reconnect_attempts": int,
+    "relay_max_message_bytes": int,
+    "relay_max_bytes_per_second": int,
+}
+
+
+def _numeric_settings_bounds() -> dict:
+    bounds = {}
+    for name, kinds in _NUMERIC_SETTINGS_TYPES.items():
+        low, high = FIELD_RANGES[name]
+        if name == "port":
+            # The network surfaces refuse the privileged ports; the config
+            # loader deliberately does not (a low port already in the file is a
+            # working configuration, not one to rewrite).
+            low = max(low, PRIVILEGED_PORT_FLOOR)
+        bounds[name] = (kinds, low, high)
+    return bounds
+
+
+# field -> (declared kinds, low, high).  Kept as data rather than buried in the
+# handler so the parity test can compare it with ``FIELD_RANGES`` and the HTTP
+# API's table without starting an application.
+NUMERIC_SETTINGS_BOUNDS: dict[str, tuple] = _numeric_settings_bounds()
+
+
+def _between(low, high):
+    """A `validate_params` constraint for the inclusive range *low*..*high*."""
+    return lambda v: low <= v <= high
+
+
+def _settings_numeric_rules() -> dict[str, tuple]:
+    """The numeric half of ``settings.update``, as `validate_params` rules."""
+    return {
+        name: (kinds, _between(low, high))
+        for name, (kinds, low, high) in NUMERIC_SETTINGS_BOUNDS.items()
+    }
 
 
 def _send_paths(value: list) -> bool:
@@ -431,15 +488,27 @@ class Dispatcher:
             # fields are the host's paths and name, and the name is what the
             # cache files it under -- the application layer checks it against
             # this application's own asset names before anything is copied.
+            # The optional signature is the minisign text the host read from the
+            # release manifest; it is cached beside the asset so this machine
+            # can serve the pair to a peer with no route to that manifest.
             validate_params(
                 params,
                 {
                     "path": (str, lambda v: 0 < len(v) <= 4096),
                     "name": (str, lambda v: len(v) <= 255),
+                    "signature": (str, lambda v: len(v) <= 8192),
                 },
                 ("path",),
             )
-            return self.app.update_cache_asset(params["path"], params.get("name", ""))
+            result = self.app.update_cache_asset(params["path"], params.get("name", ""))
+            signature = params.get("signature", "")
+            if result.get("ok") and signature:
+                from internal.system import updater
+
+                cached = str(result.get("cached") or "")
+                if cached:
+                    updater.cache_signature(cached, signature)
+            return result
         if method == "update.open_folder":
             validate_params(params, {})
             return self.app.update_open_folder()
@@ -508,22 +577,14 @@ class Dispatcher:
                 "encryption_enabled": (bool, lambda _: True),
                 "password": (str, lambda v: len(v) <= 1024),
                 "clear_password": (bool, lambda v: v is True),
-                "history_max_entries": (int, lambda v: 10 <= v <= 10000),
-                "history_max_age_days": ((int, float), lambda v: 0 <= v <= 36500),
                 # Advanced and network fields the legacy web panel exposes.
-                # Bounds mirror config._FIELD_RANGES and the HTTP API's
-                # _RANGE_LIMITS (port keeps the API's privileged-port cut).
-                # Most are read when the LAN runtime is built, so they apply
-                # on restart — the shell says so next to the control.
-                "port": (int, lambda v: 1024 <= v <= 65535),
+                # Their numeric bounds are derived from config.FIELD_RULES and
+                # merged in below (see NUMERIC_SETTINGS_BOUNDS); most are read
+                # when the LAN runtime is built, so they apply on restart —
+                # the shell says so next to the control.
                 "service_type": (str, lambda v: 0 < len(v) <= 128 and v == v.strip()
                                  and not any(c in v for c in "\0\r\n")),
-                "web_history_limit": (int, lambda v: 1 <= v <= 500),
-                "sync_debounce": ((int, float), lambda v: 0.05 <= v <= 10.0),
-                "clipboard_poll_interval": ((int, float), lambda v: 0.1 <= v <= 60.0),
                 "file_receive_dir": (str, lambda v: len(v) <= 4096),
-                "transfer_timeout": ((int, float), lambda v: 5 <= v <= 3600),
-                "max_reconnect_attempts": (int, lambda v: 0 <= v <= 100),
                 "log_level": (str, lambda v: v in ("DEBUG", "INFO", "WARNING", "ERROR")),
                 "low_memory_mode": (bool, lambda _: True),
                 "retry_capture_enabled": (bool, lambda _: True),
@@ -543,15 +604,11 @@ class Dispatcher:
                 "relay_private_brokers": (list, _broker_list),
                 "relay_username": (str, lambda v: len(v) <= 256),
                 "relay_password": (str, lambda v: len(v) <= 1024),
-                "relay_max_message_bytes": (
-                    int,
-                    lambda v: 32 * 1024 <= v <= 1024 * 1024,
-                ),
-                "relay_max_bytes_per_second": (
-                    int,
-                    lambda v: 4 * 1024 <= v <= 2 * 1024 * 1024,
-                ),
             }
+            # The numeric bounds come from the config schema rather than from
+            # this table (see NUMERIC_SETTINGS_BOUNDS), so a bound cannot be
+            # true here and false on load or over HTTP.
+            fields.update(_settings_numeric_rules())
             validate_params(params, fields)
             return self.app.update_settings(params)
         if method == "translate.text":

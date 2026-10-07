@@ -698,10 +698,56 @@ class TestTheSenderCarriesTheEntry:
         assert "entry" not in frame
         assert frame["kind"] == "file"
 
+    def test_an_update_send_carries_the_signature_when_one_is_known(self, tmp_path):
+        manager = FileTransferManager("self-dev", output_dir=str(tmp_path))
+        frame = self._frame(
+            manager, kind="update", sha256="d" * 64, signature="minisign-text"
+        )
+        assert frame["sha256"] == "d" * 64
+        assert frame["signature"] == "minisign-text"
+
+    def test_an_update_send_without_a_signature_omits_the_field(self, tmp_path):
+        manager = FileTransferManager("self-dev", output_dir=str(tmp_path))
+        frame = self._frame(manager, kind="update", sha256="d" * 64)
+        assert "signature" not in frame
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # Reading a stored file list
 # ═════════════════════════════════════════════════════════════════════════
+
+
+class TestTheReceiverKeepsTheUpdateSignature:
+    """The signature is the sender's declaration, so it is stored rather than
+    acted on here; the host verifies it against the release key before any
+    offline install can run."""
+
+    def _incoming(self, tmp_path, **fields):
+        manager = FileTransferManager("self-dev", output_dir=str(tmp_path))
+        manager.set_update_guard(lambda sender: sender == "peer-b")
+        payload = {
+            "transfer_id": "u-1",
+            "file_name": "ClipSync_9.9.9_x64-setup.exe",
+            "file_size": 4,
+            "kind": "update",
+            "sha256": "d" * 64,
+            **fields,
+        }
+        manager.handle_message("file_request", payload, lambda data: None, "peer-b")
+        return manager._transfers["u-1"]
+
+    def test_a_signature_on_an_update_request_is_kept_for_the_stage_step(self, tmp_path):
+        transfer = self._incoming(tmp_path, signature="minisign-text")
+        assert transfer["signature"] == "minisign-text"
+        assert transfer["sha256"] == "d" * 64
+
+    def test_an_update_request_without_a_signature_keeps_an_empty_one(self, tmp_path):
+        transfer = self._incoming(tmp_path)
+        assert transfer["signature"] == ""
+
+    def test_an_oversized_signature_is_not_kept(self, tmp_path):
+        transfer = self._incoming(tmp_path, signature="x" * 9000)
+        assert transfer["signature"] == ""
 
 
 def test_split_paths_is_the_stored_shape():

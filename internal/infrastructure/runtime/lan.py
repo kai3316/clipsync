@@ -1050,26 +1050,37 @@ class LanRuntime:
     def set_update_sink(self, sink) -> None:
         """Where a peer-sent update blob goes (the update service's stage step).
 
-        Called as ``sink(path, sha256="")``, where *sha256* is the digest the
-        sending device declared for the blob.  It matters because the receiver
-        may have no route to the release server -- that is what the peer's copy
-        is for -- and the sender's digest is then the only thing the bytes can
-        be checked against.  Empty for a peer too old to declare one.
+        Called as ``sink(path, sha256="", signature="")``, where *sha256* is the
+        digest the sending device declared for the blob and *signature* is the
+        release's minisign signature when the sender had one cached.  The digest
+        matters because the receiver may have no route to the release server --
+        that is what the peer's copy is for -- and the signature is what lets
+        the host verify the bytes offline instead of trusting the sender.
 
         Wrapped rather than assigned so the peer and the transfer travel into the
         service with the blob: without them a refusal cannot be reported back, and
         the device holding the stale file never learns it is being refused.
         """
 
-        def carry_origin(path, sha256="", peer_id="", transfer_id=""):
+        def carry_origin(path, sha256="", peer_id="", transfer_id="", signature=""):
             try:
-                return sink(path, sha256=sha256, peer_id=peer_id, transfer_id=transfer_id)
+                return sink(
+                    path,
+                    sha256=sha256,
+                    peer_id=peer_id,
+                    transfer_id=transfer_id,
+                    signature=signature,
+                )
             except TypeError:
-                # A sink written against the two arguments this method documents.  The service's
-                # own `finish_from_peer` takes the origin as well, so the fallback is for callers
-                # that kept to the documented shape -- a verdict then carries an empty transfer
-                # id, which the sender reads as "no reply expected" rather than as a failure.
-                return sink(path, sha256=sha256)
+                # A sink written before the signature (or before the origin) rode
+                # along: retry with the fields it did declare, then with the
+                # documented two-argument shape.  A sink that accepts the origin
+                # but not the signature must still receive the origin, because
+                # without it a refusal cannot be reported to the right device.
+                try:
+                    return sink(path, sha256=sha256, peer_id=peer_id, transfer_id=transfer_id)
+                except TypeError:
+                    return sink(path, sha256=sha256)
 
         self._update_sink = carry_origin
 
@@ -1703,12 +1714,20 @@ class LanRuntime:
         # asking a peer.  Without it the receiver has nothing to check the bytes
         # against, and an unchecked installer is one it must refuse.
         digest = self._cached_digest(cached)
+        # The release's own signature travels beside the bytes when this machine
+        # kept one -- the host caches it while downloading through the plugin.
+        # It is what lets a receiver with no route to the manifest verify the
+        # bytes offline instead of having to fall back to a manual install.
+        # Empty is served as-is (the old sender shape), and the receiver keeps
+        # the manual gate for it.
+        signature = updater.get_cached_signature(os.path.basename(cached))
         try:
             transfer_id = self.file_transfer.send_file(
                 cached,
                 lambda data: self.transport.send_to_peer(pid, data),
                 kind="update",
                 sha256=digest,
+                signature=signature,
             )
         except Exception:
             logger.exception("Failed to serve the cached update to a peer")
@@ -2363,7 +2382,7 @@ class LanRuntime:
         )
 
     def _on_file_received(self, transfer_id, saved_path, _file_name):
-        kind, sender, sha256 = self.file_transfer.take_received_info(transfer_id)
+        kind, sender, sha256, signature = self.file_transfer.take_received_info(transfer_id)
         if kind == "log":
             # A log this machine asked a peer for.  It is filed rather than
             # handed to the received-files flow, and filing it means a move on
@@ -2395,16 +2414,17 @@ class LanRuntime:
                 if served:
                     self._auto_update_served[pid] = served
         logger.info(
-            "Received update blob %s from %s (digest %s)",
+            "Received update blob %s from %s (digest %s, signature %s)",
             os.path.basename(saved_path),
             str(sender or "")[:12],
             (sha256 or "")[:12] or "none",
+            "present" if signature else "none",
         )
         # Verification looks up the published digest (up to ~30s), so it must
         # not run on the transfer receive thread that called this.
         threading.Thread(
             target=self._deliver_update_blob,
-            args=(sink, saved_path, sha256),
+            args=(sink, saved_path, sha256, pid or sender, transfer_id, signature),
             name="update-blob",
             daemon=True,
         ).start()
@@ -2435,9 +2455,17 @@ class LanRuntime:
         )
 
     @staticmethod
-    def _deliver_update_blob(sink, saved_path, sha256: str = "", peer_id="", transfer_id=""):
+    def _deliver_update_blob(
+        sink, saved_path, sha256: str = "", peer_id="", transfer_id="", signature=""
+    ):
         try:
-            sink(saved_path, sha256=sha256, peer_id=peer_id, transfer_id=transfer_id)
+            sink(
+                saved_path,
+                sha256=sha256,
+                peer_id=peer_id,
+                transfer_id=transfer_id,
+                signature=signature,
+            )
         except Exception:
             logger.exception("Could not stage a peer-sent update blob")
 

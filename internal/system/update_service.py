@@ -16,6 +16,7 @@ that need them: a platform with no silent installer, an install that failed and
 left the card showing a ready archive, and a download the user started by hand.
 """
 
+import contextlib
 import logging
 import os
 import shutil
@@ -242,6 +243,7 @@ class UpdateService:
             error="",
             source="github",
             verified="",
+            signature="",
         )
         threading.Thread(
             target=self._download_worker, name="update-download", daemon=True
@@ -278,7 +280,12 @@ class UpdateService:
         self._finish(path, reason, "github")
 
     def finish_from_peer(
-        self, path: str, sha256: str = "", peer_id: str = "", transfer_id: str = ""
+        self,
+        path: str,
+        sha256: str = "",
+        peer_id: str = "",
+        transfer_id: str = "",
+        signature: str = "",
     ) -> None:
         """A peer sent us its cached update asset (M2 P2P update).
 
@@ -286,6 +293,11 @@ class UpdateService:
         is what the bytes are checked against when the release endpoint cannot
         be reached -- see :func:`updater.verify_update_blob`.  Empty for a peer
         too old to declare one.
+
+        *signature* is the release's minisign signature, if the sending device
+        had it cached.  Nothing here trusts it: it is kept beside the staged
+        archive and in the state so the host can verify it offline against the
+        embedded public key before anything runs.
 
         Runs on the caller's thread: the release lookup inside :meth:`_finish`
         can block, so the runtime hands this off the transfer receive thread.
@@ -297,6 +309,7 @@ class UpdateService:
             peer_digest=sha256,
             peer_id=peer_id,
             transfer_id=transfer_id,
+            signature=signature,
         )
 
     def _finish(
@@ -307,6 +320,7 @@ class UpdateService:
         peer_digest: str = "",
         peer_id: str = "",
         transfer_id: str = "",
+        signature: str = "",
     ) -> None:
         """Verify, cache and stage an arrived asset, or surface the failure."""
         with self._lock:
@@ -371,6 +385,22 @@ class UpdateService:
             return
         with self._lock:
             self._installing = False
+        # The signature travels beside the archive as well as in the state: a
+        # person can hand the pair on, and the host's offline check reads the
+        # state.  A peer that sent none leaves any stale file removed so it
+        # cannot be paired with different bytes later.
+        signature = str(signature or "").strip()
+        signature_path = f"{dest}.sig"
+        try:
+            if signature:
+                with open(signature_path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(signature)
+                updater.cache_signature(os.path.basename(dest), signature)
+            else:
+                with contextlib.suppress(OSError):
+                    os.remove(signature_path)
+        except OSError:
+            logger.warning("Could not keep the transferred update signature", exc_info=True)
         # The sending device is told the archive was taken.  Reported here rather than at the
         # end of the method so "ok" means the file is on disk and staged, which is what the
         # sender needs to know to stop offering it.
@@ -385,6 +415,7 @@ class UpdateService:
             # "release" is the published asset, "peer_verified" is the sending
             # device's own word and worth saying out loud.
             verified="release" if verdict == "ok" else verdict,
+            signature=signature,
         )
 
     def _report_verdict(
@@ -412,12 +443,16 @@ class UpdateService:
         release: it is a file a person could double-click, and the answer to
         "why not" is the one thing about it worth keeping.
         """
-        try:
-            os.remove(path)
-        except OSError:
-            logger.debug("Could not remove rejected update blob", exc_info=True)
+        for candidate in (path, f"{path}.sig"):
+            try:
+                os.remove(candidate)
+            except OSError:
+                logger.debug("Could not remove rejected update file", exc_info=True)
         self._set_state(
-            phase="failed", error=T(_rejection_key(verdict)), source=source
+            phase="failed",
+            error=T(_rejection_key(verdict)),
+            source=source,
+            signature="",
         )
 
     # ── reveal ───────────────────────────────────────────────────────────

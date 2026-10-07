@@ -7,8 +7,10 @@ mod i18n;
 mod protocol;
 mod tray;
 
+use base64::Engine as _;
 use bridge::Bridge;
 use error::BridgeError;
+use minisign_verify::{PublicKey, Signature};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,10 +75,18 @@ impl Host {
     }
 
     /// Drop the cached failure and start over, for the user's manual retry.
+    ///
+    /// A retry while a bridge is already live has to stop the old one first:
+    /// clearing the slot alone loses the only handle to that process, and the
+    /// replacement launch then shares the data directory with a sidecar nobody
+    /// can reach to stop.
     async fn restart_bridge(&self) -> Result<(), BridgeError> {
-        {
+        let previous = {
             let mut slot = self.bridge.lock().await;
-            *slot = Slot::Idle;
+            std::mem::replace(&mut *slot, Slot::Idle)
+        };
+        if let Slot::Live(bridge) = previous {
+            bridge.stop().await;
         }
         self.bridge().await.map(|_| ())
     }
@@ -1918,12 +1928,21 @@ async fn update_open_folder(
 /// (the frame cap
 /// is a megabyte), so they are written to a file of the asset's own name and the
 /// *name* travels with the path.
-async fn keep_downloaded_installer(bridge: &Arc<Bridge>, url: &tauri::Url, bytes: &[u8]) {
+async fn keep_downloaded_installer(
+    bridge: &Arc<Bridge>,
+    url: &tauri::Url,
+    signature: &str,
+    bytes: &[u8],
+) {
     // The asset's filename, which is the last segment of its download URL.  It
-    // is the only name this file has: the plugin streams into memory, and a
-    // macOS payload (`ClipSync.app.tar.gz`) is deliberately not an asset the
-    // sidecar keeps, so a refusal there is the expected answer rather than a
-    // fault.
+    // is the only name this file has: the plugin streams into memory, so the
+    // name is what lets the sidecar file the bytes under the release's own
+    // name.  The sidecar keeps the macOS updater payload
+    // (`ClipSync.app.tar.gz`) too since 1.0.55, so a refusal here is no longer
+    // the expected macOS answer -- it means the name did not match this shell's
+    // own asset patterns.  The manifest signature travels beside the bytes: the
+    // sidecar caches it so a peer with no route to the manifest can be served
+    // the pair and verify it offline.
     let Some(name) = url
         .path_segments()
         .and_then(|segments| segments.last())
@@ -1941,7 +1960,11 @@ async fn keep_downloaded_installer(bridge: &Arc<Bridge>, url: &tauri::Url, bytes
         let _ = bridge
             .call(
                 "update.cache_asset",
-                json!({"path": path.to_string_lossy(), "name": name}),
+                json!({
+                    "path": path.to_string_lossy(),
+                    "name": name,
+                    "signature": signature,
+                }),
             )
             .await;
     }
@@ -1991,27 +2014,29 @@ async fn update_install(
 /// Install the update the sidecar has verified and staged on this disk.
 ///
 /// The second route to an install, and the one the peer exchange needs.  The
-/// file is one this process neither fetched nor can fetch: the sidecar staged it
-/// from its own download, or from a blob a peer sent, which was checked against
-/// the published release digest before it was staged.  That is the whole point
-/// of the peer path — it runs on a machine whose release endpoint may be out of
-/// reach — so finishing it must not need one either.
+/// file is one this process neither fetched nor can: the sidecar staged it from
+/// its own download or from a blob a peer sent.  What makes either one
+/// installable here is a minisign signature over *these* bytes from the release
+/// signing key -- the manifest's while that manifest is reachable, or the one
+/// the peer transfer carried when it is not.  A peer's own sha256
+/// (`verified == "peer_verified"`) settles integrity, not origin, so by itself
+/// it never reaches `run_staged_installer`.
 ///
-/// The plugin is still asked first, because it is the better answer whenever it
-/// has one: it fetches this platform's *update payload* and verifies the
-/// manifest's signature, and the staged archive is not always that payload — a
-/// `.dmg` is not the `.app.tar.gz` the plugin unpacks over a macOS bundle, and
-/// the sidecar keeps only what a person would install.  Its three answers are
-/// told apart the way `update_check` tells them apart:
+/// The online check is also what keeps the platform's own artifact shape: its
+/// download URL and signature are for this target, so a blob for another system
+/// cannot verify.  Its three answers:
 ///
-/// * `Ok(Some(_))` — there is a payload for this platform: fetch and install it,
-///   which is `update_install`'s own path.
-/// * `Ok(None)` — this build is already at the released version, and the staged
-///   archive is pinned by digest to a published release, so it cannot be newer
-///   than what is running.  Nothing to do, and said rather than run.
-/// * `Err(_)` — the manifest could not be read.  This is the case the peer path
-///   exists for: the staged file is the only installer in reach, so it is the
-///   one that runs (see `run_staged_installer`).
+/// * `Ok(Some(update))` -- the staged bytes are checked against this update's
+///   signature; only a match is installed (the NSIS installer from a private
+///   copy on Windows, the payload through the plugin elsewhere).
+/// * `Ok(None)` -- this build is already at the released version.  A staged
+///   archive that names the running version is `up_to_date`; anything else is
+///   revealed for the reader rather than run.
+/// * `Err(_)` -- the manifest could not be read (offline, rate-limited).  That
+///   is exactly the condition a peer-sent blob exists for: a `peer_verified`
+///   blob whose transferred signature verifies against the embedded key and
+///   whose signed version is newer may install.  Anything else -- no signature,
+///   a failing one, an older version -- is revealed, never run.
 #[tauri::command]
 async fn update_install_ready(
     app: tauri::AppHandle,
@@ -2023,7 +2048,220 @@ async fn update_install_ready(
     install_staged_update(&app, &bridge).await
 }
 
+/// Write verified installer bytes to a private per-process temp path.
+///
+/// The staged path itself is never executed: a second transfer could replace
+/// it between the signature check and the spawn, and the copy holds exactly
+/// the bytes that were checked.
+#[cfg(target_os = "windows")]
+fn private_installer_copy(bytes: &[u8]) -> Result<std::path::PathBuf, BridgeError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!(
+        "clipsync-verified-{}-{}",
+        std::process::id(),
+        stamp
+    ));
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| BridgeError::new("UPDATE_ERROR", &err.to_string()))?;
+    let path = dir.join("ClipSync_verified_x64-setup.exe");
+    std::fs::write(&path, bytes)
+        .map_err(|err| BridgeError::new("UPDATE_ERROR", &err.to_string()))?;
+    Ok(path)
+}
+
+/// The updater plugin's signing key, as configured in `tauri.conf.json`.
+///
+/// `tauri_plugin_updater::Config` is public, but the plugin keeps its parsed
+/// copy in private state; the same JSON is still in the app config under
+/// `plugins.updater`, so it is deserialized from there rather than duplicated
+/// here. `None` means this build has no verifiable key, which is a refusal, not
+/// a fallback to trusting the file.
+fn updater_pubkey(app: &tauri::AppHandle) -> Option<String> {
+    let value = app.config().plugins.0.get("updater")?.clone();
+    let config: tauri_plugin_updater::Config = serde_json::from_value(value).ok()?;
+    (!config.pubkey.is_empty()).then_some(config.pubkey)
+}
+
+/// Decode the two base64-wrapped minisign texts, check *bytes* against the
+/// release key, and return the signed file name and the version it carries.
+///
+/// The trusted comment is covered by minisign's global signature, so the
+/// `file:` name -- and the version read out of it -- is as protected as the
+/// payload.  That is what lets an offline host say "this is a newer release"
+/// without a manifest.
+fn verify_signed_release(
+    bytes: &[u8],
+    release_signature: &str,
+    pubkey_b64: &str,
+) -> Option<(String, String)> {
+    fn decoded(value: &str) -> Option<String> {
+        base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .ok()
+            .and_then(|raw| String::from_utf8(raw).ok())
+    }
+    let public_key_text = decoded(pubkey_b64)?;
+    let signature_text = decoded(release_signature)?;
+    let public_key = PublicKey::decode(&public_key_text).ok()?;
+    let signature = Signature::decode(&signature_text).ok()?;
+    public_key.verify(bytes, &signature, true).ok()?;
+    let file_name = signed_file_name(signature.trusted_comment())?;
+    let version = version_in_name(&file_name)?;
+    Some((file_name, version))
+}
+
+/// The basename minisign's signed trusted comment names (`...\tfile:<name>`).
+fn signed_file_name(trusted_comment: &str) -> Option<String> {
+    let after = trusted_comment.split("file:").nth(1)?;
+    let raw = after.split_whitespace().next().unwrap_or(after).trim();
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
+    (!base.is_empty()).then(|| base.to_string())
+}
+
+/// The first dotted version run in *name*, the way the sidecar reads its asset
+/// names (`ClipSync_1.0.55_x64-setup.exe`).
+fn version_in_name(name: &str) -> Option<String> {
+    let bytes = name.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut has_dot = false;
+        while index < bytes.len() && (bytes[index].is_ascii_digit() || bytes[index] == b'.') {
+            has_dot |= bytes[index] == b'.';
+            index += 1;
+        }
+        let candidate = name[start..index].trim_end_matches('.');
+        if has_dot && !candidate.is_empty() {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// The version an offline peer blob may install as, with its signed file name.
+///
+/// Some only when the transferred signature verifies against the embedded key
+/// *and* the version inside the signed name is newer than what is running.  The
+/// version comes from the signature's trusted comment, never from the staged
+/// filename, which the sender chose.
+fn offline_signed_update(
+    bytes: &[u8],
+    release_signature: &str,
+    pubkey_b64: &str,
+    current: &semver::Version,
+) -> Option<(String, String)> {
+    let (file_name, version) = verify_signed_release(bytes, release_signature, pubkey_b64)?;
+    let claimed = semver::Version::parse(&version).ok()?;
+    (&claimed > current).then_some((file_name, version))
+}
+
+/// The answer for a staged file this build will not install on its own: leave
+/// it where the card can point at it and let the reader decide.
+async fn reveal_staged_update(bridge: &Arc<Bridge>) -> Result<Value, BridgeError> {
+    bridge.call("update.open_folder", json!({})).await?;
+    Ok(json!({"ok": true, "installed": false, "reason": "manual"}))
+}
+
+/// Install bytes that have passed a release-signature check.
+///
+/// Windows runs a private copy instead of the staged path: the signature is
+/// checked on the bytes in memory, and a peer that can stage another update
+/// with the same name must not be able to swap the file between that check and
+/// the spawn.  macOS and Linux use the plugin's own `install` while the online
+/// manifest named the payload; offline (`online == None`) they install from
+/// these bytes themselves, because the plugin exposes no install-from-bytes.
+/// Only a signature-verified payload reaches that branch -- see
+/// `offline_signed_update` -- and a payload this build cannot install is
+/// revealed for the reader instead of being run.
+async fn install_verified_update(
+    app: &tauri::AppHandle,
+    bridge: &Arc<Bridge>,
+    bytes: &[u8],
+    signed_name: &str,
+    version: &str,
+    online: Option<tauri_plugin_updater::Update>,
+) -> Result<Value, BridgeError> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = online;
+        run_verified_installer(app, bridge, bytes, signed_name, version).await
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let Some(update) = online else {
+            // Offline peer update: the caller has already checked the
+            // transferred minisign signature and the version inside its trusted
+            // comment, so these are the bytes to install.  There is no
+            // unsigned/old-sender path -- the signature check is the only way
+            // in -- and a payload this build cannot install is revealed, never
+            // executed.
+            return match offline_update::install_offline_from_bytes(bytes, signed_name) {
+                Ok(()) => {
+                    bridge.stop().await;
+                    emit_update_state(app, json!({"phase": "installing", "version": version}));
+                    app.restart();
+                }
+                Err(err) => {
+                    emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
+                    reveal_staged_update(bridge).await
+                }
+            };
+        };
+        bridge.stop().await;
+        emit_update_state(app, json!({"phase": "installing", "version": version}));
+        if let Err(err) = update.install(bytes) {
+            emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
+            return Err(err.into());
+        }
+        // macOS/Linux only swap files here; bringing the new build up is ours.
+        app.restart();
+    }
+}
+
+/// Run the release installer from a private copy of the verified bytes.
+#[cfg(target_os = "windows")]
+async fn run_verified_installer(
+    app: &tauri::AppHandle,
+    bridge: &Arc<Bridge>,
+    bytes: &[u8],
+    signed_name: &str,
+    version: &str,
+) -> Result<Value, BridgeError> {
+    if !is_runnable_installer(signed_name) {
+        return reveal_staged_update(bridge).await;
+    }
+    // The private copy holds exactly the bytes that were checked (see
+    // `private_installer_copy`), so a second staged transfer cannot swap the
+    // file out from under the installer.
+    let Ok(path) = private_installer_copy(bytes) else {
+        return reveal_staged_update(bridge).await;
+    };
+    let result = run_staged_installer(app, bridge, &path.to_string_lossy(), version).await;
+    if result.is_err() {
+        if let Some(directory) = path.parent() {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+    result
+}
+
 /// [`update_install_ready`]'s body, reachable from the event reader as well.
+///
+/// A staged archive is installed from the bytes already on this disk only after
+/// it is tied to the release signing key.  With the manifest in reach that tie
+/// is `update.signature`; with the manifest unreachable it is the signature the
+/// peer transfer carried (`state.signature`), and only a `peer_verified` blob
+/// whose signed version is newer than this build may use it.  Everything else
+/// -- no signature, a failing one, an older version, an old sender -- is only
+/// revealed, never run.
 ///
 /// `pub(crate)` for the same reason [`updater`] is: the bridge runs this on its
 /// own when a peer's update arrives, and that frame comes down the sidecar's
@@ -2044,42 +2282,79 @@ pub(crate) async fn install_staged_update(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    let verified = state
+        .get("verified")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let peer_signature = state
+        .get("signature")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     // The sidecar's own answer to "may this be installed", read rather than
-    // inferred: that side is the one that checked the bytes, and a path that has
-    // gone since it said so is the same refusal.
+    // inferred: that side is the one that checked the bytes, and a path that
+    // has gone since it said so is the same refusal.
     if state.get("phase").and_then(Value::as_str) != Some("ready")
         || path.is_empty()
         || !std::path::Path::new(&path).is_file()
     {
-        return Err(BridgeError::new("NOT_FOUND", "No verified update is staged"));
+        return Err(BridgeError::new(
+            "NOT_FOUND",
+            "No verified update is staged",
+        ));
     }
-    // The staged archive comes first, when it is one this process can run.  It
-    // is the file the sidecar downloaded itself and checked against the
-    // published release digest, so running it is one fetch rather than two --
-    // and with the automatic check fetching releases on its own, going through
-    // the plugin instead would make the second fetch the usual case rather than
-    // the rare one.  It is also the only route that works when the release
-    // endpoint is unreachable, which is what the staged archive exists for.
-    if is_runnable_installer(&path) {
-        return run_staged_installer(app, bridge, &path, &version).await;
-    }
-    // The plugin otherwise, and it is not redundant: it is the only route on a
-    // platform whose release asset is a `.dmg` or a `.deb` -- a file a person
-    // opens rather than one a process runs -- and the sidecar keeps no copy of
-    // those for exactly that reason.
-    if let Ok(updater) = updater(app) {
-        match updater.check().await {
-            Ok(Some(update)) => return fetch_and_install(app, bridge, update).await,
-            Ok(None) => {
-                return Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"}))
+    let Some(pubkey) = updater_pubkey(app) else {
+        return reveal_staged_update(bridge).await;
+    };
+    match updater(app)?.check().await {
+        Ok(Some(update)) => {
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                return reveal_staged_update(bridge).await;
+            };
+            let Some((signed_name, _signed_version)) =
+                verify_signed_release(&bytes, &update.signature, &pubkey)
+            else {
+                return reveal_staged_update(bridge).await;
+            };
+            let display_version = update.version.clone();
+            install_verified_update(
+                app,
+                bridge,
+                &bytes,
+                &signed_name,
+                &display_version,
+                Some(update),
+            )
+            .await
+        }
+        Ok(None) => {
+            if version == app.package_info().version.to_string() {
+                Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"}))
+            } else {
+                reveal_staged_update(bridge).await
             }
-            // Not a failure to report, and not one to publish either: the
-            // staged archive is the answer to it, and it is the answer this
-            // command was written for.
-            Err(_) => {}
+        }
+        // Offline: the manifest is unreachable, which is exactly the case a
+        // peer-sent blob exists for.  Only a peer_verified blob that carries a
+        // signature verifying against the embedded key, and whose signed
+        // version is newer than this build, may install; all else is manual.
+        Err(_) => {
+            if verified != "peer_verified" || peer_signature.is_empty() {
+                return reveal_staged_update(bridge).await;
+            }
+            let Ok(bytes) = tokio::fs::read(&path).await else {
+                return reveal_staged_update(bridge).await;
+            };
+            let current = app.package_info().version.clone();
+            let Some((signed_name, signed_version)) =
+                offline_signed_update(&bytes, &peer_signature, &pubkey, &current)
+            else {
+                return reveal_staged_update(bridge).await;
+            };
+            install_verified_update(app, bridge, &bytes, &signed_name, &signed_version, None).await
         }
     }
-    run_staged_installer(app, bridge, &path, &version).await
 }
 
 /// Whether a staged archive is one this process may run for the reader.
@@ -2088,10 +2363,12 @@ pub(crate) async fn install_staged_update(
 /// it and the plugin can be made before either runs.  Only the release's own
 /// NSIS installer is that kind of file — the sidecar's asset matcher picked it,
 /// and this is what re-checks that it still is one.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_runnable_installer(path: &str) -> bool {
     cfg!(target_os = "windows") && path.to_ascii_lowercase().ends_with("-setup.exe")
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 /// Run the installer the sidecar staged, on the one platform where that is a
 /// thing this process may do on the reader's behalf.
 ///
@@ -2220,10 +2497,12 @@ async fn fetch_and_install(
         }
     };
 
-    // Keep the installer for the next device that needs it, before the sidecar
-    // goes: this is the only moment the file exists, and the only process that
-    // can read it is the one that is about to be replaced.
-    keep_downloaded_installer(bridge, &asset_url, &bytes).await;
+    // Keep the installer and its manifest signature for the next device that
+    // needs them, before the sidecar goes: this is the only moment the file
+    // exists, and the only process that can read it is the one that is about to
+    // be replaced.
+    let asset_signature = update.signature.clone();
+    keep_downloaded_installer(bridge, &asset_url, &asset_signature, &bytes).await;
 
     // The bytes are in hand and verified, so the sidecar's work is done and its
     // lock has to go before the installer takes over — the same order
@@ -2679,6 +2958,435 @@ fn main() {
     });
 }
 
+/// Install a signature-verified update from bytes on the platforms whose
+/// updater plugin has no public install-from-bytes.
+///
+/// The online path (`install_verified_update` with `Some(update)`) keeps using
+/// the plugin's own `install`; this module is reached only with `None`, after
+/// `offline_signed_update` has checked the transferred minisign signature and
+/// the version inside its trusted comment.  There is deliberately no unsigned
+/// fallback: an old sender's file is revealed, never run.
+///
+/// The archive handling itself is target-split on purpose.  `tar` is a
+/// unix-only dependency (see `Cargo.toml`), because that is where the plugin
+/// already needs it and Windows has no .app/AppImage payload to unpack; the
+/// classification, bundle lookup and path-safety checks below are plain
+/// functions so the Windows tests can still exercise them.
+mod offline_update {
+    #![allow(dead_code)]
+
+    use std::path::{Component, Path, PathBuf};
+
+    use super::BridgeError;
+
+    const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+    const DEB_MAGIC: &[u8] = b"!<arch>\n";
+    const RPM_MAGIC: [u8; 4] = [0xed, 0xab, 0xee, 0xdb];
+    const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum InstallerKind {
+        MacAppTarGz,
+        Deb,
+        Rpm,
+        AppImage,
+        Unknown,
+    }
+
+    fn offline_error(error: impl std::fmt::Display) -> BridgeError {
+        BridgeError::new("UPDATE_ERROR", &error.to_string())
+    }
+
+    /// What the signed payload is, from its name and its first bytes.
+    pub(super) fn classify_installer(bytes: &[u8], signed_name: &str) -> InstallerKind {
+        let name = signed_name.to_ascii_lowercase();
+        if name.ends_with(".app.tar.gz") {
+            return InstallerKind::MacAppTarGz;
+        }
+        if bytes.starts_with(DEB_MAGIC) {
+            return InstallerKind::Deb;
+        }
+        if bytes.starts_with(&RPM_MAGIC) {
+            return InstallerKind::Rpm;
+        }
+        if name.ends_with(".deb") {
+            return InstallerKind::Deb;
+        }
+        if name.ends_with(".rpm") {
+            return InstallerKind::Rpm;
+        }
+        if is_gzip(bytes) || looks_like_elf(bytes) {
+            return InstallerKind::AppImage;
+        }
+        InstallerKind::Unknown
+    }
+
+    pub(super) fn is_gzip(bytes: &[u8]) -> bool {
+        bytes.starts_with(&GZIP_MAGIC)
+    }
+
+    pub(super) fn looks_like_elf(bytes: &[u8]) -> bool {
+        bytes.starts_with(&ELF_MAGIC)
+    }
+
+    /// A tar entry path that cannot write outside its extraction root.
+    ///
+    /// `tar::Entry::unpack_in` guards this as well; the check is here so the
+    /// refusal is this side's decision and can be tested without an archive.
+    pub(super) fn tar_path_is_safe(path: &Path) -> bool {
+        path.components()
+            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+    }
+
+    /// The running `.app` bundle, found by walking up from the executable.
+    pub(super) fn app_bundle_for_exe(exe: &Path) -> Option<PathBuf> {
+        exe.ancestors()
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("app"))
+            .map(Path::to_path_buf)
+    }
+
+    /// The top-level `*.app` bundle under an extraction root.
+    pub(super) fn find_app_bundle(root: &Path) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(root).ok()?.flatten() {
+            let path = entry.path();
+            let is_bundle = path.is_dir()
+                && path.extension().and_then(|ext| ext.to_str()) == Some("app")
+                && path.join("Contents").is_dir();
+            if is_bundle {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Unpack a gzip'd `.app.tar.gz` into a private directory and return that
+    /// directory (kept alive) with the top-level `*.app` bundle inside it.
+    #[cfg(unix)]
+    pub(super) fn extract_app_bundle(
+        bytes: &[u8],
+    ) -> Result<(tempfile::TempDir, PathBuf), BridgeError> {
+        let directory = tempfile::Builder::new()
+            .prefix("clipsync-update-")
+            .tempdir()
+            .map_err(offline_error)?;
+        let root = directory.path().to_path_buf();
+        let decoder = flate2::read::GzDecoder::new(bytes);
+        let mut archive = tar::Archive::new(decoder);
+        for entry in archive.entries().map_err(offline_error)? {
+            let mut entry = entry.map_err(offline_error)?;
+            let path = entry.path().map_err(offline_error)?.into_owned();
+            if !tar_path_is_safe(&path) || !entry.unpack_in(&root).map_err(offline_error)? {
+                return Err(offline_error(format!(
+                    "archive entry {path:?} would escape the extraction root"
+                )));
+            }
+        }
+        let bundle = find_app_bundle(&root)
+            .ok_or_else(|| offline_error("the archive holds no .app bundle"))?;
+        Ok((directory, bundle))
+    }
+
+    /// The bytes of an AppImage: the archive member of a gzip'd tar, or the
+    /// bytes themselves when they are already an ELF.
+    #[cfg(unix)]
+    pub(super) fn appimage_bytes(bytes: &[u8]) -> Result<Vec<u8>, BridgeError> {
+        use std::io::Read;
+
+        if is_gzip(bytes) {
+            let decoder = flate2::read::GzDecoder::new(bytes);
+            let mut archive = tar::Archive::new(decoder);
+            for entry in archive.entries().map_err(offline_error)? {
+                let mut entry = entry.map_err(offline_error)?;
+                let path = entry.path().map_err(offline_error)?.into_owned();
+                if !tar_path_is_safe(&path) {
+                    return Err(offline_error(format!(
+                        "archive entry {path:?} would escape the extraction root"
+                    )));
+                }
+                let is_image = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".AppImage"));
+                if !is_image {
+                    continue;
+                }
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).map_err(offline_error)?;
+                if !looks_like_elf(&data) {
+                    return Err(offline_error("the archive's .AppImage member is not an ELF"));
+                }
+                return Ok(data);
+            }
+            return Err(offline_error("the archive holds no .AppImage member"));
+        }
+        if looks_like_elf(bytes) {
+            return Ok(bytes.to_vec());
+        }
+        Err(offline_error("the payload is not an AppImage"))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn install_macos_from_bytes(
+        bytes: &[u8],
+        signed_name: &str,
+    ) -> Result<(), BridgeError> {
+        if !signed_name.to_ascii_lowercase().ends_with(".app.tar.gz") {
+            return Err(offline_error("the signed update is not a macOS .app.tar.gz"));
+        }
+        let (directory, new_bundle) = extract_app_bundle(bytes)?;
+        let current = current_app_bundle()?;
+        let result = replace_app_bundle(&current, &new_bundle);
+        drop(directory);
+        result
+    }
+
+    #[cfg(target_os = "macos")]
+    fn current_app_bundle() -> Result<PathBuf, BridgeError> {
+        let exe = std::env::current_exe().map_err(offline_error)?;
+        app_bundle_for_exe(&exe)
+            .ok_or_else(|| offline_error("could not locate the running .app bundle"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn replace_app_bundle(current: &Path, new_bundle: &Path) -> Result<(), BridgeError> {
+        let parent = current
+            .parent()
+            .ok_or_else(|| offline_error("the .app bundle has no parent directory"))?;
+        let backup = unique_sibling(parent, current, "backup");
+        match std::fs::rename(current, &backup) {
+            Ok(()) => match std::fs::rename(new_bundle, current) {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&backup);
+                    Ok(())
+                }
+                Err(err) => {
+                    // Put the old bundle back, so a failed install is not a
+                    // missing application.
+                    let _ = std::fs::rename(&backup, current);
+                    Err(offline_error(err))
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                privileged_app_replace(current, &backup, new_bundle)
+            }
+            Err(err) => Err(offline_error(err)),
+        }
+    }
+
+    /// The `/Applications` swap as one privileged command: `mv current backup
+    /// && mv new current`.  A failure leaves the backup in place for the
+    /// rollback below; success cleans it up best-effort.
+    #[cfg(target_os = "macos")]
+    fn privileged_app_replace(
+        current: &Path,
+        backup: &Path,
+        new_bundle: &Path,
+    ) -> Result<(), BridgeError> {
+        let current = path_text(current)?;
+        let backup = path_text(backup)?;
+        let new_bundle = path_text(new_bundle)?;
+        let swap = format!(
+            "mv {} {} && mv {} {}",
+            shell_quote(&current),
+            shell_quote(&backup),
+            shell_quote(&new_bundle),
+            shell_quote(&current),
+        );
+        let status = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(applescript_script(&swap))
+            .status()
+            .map_err(offline_error)?;
+        if status.success() {
+            let cleanup = format!("rm -rf {}", shell_quote(&backup));
+            let _ = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(applescript_script(&cleanup))
+                .status();
+            return Ok(());
+        }
+        // If the swap's first half had already moved the bundle, put it back
+        // before reporting the failure.
+        if Path::new(&backup).exists() {
+            let rollback = format!("mv {} {}", shell_quote(&backup), shell_quote(&current));
+            let _ = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(applescript_script(&rollback))
+                .status();
+        }
+        Err(offline_error(format!("the privileged swap exited with {status}")))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn applescript_script(shell_command: &str) -> String {
+        let escaped = shell_command.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("do shell script \"{escaped}\" with administrator privileges")
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn shell_quote(text: &str) -> String {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn path_text(path: &Path) -> Result<String, BridgeError> {
+        let text = path
+            .to_str()
+            .ok_or_else(|| offline_error("the bundle path is not valid UTF-8"))?;
+        if text.chars().any(|ch| ch.is_control()) {
+            return Err(offline_error("the bundle path contains a control character"));
+        }
+        Ok(text.to_string())
+    }
+
+    /// A sibling path that does not exist yet: the same directory is the same
+    /// filesystem, so the renames above are atomic.
+    #[cfg(target_os = "macos")]
+    fn unique_sibling(parent: &Path, current: &Path, tag: &str) -> PathBuf {
+        let name = current
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("ClipSync");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        parent.join(format!(
+            ".{name}.clipsync-{tag}-{}-{stamp}",
+            std::process::id()
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn install_linux_from_bytes(
+        bytes: &[u8],
+        signed_name: &str,
+    ) -> Result<(), BridgeError> {
+        match classify_installer(bytes, signed_name) {
+            InstallerKind::Deb => install_package(bytes, ".deb", "dpkg", &["-i"]),
+            InstallerKind::Rpm => install_package(bytes, ".rpm", "rpm", &["-U"]),
+            InstallerKind::AppImage => install_appimage(bytes),
+            InstallerKind::MacAppTarGz | InstallerKind::Unknown => {
+                Err(offline_error("the signed update is not a Linux package or AppImage"))
+            }
+        }
+    }
+
+    /// A deb/rpm install through pkexec's usual authentication prompt.  The
+    /// package is written to a temporary file that is removed on every exit.
+    #[cfg(target_os = "linux")]
+    fn install_package(
+        bytes: &[u8],
+        suffix: &str,
+        program: &str,
+        arguments: &[&str],
+    ) -> Result<(), BridgeError> {
+        use std::io::Write;
+
+        let mut file = tempfile::Builder::new()
+            .prefix("clipsync-update-")
+            .suffix(suffix)
+            .tempfile()
+            .map_err(offline_error)?;
+        file.write_all(bytes).map_err(offline_error)?;
+        file.flush().map_err(offline_error)?;
+        match std::process::Command::new("pkexec")
+            .arg(program)
+            .args(arguments)
+            .arg(file.path())
+            .status()
+        {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(offline_error(format!("{program} exited with {status}"))),
+            Err(err) => Err(offline_error(format!("could not run pkexec: {err}"))),
+        }
+    }
+
+    /// Replace the running AppImage with the verified bytes: a same-directory
+    /// temporary file keeps the rename atomic, and the old file is renamed to a
+    /// backup first so a failure can roll it back.
+    #[cfg(target_os = "linux")]
+    fn install_appimage(bytes: &[u8]) -> Result<(), BridgeError> {
+        use std::io::Write;
+
+        let image = appimage_bytes(bytes)?;
+        let current = current_appimage()
+            .ok_or_else(|| offline_error("could not locate the running AppImage"))?;
+        let parent = current
+            .parent()
+            .ok_or_else(|| offline_error("the AppImage has no parent directory"))?;
+        let name = current
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("ClipSync.AppImage");
+        let temp = parent.join(format!(".{name}.clipsync-new-{}", std::process::id()));
+        let backup = parent.join(format!(".{name}.clipsync-backup-{}", std::process::id()));
+
+        let write_result = std::fs::File::create(&temp).and_then(|mut handle| {
+            handle.write_all(&image)?;
+            handle.sync_all()
+        });
+        if let Err(err) = write_result {
+            let _ = std::fs::remove_file(&temp);
+            return Err(offline_error(err));
+        }
+        if let Ok(metadata) = std::fs::metadata(&current) {
+            let _ = std::fs::set_permissions(&temp, metadata.permissions());
+        }
+        if backup.exists() {
+            let _ = std::fs::remove_file(&backup);
+        }
+        if let Err(err) = std::fs::rename(&current, &backup) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(offline_error(err));
+        }
+        if let Err(err) = std::fs::rename(&temp, &current) {
+            // Roll the old AppImage back before reporting the failure.
+            let _ = std::fs::rename(&backup, &current);
+            let _ = std::fs::remove_file(&temp);
+            return Err(offline_error(err));
+        }
+        let _ = std::fs::remove_file(&backup);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn current_appimage() -> Option<PathBuf> {
+        if let Some(value) = std::env::var_os("APPIMAGE") {
+            let path = PathBuf::from(value);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        let exe = std::env::current_exe().ok()?;
+        let is_appimage = exe
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".AppImage"));
+        (is_appimage && exe.is_file()).then_some(exe)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn install_offline_from_bytes(
+        bytes: &[u8],
+        signed_name: &str,
+    ) -> Result<(), BridgeError> {
+        #[cfg(target_os = "macos")]
+        {
+            install_macos_from_bytes(bytes, signed_name)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            install_linux_from_bytes(bytes, signed_name)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = (bytes, signed_name);
+            Err(offline_error("offline install is unsupported on this platform"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2944,5 +3652,310 @@ mod tests {
                 "VALIDATION_ERROR"
             );
         }
+    }
+
+    /// A real minisign vector: the payload, and the release key that signs it.
+    ///
+    /// Generated once for this test (legacy `Ed` algorithm, the mode the Tauri
+    /// signer uses) so the verification path is exercised with bytes that
+    /// actually satisfy minisign, not with a mock.
+    const TEST_PUBKEY: &str =
+        "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkKUldRQkFnTUVCUVlIQ1BxaDdPZ1lESGliVUNMMGVaMHJ2djVGWFpwMDkrYXFXbm54c1V6cnh1R1UK";
+    const TEST_SIGNATURE: &str =
+        "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUldRQkFnTUVCUVlIQ0VqSm9VTGMxK09FL2h3S2xFdk1rUWJ4ZzRXTzgwcDJ2QnhEWmx4SS9GdjlKT2JUVHRQWmFhc1B6d1AwOUs1RitVM3YwazBSNk9OZmR3OUVKaEd2eXc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzUwMDAwMDAwCWZpbGU6Q2xpcFN5bmNfOS45LjlfeDY0LXNldHVwLmV4ZQpCbkI4TE96d0RjUkVacWsyWWFXN1RDcTVkZDMrZWZOcXNsRSt3RHRySC9kY2xUOVc2K0l3V0JaQ2Y3R3JxVFVIZG1KMDIwYnNXVm1GMWpwMjZRS0xCUT09Cg==";
+    const TEST_BYTES: &[u8] = b"OFFLINE-PEER-UPDATE-BYTES";
+
+    #[test]
+    fn a_signed_release_names_its_file_and_version() {
+        assert_eq!(
+            verify_signed_release(TEST_BYTES, TEST_SIGNATURE, TEST_PUBKEY),
+            Some((
+                "ClipSync_9.9.9_x64-setup.exe".to_string(),
+                "9.9.9".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_modified_payload_or_a_bad_key_does_not_verify() {
+        let mut changed = TEST_BYTES.to_vec();
+        changed[0] ^= 0xff;
+        assert_eq!(
+            verify_signed_release(&changed, TEST_SIGNATURE, TEST_PUBKEY),
+            None
+        );
+        assert_eq!(
+            verify_signed_release(TEST_BYTES, "not base64 at all", TEST_PUBKEY),
+            None
+        );
+        assert_eq!(verify_signed_release(TEST_BYTES, TEST_SIGNATURE, ""), None);
+    }
+
+    #[test]
+    fn an_offline_peer_update_must_be_signed_and_newer() {
+        let current = semver::Version::parse("1.0.55").unwrap();
+        assert_eq!(
+            offline_signed_update(TEST_BYTES, TEST_SIGNATURE, TEST_PUBKEY, &current),
+            Some((
+                "ClipSync_9.9.9_x64-setup.exe".to_string(),
+                "9.9.9".to_string()
+            ))
+        );
+
+        let ahead = semver::Version::parse("99.0.0").unwrap();
+        assert_eq!(
+            offline_signed_update(TEST_BYTES, TEST_SIGNATURE, TEST_PUBKEY, &ahead),
+            None,
+            "a signed release older than this build is not an upgrade"
+        );
+
+        let mut changed = TEST_BYTES.to_vec();
+        changed[1] ^= 0x01;
+        assert_eq!(
+            offline_signed_update(&changed, TEST_SIGNATURE, TEST_PUBKEY, &current),
+            None
+        );
+        assert_eq!(
+            offline_signed_update(TEST_BYTES, "", TEST_PUBKEY, &current),
+            None,
+            "no transferred signature is a manual install"
+        );
+    }
+
+    #[test]
+    fn the_signed_name_is_a_basename_and_the_version_is_the_dotted_run() {
+        assert_eq!(
+            signed_file_name("timestamp:1\tfile:/tmp/dir/ClipSync_1.2.3_x64-setup.exe"),
+            Some("ClipSync_1.2.3_x64-setup.exe".to_string())
+        );
+        assert_eq!(
+            signed_file_name("timestamp:1\tfile:..\\..\\evil.exe"),
+            Some("evil.exe".to_string())
+        );
+        assert_eq!(
+            version_in_name("ClipSync_1.0.55_x64-setup.exe"),
+            Some("1.0.55".to_string())
+        );
+        assert_eq!(version_in_name("evil-setup.exe"), None);
+    }
+
+    #[test]
+    fn installer_kinds_come_from_the_signed_name_and_the_magic() {
+        use offline_update::InstallerKind::*;
+        assert_eq!(
+            offline_update::classify_installer(b"junk", "ClipSync_1.0.0_aarch64.app.tar.gz"),
+            MacAppTarGz
+        );
+        assert_eq!(
+            offline_update::classify_installer(b"!<arch>\ndeb", "ClipSync_1.0.0_amd64.deb"),
+            Deb
+        );
+        assert_eq!(
+            offline_update::classify_installer(b"\xed\xab\xee\xdbrpm", "ClipSync_1.0.0_x86_64.rpm"),
+            Rpm
+        );
+        assert_eq!(
+            offline_update::classify_installer(
+                &[0x1f, 0x8b, 0x08, 0x00],
+                "ClipSync_1.0.0_amd64.AppImage"
+            ),
+            AppImage
+        );
+        assert_eq!(
+            offline_update::classify_installer(
+                b"\x7fELF\x02\x01\x01",
+                "ClipSync_1.0.0_amd64.AppImage"
+            ),
+            AppImage
+        );
+        assert_eq!(
+            offline_update::classify_installer(b"random", "ClipSync_1.0.0_x64-setup.exe"),
+            Unknown
+        );
+        assert_eq!(
+            offline_update::classify_installer(b"\x7fELF\x02", "clipboard-note.txt"),
+            AppImage,
+            "magic wins over a name that says nothing"
+        );
+    }
+
+    #[test]
+    fn gzip_magic_is_recognised() {
+        let payload = b"some bytes";
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, payload).unwrap();
+        let zipped = encoder.finish().unwrap();
+
+        assert!(offline_update::is_gzip(&zipped));
+        assert!(!offline_update::is_gzip(payload));
+        assert!(!offline_update::is_gzip(b""));
+        assert!(!offline_update::is_gzip(b"\x1f"));
+    }
+
+    #[test]
+    fn tar_paths_that_escape_the_extraction_root_are_unsafe() {
+        use std::path::Path;
+        assert!(offline_update::tar_path_is_safe(Path::new(
+            "ClipSync.app/Contents/Info.plist"
+        )));
+        assert!(offline_update::tar_path_is_safe(Path::new(
+            "./ClipSync.app/Contents/Info.plist"
+        )));
+        assert!(!offline_update::tar_path_is_safe(Path::new("../evil.txt")));
+        assert!(!offline_update::tar_path_is_safe(Path::new(
+            "a/../../evil.txt"
+        )));
+        assert!(!offline_update::tar_path_is_safe(Path::new("/tmp/evil.txt")));
+    }
+
+    #[test]
+    fn the_app_bundle_is_found_by_walking_up_from_the_executable() {
+        let exe = std::path::Path::new("/Applications/ClipSync.app/Contents/MacOS/ClipSync");
+        assert_eq!(
+            offline_update::app_bundle_for_exe(exe),
+            Some(std::path::PathBuf::from("/Applications/ClipSync.app"))
+        );
+        assert_eq!(
+            offline_update::app_bundle_for_exe(std::path::Path::new("/usr/bin/clipsync")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_top_level_app_bundle_is_found_under_the_extraction_root() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("ClipSync.app/Contents")).unwrap();
+        std::fs::create_dir_all(root.path().join("other")).unwrap();
+        assert_eq!(
+            offline_update::find_app_bundle(root.path()),
+            Some(root.path().join("ClipSync.app"))
+        );
+        std::fs::remove_dir_all(root.path().join("ClipSync.app")).unwrap();
+        assert_eq!(offline_update::find_app_bundle(root.path()), None);
+    }
+
+    // ── archive-level tests: compiled and run on the unix CI legs ────────
+
+    #[cfg(unix)]
+    fn app_tar_gz() -> Vec<u8> {
+        let source = tempfile::tempdir().unwrap();
+        let app = source.path().join("ClipSync.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+        std::fs::write(app.join("Contents/Info.plist"), b"<plist/>").unwrap();
+        std::fs::write(app.join("Contents/MacOS/ClipSync"), b"binary").unwrap();
+        std::fs::write(
+            app.join("Contents/Resources")
+                .join(format!("{}.dat", "L".repeat(120))),
+            b"long data",
+        )
+        .unwrap();
+
+        let encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder.append_dir_all("ClipSync.app", &app).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_app_tar_gz_is_extracted_and_its_bundle_found() {
+        let (directory, bundle) = offline_update::extract_app_bundle(&app_tar_gz()).unwrap();
+        assert_eq!(bundle.file_name().unwrap(), "ClipSync.app");
+        assert_eq!(
+            std::fs::read(bundle.join("Contents/Info.plist")).unwrap(),
+            b"<plist/>"
+        );
+        let long = bundle
+            .join("Contents/Resources")
+            .join(format!("{}.dat", "L".repeat(120)));
+        assert_eq!(std::fs::read(long).unwrap(), b"long data");
+
+        // The directory owns the extracted tree until it is dropped.
+        drop(directory);
+        assert!(!bundle.exists());
+    }
+
+    #[cfg(unix)]
+    fn tar_gz_raw_name(name: &str, data: &[u8]) -> Vec<u8> {
+        let encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        let raw = name.as_bytes();
+        assert!(raw.len() < 100, "test entry name is too long");
+        header.as_gnu_mut().unwrap().name[..raw.len()].copy_from_slice(raw);
+        header.set_cksum();
+        builder.append(&header, data).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tar_entry_that_escapes_the_root_is_refused() {
+        assert!(offline_update::extract_app_bundle(&tar_gz_raw_name("../evil.txt", b"x")).is_err());
+        assert!(
+            offline_update::extract_app_bundle(&tar_gz_raw_name("/tmp/evil.txt", b"x")).is_err()
+        );
+        assert!(
+            offline_update::appimage_bytes(&tar_gz_raw_name("../evil.AppImage", b"\x7fELF"))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_appimage_is_taken_from_a_gzip_tar_or_from_the_raw_bytes() {
+        let payload: &[u8] = b"\x7fELF-appimage-payload";
+        let encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_path("ClipSync_9.9.9_amd64.AppImage").unwrap();
+        header.set_cksum();
+        builder.append(&header, payload).unwrap();
+        let archive = builder.into_inner().unwrap().finish().unwrap();
+
+        assert_eq!(offline_update::appimage_bytes(&archive).unwrap(), payload);
+        assert_eq!(offline_update::appimage_bytes(payload).unwrap(), payload);
+        assert!(offline_update::appimage_bytes(b"not an image").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_script_escapes_the_shell_command_it_embeds() {
+        let script = offline_update::applescript_script(r#"rm -rf '/tmp/a"b\c'"#);
+        assert!(script.starts_with("do shell script \""));
+        assert!(script.ends_with("\" with administrator privileges"));
+        assert!(script.contains("\\\\"), "backslash must be escaped");
+        assert!(script.contains("\\\""), "double quote must be escaped");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_macos_offline_install_refuses_a_payload_that_is_not_an_app_tar_gz() {
+        assert!(offline_update::install_macos_from_bytes(
+            b"not a tar",
+            "ClipSync_1.0.0_x64-setup.exe"
+        )
+        .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_offline_install_refuses_a_payload_it_cannot_classify() {
+        assert!(offline_update::install_linux_from_bytes(
+            b"not an installer",
+            "ClipSync_1.0.0_x64-setup.exe"
+        )
+        .is_err());
     }
 }

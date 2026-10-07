@@ -56,6 +56,10 @@ logger = logging.getLogger(__name__)
 # ---- Constants -----------------------------------------------------------
 
 CHUNK_SIZE = 262144  # 256 KB per chunk
+# The release signature is a small base64 blob; the cap keeps one file_request
+# from carrying an unbounded string into the transfer record and the state.  The
+# host checks the signature itself before anything runs -- this is only a bound.
+MAX_UPDATE_SIGNATURE_CHARS = 8192
 TRANSFER_TIMEOUT = 120.0  # seconds -- overall transfer deadline
 COMPLETION_WAIT_TIMEOUT = 60.0  # seconds -- wait for FILE_COMPLETE after last chunk
 RETRANSMIT_TIMEOUT = 30.0  # seconds -- receiver waits this long per retransmit round
@@ -174,6 +178,21 @@ def _sanitize_file_name(file_name: str) -> str:
     return name
 
 
+def _clean_signature(value: object) -> str:
+    """The sender's transferred signature, or "" when absent or over-large.
+
+    Nothing here trusts it: the host verifies it against the embedded release
+    key before an offline install can run.  The length cap is what stops one
+    frame from parking an unbounded string in the state.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or len(text) > MAX_UPDATE_SIGNATURE_CHARS:
+        return ""
+    return text
+
+
 def _reserve_dest_name(dest_path: Path) -> Path:
     """Atomically claim a free destination name and return the one claimed.
 
@@ -259,12 +278,13 @@ class FileTransferManager:
 
         # transfer_id -> dict (active transfers)
         self._transfers: dict[str, dict[str, Any]] = {}
-        # transfer_id -> (kind, sender_device_id, sha256), set just before the
-        # received callback fires so the caller can tell a received file from the
-        # transfers that take a different route ("update", "clip_file", "log").
-        # The digest is the sender's own declaration, and only an update carries
-        # one -- see `take_received_info`.
-        self._received_kinds: dict[str, tuple[str, str, str]] = {}
+        # transfer_id -> (kind, sender_device_id, sha256, signature), set just
+        # before the received callback fires so the caller can tell a received
+        # file from the transfers that take a different route ("update",
+        # "clip_file", "log").  The digest is the sender's own declaration, and
+        # both it and the signature are carried only by an update -- see
+        # `take_received_info`.
+        self._received_kinds: dict[str, tuple[str, str, str, str]] = {}
         # Completed transfers history: list of dicts (newest first)
         self._history: list[dict[str, Any]] = []
         # Speed test state
@@ -480,16 +500,17 @@ class FileTransferManager:
         digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
         return self._output_dir / f".{digest}.part"
 
-    def take_received_info(self, transfer_id: str) -> tuple[str, str, str]:
-        """Pop ``(kind, sender_device_id, sha256)`` for a received transfer.
+    def take_received_info(self, transfer_id: str) -> tuple[str, str, str, str]:
+        """Pop ``(kind, sender_device_id, sha256, signature)`` for a received transfer.
 
-        All three, because the routes that treat a blob as something other than
-        a file need them: what it is, whose it is, and -- for an update -- the
-        digest the sender declared for it, which is what the bytes are checked
-        against when the release endpoint cannot be reached.  The digest is
-        empty for every kind that carries none.
+        All four, because the routes that treat a blob as something other than a
+        file need them: what it is, whose it is, and -- for an update -- the
+        digest and the release signature the sender declared for it.  The digest
+        is what the bytes are checked against when the release endpoint cannot
+        be reached; the signature is what the host verifies offline against the
+        embedded release key.  Both are empty for every kind that carries none.
         """
-        return self._received_kinds.pop(transfer_id, ("file", "", ""))
+        return self._received_kinds.pop(transfer_id, ("file", "", "", ""))
 
     def set_on_transfer_request(
         self,
@@ -515,6 +536,7 @@ class FileTransferManager:
         entry_id: str = "",
         origin_paths: list[str] | None = None,
         sha256: str = "",
+        signature: str = "",
     ) -> str:
         """Start sending *file_path* to all connected peers.
 
@@ -546,6 +568,11 @@ class FileTransferManager:
             check the bytes when it cannot reach the release server to check them
             against the published asset — the case a peer-sent installer exists
             for.  Omitted from the frame when empty, like *entry_id*.
+        signature:
+            The release's base64-encoded minisign signature, when this machine
+            cached one beside the asset.  It travels with an ``update`` send so
+            the receiver can verify the bytes against the release signing key
+            without reaching the manifest; omitted when empty.
 
         Returns
         -------
@@ -574,6 +601,7 @@ class FileTransferManager:
                 "type": "outgoing",
                 "kind": kind,
                 "sha256": sha256,
+                "signature": signature,
                 "file_path": str(file_path),
                 "origin_paths": [str(path) for path in (origin_paths or [])],
                 "file_name": file_name,
@@ -605,6 +633,8 @@ class FileTransferManager:
             request["entry"] = entry_id
         if sha256:
             request["sha256"] = sha256
+        if signature:
+            request["signature"] = signature
         self._send_as_frame(request, broadcast_fn)
 
         logger.info(
@@ -1065,6 +1095,10 @@ class FileTransferManager:
                 # `take_received_info` hands the update service so the bytes can
                 # be checked when the release endpoint cannot be reached.
                 "sha256": str(payload.get("sha256") or ""),
+                # The release's own signature, when the sender had it cached.
+                # Kept rather than trusted here: the host verifies it against
+                # the embedded release key before an offline install can run.
+                "signature": _clean_signature(payload.get("signature")),
                 "peer_id": sender_device_id,
                 "file_name": file_name,
                 "file_size": file_size,
@@ -1571,6 +1605,7 @@ class FileTransferManager:
                     transfer.get("kind", "file"),
                     str(transfer.get("peer_id") or ""),
                     str(transfer.get("sha256") or ""),
+                    str(transfer.get("signature") or ""),
                 )
                 self._on_file_received(transfer_id, saved, file_name)
             self._fire_complete_once(transfer_id, True, False, "success")

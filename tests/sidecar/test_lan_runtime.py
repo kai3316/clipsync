@@ -2248,6 +2248,43 @@ def test_an_unpaired_peer_on_this_platform_is_served_the_cached_asset(
     assert sent[0]._raw_payload["kind"] == "update"
 
 
+def test_a_served_update_carries_the_cached_release_signature(rig, monkeypatch, tmp_path):
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    asset = tmp_path / "ClipSync_9.9.9_x64-setup.exe"
+    asset.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(asset))
+    monkeypatch.setattr(updater, "get_cached_signature", lambda name: "minisign-text")
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+
+    transport.message(
+        frame("update_request", version="1.0.7", os="windows", arch="amd64"), "remote"
+    )
+
+    requests = [msg for _, msg in transport.sent if msg.msg_type == "file_request"]
+    assert len(requests) == 1
+    assert requests[0]._raw_payload["signature"] == "minisign-text"
+    assert requests[0]._raw_payload["sha256"]
+
+
+def test_a_served_update_without_a_cached_signature_omits_it(rig, monkeypatch, tmp_path):
+    runtime, _, transport, *_ = rig
+    transport.connected.add("remote")
+    asset = tmp_path / "ClipSync_9.9.9_x64-setup.exe"
+    asset.write_bytes(b"release-bytes")
+    monkeypatch.setattr(updater, "get_cached_asset", lambda: str(asset))
+    monkeypatch.setattr(updater, "get_cached_signature", lambda name: "")
+    monkeypatch.setattr(lan, "_local_platform", lambda: ("windows", "amd64"))
+
+    transport.message(
+        frame("update_request", version="1.0.7", os="windows", arch="amd64"), "remote"
+    )
+
+    requests = [msg for _, msg in transport.sent if msg.msg_type == "file_request"]
+    assert len(requests) == 1
+    assert "signature" not in requests[0]._raw_payload
+
+
 def test_a_request_from_another_platform_is_not_answered(rig, monkeypatch, tmp_path):
     """The asset is the one for this platform; a Mac has nothing to do with it."""
     runtime, _, transport, *_ = rig
@@ -2597,6 +2634,57 @@ def test_a_peer_sent_update_blob_reaches_the_update_sink(rig, tmp_path):
         time.sleep(0.02)
     assert staged == [(str(tmp_path / "clipsync-windows.zip"), digest)]
     assert Path(staged[0][0]).read_bytes() == payload
+
+
+def test_a_peer_sent_update_signature_reaches_the_sink(rig, tmp_path):
+    runtime, pairing, transport, *_ = rig
+    runtime.file_transfer._output_dir = tmp_path
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    staged: list[tuple[str, str, str]] = []
+    runtime.set_update_sink(
+        lambda path, sha256="", peer_id="", transfer_id="", signature="": staged.append(
+            (path, sha256, signature)
+        )
+    )
+    runtime._expect_update("remote")
+
+    payload = b"verified release archive"
+    digest = hashlib.sha256(payload).hexdigest()
+    transport.message(
+        decode_message(
+            encode_frame(
+                {
+                    "msg_type": "file_request",
+                    "transfer_id": "u9",
+                    "file_name": "ClipSync_9.9.9_x64-setup.exe",
+                    "file_size": len(payload),
+                    "mime_type": "application/zip",
+                    "kind": "update",
+                    "sha256": digest,
+                    "signature": "minisign-text",
+                }
+            )
+        ),
+        "remote",
+    )
+    transport.message(
+        frame(
+            "file_chunk",
+            transfer_id="u9",
+            chunk_index=0,
+            total_chunks=1,
+            data=base64.b64encode(payload).decode("ascii"),
+        ),
+        "remote",
+    )
+
+    deadline = time.monotonic() + 3
+    while not staged and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert staged == [
+        (str(tmp_path / "ClipSync_9.9.9_x64-setup.exe"), digest, "minisign-text")
+    ]
 
 
 def test_an_ordinary_received_file_never_reaches_the_update_sink(rig, tmp_path):
@@ -3586,14 +3674,28 @@ def test_the_sink_wrapper_carries_the_origin_and_tolerates_the_documented_form(r
     runtime = rig[0]
     calls: list[dict] = []
 
-    def modern(path, sha256="", peer_id="", transfer_id=""):
+    def modern(path, sha256="", peer_id="", transfer_id="", signature=""):
         calls.append(
-            {"path": path, "sha256": sha256, "peer_id": peer_id, "transfer_id": transfer_id}
+            {
+                "path": path,
+                "sha256": sha256,
+                "peer_id": peer_id,
+                "transfer_id": transfer_id,
+                "signature": signature,
+            }
         )
 
     runtime.set_update_sink(modern)
-    runtime._update_sink("a.dmg", sha256="d", peer_id="p", transfer_id="t")
-    assert calls == [{"path": "a.dmg", "sha256": "d", "peer_id": "p", "transfer_id": "t"}]
+    runtime._update_sink("a.dmg", sha256="d", peer_id="p", transfer_id="t", signature="s")
+    assert calls == [
+        {
+            "path": "a.dmg",
+            "sha256": "d",
+            "peer_id": "p",
+            "transfer_id": "t",
+            "signature": "s",
+        }
+    ]
 
     legacy: list[tuple] = []
     runtime.set_update_sink(lambda path, sha256="": legacy.append((path, sha256)))

@@ -241,30 +241,27 @@ fn hides_main_window(value: &Value) -> bool {
     value["type"] == "event" && value["name"] == "app.window_close_requested"
 }
 
-/// Whether a sidecar frame is an update that has been checked, verified and
-/// staged, and should therefore be installed now.
+/// Whether a sidecar frame is an update that may be installed without a click.
 ///
-/// One thing the frame has to say: `ready` is what makes the archive
-/// installable at all. Whether the file is still on disk is the installer's own
-/// question, asked a moment later.
-///
-/// The source is deliberately *not* part of the test. It used to be — only a
-/// peer's blob installed by itself, on the reasoning that a local download
-/// reached `ready` because the reader clicked 下载更新 and a peer blob reached
-/// it because somebody else did — and the effect was a machine that had already
-/// downloaded and verified a newer build sitting on it, waiting for a click
-/// nobody was going to make. What 更新 means is that the machine ends up on the
-/// new build; every step between the check and the install is the machine's to
-/// take. The archive is verified before it is staged on either path (`source`
-/// only says which digest settled it), the installer is the same one this
-/// machine's own download produced, and it relaunches the app when it is done —
-/// so there is nothing left here to ask a reader that the file itself has not
-/// already answered.
+/// `phase == "ready"` says the archive is on disk and staged. What else has to
+/// hold is a *release-issued signature*: either the sidecar checked the bytes
+/// against the published release digest (`verified == "release"`), or the peer
+/// transfer carried the release's minisign signature and the host verifies it
+/// against the embedded public key before running anything
+/// (`verified == "peer_verified"` with a non-empty `signature`). A peer blob
+/// with no signature, a digest-only `peer_verified` from an old sender, and a
+/// state from an older sidecar (no `verified` field) are all held back. The
+/// card's `update_install_ready` command reaches the same checked body for a
+/// manual attempt.
 fn staged_update(value: &Value) -> bool {
     if value["type"] != "event" || value["name"] != "update.state" {
         return false;
     }
-    value["data"]["state"]["phase"] == "ready"
+    let state = &value["data"]["state"];
+    let signed = state["verified"] == "release"
+        || (state["verified"] == "peer_verified"
+            && state["signature"].as_str().is_some_and(|value| !value.is_empty()));
+    state["phase"] == "ready" && signed
 }
 
 pub struct Bridge {
@@ -1266,5 +1263,44 @@ mod tests {
             .unwrap();
         second.await.unwrap();
         assert_eq!(&bytes, b"first\nsecond\n");
+    }
+
+    /// Only a ready archive with a release-issued signature auto-installs.
+    ///
+    /// That is either the published digest the sidecar checked (`release`), or
+    /// a peer transfer that carried the release's minisign signature, which the
+    /// host verifies before running anything (`peer_verified` + `signature`).
+    /// A digest-only `peer_verified` is what this gate was fixed for: a LAN
+    /// peer's own sha256 is not the publisher's signature, and spawning the
+    /// installer for it handed arbitrary code execution to any device that
+    /// could connect.  An older sidecar sends no `verified` field, which is not
+    /// an upgrade to trust either.
+    #[test]
+    fn only_a_signed_staged_update_is_installed_unprompted() {
+        let event = |state: Value| {
+            json!({"type": "event", "name": "update.state", "data": {"state": state}})
+        };
+
+        assert!(staged_update(&event(
+            json!({"phase": "ready", "verified": "release"})
+        )));
+        assert!(staged_update(&event(
+            json!({"phase": "ready", "verified": "peer_verified", "signature": "sig"})
+        )));
+        assert!(!staged_update(&event(
+            json!({"phase": "ready", "verified": "peer_verified", "signature": ""})
+        )));
+        assert!(!staged_update(&event(
+            json!({"phase": "ready", "verified": "peer_verified"})
+        )));
+        assert!(!staged_update(&event(json!({"phase": "ready"}))));
+        assert!(!staged_update(&event(
+            json!({"phase": "downloading", "verified": "release"})
+        )));
+        assert!(!staged_update(&json!({
+            "type": "response",
+            "name": "update.state",
+            "data": {"state": {"phase": "ready", "verified": "release"}}
+        })));
     }
 }

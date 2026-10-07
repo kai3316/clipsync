@@ -1,5 +1,6 @@
 """The shared update lifecycle: staging, verification and the silent check."""
 
+import hashlib
 import os
 import threading
 import time
@@ -236,3 +237,181 @@ def test_stage_ready_archive_moves_into_downloads(tmp_path):
     assert Path(dest).exists()
     assert not Path(source).exists()
     assert ready_archive_dir().name == "clipsync-update"
+
+
+# ── verify_update_blob: the real branches, not a monkeypatched verifier ──
+
+def _release(version="2.0.0", sha256=""):
+    return {"version": version, "sha256": sha256, "asset": "ClipSync_2.0.0_x64-setup.exe"}
+
+
+def _digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def test_verify_blob_refuses_a_release_that_is_not_newer(tmp_path):
+    path = _write_asset(str(tmp_path))
+    digest = _digest(path)
+    assert updater.verify_update_blob(
+        path, _release(version="1.0.0", sha256=digest), "1.0.0",
+        source="p2p", peer_digest=digest,
+    ) == (False, "not_newer")
+
+
+def test_verify_blob_refuses_bytes_that_do_not_match_the_published_digest(tmp_path):
+    path = _write_asset(str(tmp_path))
+    assert updater.verify_update_blob(
+        path, _release(version="2.0.0", sha256="0" * 64), "1.0.0",
+        source="p2p", peer_digest="0" * 64,
+    ) == (False, "hash_mismatch")
+
+
+def test_verify_blob_accepts_the_published_digest(tmp_path):
+    path = _write_asset(str(tmp_path))
+    assert updater.verify_update_blob(
+        path, _release(version="2.0.0", sha256=_digest(path)), "1.0.0",
+        source="p2p", peer_digest="",
+    ) == (True, "ok")
+
+
+def test_verify_blob_without_release_info_falls_back_to_the_sender_digest(tmp_path):
+    path = _write_asset(str(tmp_path))
+    assert updater.verify_update_blob(
+        path, None, "1.0.0", source="p2p", peer_digest=_digest(path)
+    ) == (True, "peer_verified")
+
+
+def test_verify_blob_without_release_info_or_sender_digest_is_refused(tmp_path):
+    path = _write_asset(str(tmp_path))
+    assert updater.verify_update_blob(
+        path, None, "1.0.0", source="p2p", peer_digest=""
+    ) == (False, "no_release_info")
+
+
+def test_verify_blob_github_download_passes_without_release_info(tmp_path):
+    path = _write_asset(str(tmp_path))
+    assert updater.verify_update_blob(
+        path, None, "1.0.0", source="github"
+    ) == (True, "ok")
+
+
+def test_verify_blob_release_without_a_digest_falls_back_to_the_sender(tmp_path):
+    path = _write_asset(str(tmp_path))
+    assert updater.verify_update_blob(
+        path, _release(version="2.0.0", sha256=""), "1.0.0",
+        source="p2p", peer_digest=_digest(path),
+    ) == (True, "peer_verified")
+
+
+# ── release-asset matchers: Linux ARM64 spells the two bundles differently ──
+
+def test_linux_arm64_assets_use_each_bundlers_own_arch_spelling(monkeypatch):
+    monkeypatch.setattr(updater, "_machine", lambda: ("Linux", True))
+    monkeypatch.setattr(updater, "running_shell", lambda: updater.SHELL_TAURI)
+    patterns = updater._asset_matchers()
+    assert [p.pattern for p in patterns] == [
+        r"^ClipSync_.*_aarch64\.AppImage$",
+        r"^ClipSync_.*_arm64\.deb$",
+    ]
+    assert patterns[0].match("ClipSync_1.0.55_aarch64.AppImage")
+    assert patterns[1].match("ClipSync_1.0.55_arm64.deb")
+    assert not patterns[0].match("ClipSync_1.0.55_arm64.AppImage")
+    assert not patterns[1].match("ClipSync_1.0.55_aarch64.deb")
+
+
+def test_linux_x64_assets_keep_one_pattern_for_both_bundles(monkeypatch):
+    monkeypatch.setattr(updater, "_machine", lambda: ("Linux", False))
+    monkeypatch.setattr(updater, "running_shell", lambda: updater.SHELL_TAURI)
+    pattern = updater._asset_matchers()[0]
+    assert pattern.match("ClipSync_1.0.55_amd64.AppImage")
+    assert pattern.match("ClipSync_1.0.55_amd64.deb")
+    assert not pattern.match("ClipSync_1.0.55_aarch64.AppImage")
+
+
+# ── get_cached_asset: a newer .dmg beats the older .app.tar.gz ──
+
+def test_cached_asset_ranks_version_before_pattern_and_mtime(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    payload = cache / "ClipSync_1.0.10_aarch64.app.tar.gz"
+    dmg = cache / "ClipSync_1.0.11_aarch64.dmg"
+    payload.write_bytes(b"old payload")
+    dmg.write_bytes(b"new dmg")
+    old = time.time() - 100
+    now = time.time()
+    # The payload is the preferred pattern *and* newer on disk; the .dmg is the
+    # newer release, and that is what has to decide.
+    os.utime(dmg, (old, old))
+    os.utime(payload, (now, now))
+    monkeypatch.setattr(updater, "_machine", lambda: ("Darwin", True))
+    monkeypatch.setattr(updater, "running_shell", lambda: updater.SHELL_TAURI)
+    monkeypatch.setattr(updater, "_cache_dir", lambda: str(cache))
+
+    assert updater.get_cached_asset() == str(dmg)
+
+    # Same version: the updater payload wins over the .dmg even when the .dmg
+    # carries the newer mtime.
+    same = cache / "ClipSync_1.0.11_aarch64.app.tar.gz"
+    same.write_bytes(b"new payload")
+    os.utime(same, (old, old))
+    os.utime(dmg, (now, now))
+    assert updater.get_cached_asset() == str(same)
+
+
+# ── a peer's signature: cached, staged, and in the state ─────────────────
+
+def test_cache_signature_round_trips_beside_the_asset(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(updater, "_machine", lambda: ("Windows", False))
+    monkeypatch.setattr(updater, "running_shell", lambda: updater.SHELL_TAURI)
+    monkeypatch.setattr(updater, "_cache_dir", lambda: str(cache))
+    name = "ClipSync_9.9.9_x64-setup.exe"
+
+    assert updater.cache_signature(name, "minisign-text") is True
+    assert (cache / f"{name}.sig").read_text(encoding="utf-8") == "minisign-text"
+    assert updater.get_cached_signature(name) == "minisign-text"
+
+    # A name that is not one of this shell's installers must not become a path,
+    # and an empty signature is nothing to keep.
+    assert updater.cache_signature("notes.txt", "minisign-text") is False
+    assert updater.cache_signature(name, "   ") is False
+    assert updater.get_cached_signature("missing-setup.exe") == ""
+
+
+def test_a_peer_signature_is_staged_beside_the_archive_and_in_the_state(
+    service, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(updater, "fetch_latest_asset_info", lambda timeout=None: None)
+    monkeypatch.setattr(updater, "cache_asset", lambda p: None)
+    monkeypatch.setattr(updater, "cache_signature", lambda name, sig: True)
+    path = _write_asset(
+        str(tmp_path), name="ClipSync_9.9.9_x64-setup.exe", payload=b"release-bytes"
+    )
+    digest = _digest(path)
+
+    service.finish_from_peer(path, sha256=digest, signature="minisign-text")
+
+    state = service.status()["state"]
+    assert state["phase"] == "ready"
+    assert state["verified"] == "peer_verified"
+    assert state["signature"] == "minisign-text"
+    assert Path(f"{state['path']}.sig").read_text(encoding="utf-8") == "minisign-text"
+
+
+def test_a_peer_blob_without_a_signature_has_no_sig_file_and_an_empty_state(
+    service, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(updater, "fetch_latest_asset_info", lambda timeout=None: None)
+    monkeypatch.setattr(updater, "cache_asset", lambda p: None)
+    monkeypatch.setattr(updater, "cache_signature", lambda name, sig: True)
+    path = _write_asset(str(tmp_path), name="ClipSync_9.9.9_x64-setup.exe")
+    digest = _digest(path)
+
+    service.finish_from_peer(path, sha256=digest)
+
+    state = service.status()["state"]
+    assert state["phase"] == "ready"
+    assert state["verified"] == "peer_verified"
+    assert state["signature"] == ""
+    assert not Path(f"{state['path']}.sig").exists()

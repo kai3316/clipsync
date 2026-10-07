@@ -539,15 +539,21 @@ dependencies = [
 name = "clipsync-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "minisign-verify",
  "rfd",
+ "semver",
  "serde",
  "serde_json",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tempfile",
  "tokio",
  "uuid",
  "windows",

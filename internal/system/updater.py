@@ -89,9 +89,10 @@ def _asset_matchers() -> list[re.Pattern]:
 
     macOS answers with **two** patterns, and the order is the preference.  On Windows and Linux
     the payload a person installs and the payload the updater consumes are the same file
-    (`ClipSync_1.0.10_x64-setup.exe`, the `.AppImage`), so one pattern covers both.  On macOS they
-    differ: the updater unpacks `ClipSync.app.tar.gz` over the installed bundle, while a person
-    runs the `.dmg`.
+    (`ClipSync_1.0.10_x64-setup.exe`, the `.AppImage`), so one pattern covers both -- except on
+    Linux ARM64, where the two bundles spell that architecture differently and each gets its own
+    pattern (see the branch below).  On macOS they differ: the updater unpacks
+    `ClipSync.app.tar.gz` over the installed bundle, while a person runs the `.dmg`.
 
     `ClipSync.app.tar.gz` used to be excluded on the reasoning that it "is not a file a person
     installs", which is true and was the wrong test -- this cache is not for people, it is what
@@ -99,8 +100,9 @@ def _asset_matchers() -> list[re.Pattern]:
     its own updater fetches.  Excluding it left the cache unable to hold anything newer than a
     stale `.dmg`, which is what a 1.0.54 host was measured serving to a 1.0.33 peer.
 
-    The payload comes first for a *newer or equal* version: `_cache_rank` sorts by version before
-    preference, so a newer `.dmg` still wins.
+    The list is also the tie-break `get_cached_asset` uses: version decides between two
+    candidates first, and at the same version the payload (the first entry) wins -- so a
+    newer `.dmg` still wins over an older payload, while a same-version payload still wins.
     """
     system, is_arm = _machine()
     if running_shell() != SHELL_TAURI:
@@ -115,7 +117,17 @@ def _asset_matchers() -> list[re.Pattern]:
         ]
     if system == "Windows":
         return [re.compile(r"^ClipSync_.*_%s-setup\.exe$" % ("arm64" if is_arm else "x64"))]
-    return [re.compile(r"^ClipSync_.*_%s\.(?:AppImage|deb)$" % ("aarch64" if is_arm else "amd64"))]
+    if is_arm:
+        # The two Linux bundles spell ARM64 differently: Tauri's AppImage target
+        # carries the Rust target triple's `aarch64`, while the deb carries
+        # Debian's own `arm64`.  The single shared suffix below matched neither,
+        # so an ARM64 machine could not name its own update.  The order is the
+        # same preference as the x86_64 list: the AppImage payload first.
+        return [
+            re.compile(r"^ClipSync_.*_aarch64\.AppImage$"),
+            re.compile(r"^ClipSync_.*_arm64\.deb$"),
+        ]
+    return [re.compile(r"^ClipSync_.*_amd64\.(?:AppImage|deb)$")]
 
 
 def _platform_asset_label() -> str:
@@ -765,23 +777,82 @@ def get_cached_asset() -> str | None:
     it is sent against its own platform's digest before it will install it, so a
     mismatch is caught there too -- but it costs a transfer to find out.
 
-    The newest match is the one served.  Sorting the names would be the obvious
-    way and is the wrong one: it is the text that is compared, and "1.0.9" is
-    greater than "1.0.10" as text.  So the version in the name is parsed back
-    out, and a file whose name carries no version at all -- the legacy bundles
-    -- ranks below any that does.
+    Candidates are ranked across *all* patterns, not pattern by pattern.  The
+    pattern order used to decide first, and on macOS that made an older
+    `ClipSync.app.tar.gz` beat a newer `.dmg`: the payload's pattern is the
+    preferred one, and `cache_asset` protects the payload from the deletion
+    sweep, so both files can be present at once.  Version now decides first; the
+    pattern's own preference only breaks a version tie (the updater payload
+    first), and mtime breaks that.
+
+    Sorting the names would be the obvious way and is the wrong one: it is the
+    text that is compared, and "1.0.9" is greater than "1.0.10" as text.  So the
+    version in the name is parsed back out, and a file whose name carries no
+    version at all -- the legacy bundles -- ranks below any that does.
     """
     directory = _cache_dir()
     try:
         names = os.listdir(directory)
     except OSError:
         return None
-    for matcher in _asset_matchers():
-        found = [
-            os.path.join(directory, name)
-            for name in names
-            if matcher.match(name) and os.path.isfile(os.path.join(directory, name))
-        ]
-        if found:
-            return max(found, key=_cache_rank)
-    return None
+    best: tuple[tuple, str] | None = None
+    for preference, matcher in enumerate(_asset_matchers()):
+        for name in names:
+            path = os.path.join(directory, name)
+            if not matcher.match(name) or not os.path.isfile(path):
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = 0.0
+            # Version first; a tie is settled by the pattern's own preference
+            # (lower index = the payload this shell's updater consumes) and
+            # only then by mtime.
+            rank = (_version_in_name(name), -preference, mtime)
+            if best is None or rank > best[0]:
+                best = (rank, path)
+    return best[1] if best else None
+
+
+def cache_signature(asset_name: str, signature: str) -> bool:
+    """Keep the release's minisign signature beside the cached asset.
+
+    The signature is what lets a peer that cannot reach the release manifest
+    still decide the bytes came from the release signing key, so it is cached
+    under ``<asset>.sig`` next to the asset it signs and served with it (see
+    ``LanRuntime._serve_cached_update``).  The name is checked against this
+    shell's own asset patterns for the same reason :func:`cache_asset` checks
+    it: a name that is not one of our installers must not become a path under
+    the cache directory.  Returns False when there is nothing to keep.
+    """
+    base = os.path.basename(str(asset_name or ""))
+    if not base or not any(matcher.match(base) for matcher in _asset_matchers()):
+        return False
+    text = str(signature or "").strip()
+    if not text:
+        return False
+    try:
+        directory = _cache_dir()
+        os.makedirs(directory, exist_ok=True)
+        dest = os.path.join(directory, base + ".sig")
+        temp = dest + ".tmp"
+        with open(temp, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(temp, dest)
+        logger.info("Cached update signature at %s", dest)
+        return True
+    except OSError:
+        logger.warning("Failed to cache the signature for %s", base, exc_info=True)
+        return False
+
+
+def get_cached_signature(asset_name: str) -> str:
+    """The minisign signature cached beside *asset_name*, or "" when none."""
+    base = os.path.basename(str(asset_name or ""))
+    if not base:
+        return ""
+    try:
+        with open(os.path.join(_cache_dir(), base + ".sig"), encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
