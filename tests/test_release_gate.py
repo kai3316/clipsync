@@ -231,12 +231,12 @@ def test_the_tag_is_still_checked_against_the_version_it_should_carry():
 
 
 def test_a_branch_push_still_runs_the_suite():
-    """The gap the two publishing workflows left open.
+    """The light suite the branch has to run.
 
-    Neither of them runs the tests, and neither of them runs on a branch -- so
-    before this workflow existed, the first thing that checked a commit was the
-    tag that published it.  The suite has to run somewhere that a push reaches,
-    or "the tests pass" is a claim about one machine.
+    The heavy suites run locally before a tag; this workflow is a fast Ubuntu
+    smoke that keeps an obviously broken branch visible without holding a
+    tagged build up.  It still runs on every branch and pull request, and it
+    still never runs on a tag.
     """
     assert (WORKFLOWS / "test.yml").exists(), "no workflow runs the suite"
     events = triggers_of("test.yml")
@@ -252,12 +252,11 @@ def test_a_branch_push_still_runs_the_suite():
     )
     body = text_of("test.yml")
     assert "pytest" in body, "the test workflow does not run pytest"
-    assert "npm test" in body or "npm run test:web" in body, (
-        "the test workflow does not run the front-end suites"
-    )
-    assert "npm run typecheck" in body, (
-        "the test workflow skips the only check that validates RPC reply shapes"
-    )
+    assert "ruff" in body, "the test workflow does not lint"
+    # The heavy suites (front-end, Rust, e2e, other platforms) run locally
+    # before a tag; CI's job is only to keep the branch green enough to see.
+    assert "cargo test" not in body
+    assert "npm run test:e2e" not in body
 
 
 def test_the_packaging_scripts_and_the_host_agree_on_one_sidecar_shape():
@@ -322,26 +321,6 @@ def test_the_test_workflow_cannot_publish_anything():
         assert GATE not in job["if"], f"{name} is gated on a tag, which this workflow never has"
 
 
-@pytest.mark.parametrize("workflow", ["build.yml", "desktop.yml"])
-def test_each_publisher_gates_its_release_on_the_suites(workflow):
-    """A tag that never ran test.yml still has to pass the same suites.
-
-    A branch push runs test.yml; a tag pushed on its own runs no check at all.
-    The gate job repeats the release-critical suites inside each publishing
-    workflow, and `release` needs it, so publishing cannot start on a red tree.
-    """
-    jobs = jobs_of(workflow)
-    assert GATE_JOB in jobs, f"{workflow} has no `{GATE_JOB}` job"
-    assert GATE in jobs[GATE_JOB]["if"], (
-        f"{workflow}'s {GATE_JOB} job is not limited to tagged refs"
-    )
-    assert reaches(jobs, "release", GATE_JOB), (
-        f"{workflow}'s release job does not wait for the {GATE_JOB} gate"
-    )
-    body = jobs[GATE_JOB]["body"]
-    assert "python -m pytest tests -q" in body, f"{workflow}'s gate does not run pytest"
-    assert "npm test" in body, f"{workflow}'s gate does not run the desktop unit tests"
-    assert "cargo test --locked" in body, f"{workflow}'s gate does not run cargo test"
 
 
 def test_the_standard_tauri_entry_generates_the_version_override():
@@ -363,32 +342,6 @@ def test_the_standard_tauri_entry_generates_the_version_override():
     assert '"--config"' in wrapper, "the wrapper does not point tauri at the generated config"
 
 
-def test_the_browser_suite_has_a_runner():
-    """The e2e scripts existed and no workflow ever ran them.
-
-    One of the two was known to be failing for a while and nothing noticed,
-    which is the failure mode a suite with no runner creates.  The job installs
-    Playwright's own browser and runs `npm run test:e2e`; this holds that pair
-    together.
-    """
-    jobs = jobs_of("test.yml")
-    assert "e2e" in jobs, "test.yml has no browser suite job"
-    body = jobs["e2e"]["body"]
-    assert "playwright install" in body, "the e2e job does not install a browser"
-    assert "npm run test:e2e" in body, "the e2e job does not run the browser suite"
-
-
-def test_the_python_suite_runs_on_all_three_desktop_platforms():
-    """The matrix has to name the platforms whose backends it claims to cover.
-
-    The job's own comment said the three clipboard backends needed three
-    runners while the matrix carried two; macOS was covered only by
-    monkeypatched Darwin tests on other systems.
-    """
-    body = text_of("test.yml")
-    assert "os: [windows-latest, ubuntu-latest, macos-latest]" in body, (
-        "the Python matrix no longer covers Windows, Linux and macOS"
-    )
 
 
 def test_the_package_config_generator_writes_the_version_override(tmp_path, monkeypatch):

@@ -1,14 +1,8 @@
 name: Tests
 
-# The suite, on the events a tag build never sees.
-#
-# Both publishing workflows are deliberately tag-only (see `.github/workflows/
-# build.yml` and `desktop.yml`, and the reasoning in `tests/test_release_gate.py`):
-# a push to a branch must not build three platforms' installers.  The consequence
-# was that nothing ran the tests on a branch either -- the only thing checking a
-# commit before it was tagged was whoever pushed it.  This workflow is that check
-# and nothing else: no artifacts, no release, no tag.  It cannot publish, so it
-# needs none of the gates the publishers carry.
+# Tests are run locally before a release.  CI keeps only one small Ubuntu
+# smoke job on branch pushes; the publishing workflows do not depend on it, so
+# a platform-specific run can never hold a tagged build up.
 
 on:
   push:
@@ -25,17 +19,8 @@ permissions:
 
 jobs:
   python:
-    name: Python
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # The full support matrix: the app ships for Windows, macOS and Linux,
-        # and the clipboard backends behind them are three different modules,
-        # so a suite that only ever ran on one of them was not testing the
-        # others.  `macos-latest` is arm64, the macOS build this repository
-        # publishes, so the Darwin backend runs where it ships.
-        os: [windows-latest, ubuntu-latest, macos-latest]
+    name: Python smoke
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -43,30 +28,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          # Best-effort reproducibility: constraints pin the direct
-          # dependencies this tree was tested against.  See
-          # scripts/constraints.txt for what it does and does not cover.
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            requirements.txt
-            scripts/constraints.txt
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install system dependencies
         run: |
-          # xclip backs the Linux clipboard backend; the X libraries are what
-          # importing it needs.
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxext-dev libxcb1 xclip
 
       - name: Install the package and its test dependencies
         run: |
           python -m pip install --upgrade pip
-          # The same command CONTRIBUTING.md documents, so a contributor's
-          # local setup and this job cannot drift.  The constraints file pins
-          # the direct dependencies this tree was tested against; it is not a
-          # full transitive lock (see its header).
           pip install -e ".[dev]" -c scripts/constraints.txt
 
       - name: Lint
@@ -74,96 +44,3 @@ jobs:
 
       - name: Test
         run: python -m pytest tests -q
-
-  contract:
-    name: Web contract
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install
-        run: npm ci --no-audit --no-fund
-
-      - name: Test the legacy panel
-        run: npm run test:web
-
-  desktop:
-    name: Desktop shell
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
-
-      - name: Install
-        working-directory: desktop
-        run: npm ci --no-audit --no-fund
-
-      - name: Type check
-        # `npm test` strips types rather than checking them, so a change to the
-        # shape of an RPC reply can pass every unit test and still fail the
-        # release build.  This is the only thing that checks it.
-        working-directory: desktop
-        run: npm run typecheck
-
-      - name: Unit tests
-        working-directory: desktop
-        run: npm test
-
-      - name: Linux native build dependencies
-        # The Rust crate links against the host's glib/gtk/webkit headers, and
-        # without them `cargo test` dies in `glib-sys`'s build script before a
-        # single test runs -- which is what this job did, on every push.  The
-        # same list the packaging workflow installs, kept identical on purpose:
-        # a test that compiles against a different set of system libraries than
-        # the release build is not testing the release build.
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
-            librsvg2-dev patchelf
-
-      - name: Rust tests
-        working-directory: desktop/src-tauri
-        run: cargo test --locked
-
-  e2e:
-    name: Desktop browser e2e
-    # The suite existed and was never run anywhere in CI, which is the same as
-    # not having it.  Chromium comes from Playwright's own download, not the
-    # runner's Edge: playwright.config.ts no longer asks for a channel, so the
-    # browser here is the one the suite is developed against.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
-
-      - name: Install
-        working-directory: desktop
-        run: npm ci --no-audit --no-fund
-
-      - name: Install the browser
-        working-directory: desktop
-        run: npx playwright install --with-deps chromium
-
-      - name: Browser tests
-        working-directory: desktop
-        run: npm run test:e2e

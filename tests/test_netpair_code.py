@@ -86,7 +86,10 @@ class TestATypoFailsClosed:
         bits, not a tolerance this test is granting.
         """
         alphabet = R.NETPAIR_ALPHABET
-        code, _ = a_code()
+        # A fixed secret: the survivor count is a property of *this* code, and
+        # drawing a random one made the bound below flaky by a couple of
+        # standard deviations (measured: one CI run in a few hundred).
+        code, _ = a_code(secret="K7Q2M9Z")
         flat = code.replace("-", "")
 
         rejected = accepted = 0
