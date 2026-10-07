@@ -10,6 +10,7 @@ than at whichever entry point happens to call :func:`setup_file_logging`,
 because the reader below parses the level field back out of it.
 """
 
+import contextlib
 import logging
 import logging.handlers
 import os
@@ -49,20 +50,77 @@ PROBLEM_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})
 _LEVEL_FIELD = re.compile(r"^\d{4}-\d{2}-\d{2} [\d:.]+\s+\[([A-Z]+)\s*\]")
 
 
-def setup_file_logging(stderr_level: int = logging.WARNING) -> bool:
+# The file handler's own default.  ``config.Config.log_level`` defaults to
+# INFO, and the settings page offers DEBUG/INFO/WARNING/ERROR; the handler has to
+# agree with that default or selecting INFO changes nothing -- the root logger
+# stays at DEBUG so a DEBUG selection can still reach it.
+DEFAULT_FILE_LEVEL = logging.INFO
+
+_FILE_LEVEL_NAMES = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def resolve_file_level(level) -> int:
+    """Coerce a configured level into a logging level, INFO when it is unknown.
+
+    Strings are the names the config and the settings page use; integers are the
+    ``logging`` constants callers pass directly.  Anything else -- including the
+    misspelled level a hand-edited config can carry -- is the INFO default that
+    ``config.Config.log_level`` itself uses.
+    """
+    if isinstance(level, bool):
+        return DEFAULT_FILE_LEVEL
+    if isinstance(level, int):
+        return level
+    return _FILE_LEVEL_NAMES.get(str(level or "").strip().upper(), DEFAULT_FILE_LEVEL)
+
+
+def set_file_log_level(level) -> bool:
+    """Point the rotating file handler at *level*, falling back to INFO.
+
+    Called by the sidecar once the config is loaded, and again whenever the
+    settings page saves ``log_level``: the handler is built before either of
+    those happens, at the default, so without this a level picked in the UI only
+    took effect on the next restart.
+
+    Returns whether a file handler was found.  An unknown *level* is not a
+    failure: it is INFO, the same answer the config default gives.  The stderr
+    handler is deliberately not touched.
+    """
+    resolved = resolve_file_level(level)
+    found = False
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.handlers.RotatingFileHandler):
+            handler.setLevel(resolved)
+            found = True
+    return found
+
+
+def setup_file_logging(
+    stderr_level: int = logging.WARNING, file_level=DEFAULT_FILE_LEVEL
+) -> bool:
     """Log to the rotating file the log view reads, and to stderr above *stderr_level*.
 
     The root logger is left at DEBUG so records reach the file handler, which is
-    what decides how much is kept; stderr keeps its own higher level so the
-    parent process's pipe is not flooded with the running account.
+    what decides how much is kept; *file_level* (INFO by default) is the level it
+    starts at, and :func:`set_file_log_level` moves it once the configured level
+    is known.  stderr keeps its own higher level so the parent process's pipe is
+    not flooded with the running account.
 
     Idempotent, and never raises: a log directory that cannot be created is not
-    a reason for the application to refuse to start. Returns whether the file
-    handler is in place.
+    a reason for the application to refuse to start.  A second call applies
+    *file_level* to the handler already in place rather than ignoring it.
+    Returns whether the file handler is in place.
     """
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     _quiet_noisy_loggers()
+    level = resolve_file_level(file_level)
 
     if not any(
         isinstance(handler, logging.StreamHandler)
@@ -79,7 +137,10 @@ def setup_file_logging(stderr_level: int = logging.WARNING) -> bool:
         )
         root.addHandler(stream)
 
-    if any(isinstance(handler, logging.FileHandler) for handler in root.handlers):
+    existing = [handler for handler in root.handlers if isinstance(handler, logging.FileHandler)]
+    if existing:
+        for handler in existing:
+            handler.setLevel(level)
         return True
     path = log_path()
     if path is None:
@@ -95,7 +156,7 @@ def setup_file_logging(stderr_level: int = logging.WARNING) -> bool:
     except OSError as exc:
         logging.getLogger(__name__).warning("Could not open the log file %s: %s", path, exc)
         return False
-    handler.setLevel(logging.DEBUG)
+    handler.setLevel(level)
     handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
     root.addHandler(handler)
     return True
@@ -254,6 +315,19 @@ SHARE_DIR_NAME = "share"
 # timer, so a device that never shares again keeps nothing.
 SHARE_MAX_AGE = 3600.0
 
+# How many collected logs one device may leave behind, and how old a collected
+# log may be before it is dropped even when it is one of that device's newest.
+# The folder had no sweep at all: every collection added a file and nothing ever
+# removed one, so it grew for as long as log sharing was used.
+COLLECTED_KEEP_PER_DEVICE = 5
+COLLECTED_MAX_AGE_DAYS = 30
+# ``<safe device name>-<YYYYmmdd-HHMMSS>[-N].log``, the shape
+# ``stage_collected_log`` writes.  The device is everything before the stamp;
+# the optional ``-N`` is the same-second collision counter, and it is stripped
+# before grouping so a device's files are compared as one set.  Files that do
+# not match are left alone -- they are not ours to delete.
+_COLLECTED_NAME = re.compile(r"^(?P<device>.+)-(?P<stamp>\d{8}-\d{6})(?:-\d+)?\.log$")
+
 
 def collected_dir(home: str | None = None) -> Path:
     """Where logs collected from other devices are filed."""
@@ -309,6 +383,46 @@ def _prune_shares(target_dir: Path) -> None:
             continue
 
 
+def _prune_collected(target_dir: Path, incoming_stem: str = "") -> None:
+    """Keep the collected-log folder bounded: newest five per device, 30 days.
+
+    Files are grouped by the device their ``<device>-<stamp>[-N].log`` name
+    names, and recency is the file's own mtime (a staged copy keeps the mtime it
+    arrived with), so two copies from the same second keep a stable order.  A
+    file older than :data:`COLLECTED_MAX_AGE_DAYS` goes even when it is one of a
+    device's newest.
+
+    *incoming_stem* is the file ``stage_collected_log`` is about to move in.
+    When it is given, the device it belongs to keeps one slot free, so the
+    folder ends at :data:`COLLECTED_KEEP_PER_DEVICE` after the write rather than
+    one over it.  Called without it, the function simply keeps the five newest.
+    """
+    cutoff = time.time() - COLLECTED_MAX_AGE_DAYS * 86400
+    incoming = _COLLECTED_NAME.match(incoming_stem) if incoming_stem else None
+    incoming_device = incoming.group("device") if incoming is not None else ""
+    grouped: dict[str, list[tuple[int, float, str, Path]]] = {}
+    for entry in target_dir.glob("*.log"):
+        match = _COLLECTED_NAME.match(entry.name)
+        if match is None or not entry.is_file():
+            continue
+        try:
+            info = entry.stat()
+        except OSError:
+            continue
+        grouped.setdefault(match.group("device"), []).append(
+            (info.st_mtime_ns, info.st_mtime, entry.name, entry)
+        )
+    for device, entries in grouped.items():
+        entries.sort(key=lambda item: item[0], reverse=True)
+        keep = COLLECTED_KEEP_PER_DEVICE
+        if device == incoming_device:
+            keep -= 1
+        for index, (_mtime_ns, mtime, _name, path) in enumerate(entries):
+            if index >= keep or mtime < cutoff:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+
+
 def stage_collected_log(saved_path: str, device_name: str, home: str | None = None) -> str:
     """File a peer's log where the user can find it; returns its new path.
 
@@ -317,6 +431,9 @@ def stage_collected_log(saved_path: str, device_name: str, home: str | None = No
     this is and when it was taken.  Raises on any filesystem failure, so the
     caller can report a collection that did not land rather than a folder that
     is quietly missing one device.
+
+    The folder is swept on the way in (see :func:`_prune_collected`), so a device
+    cannot leave an unbounded pile of logs here.
     """
     target_dir = collected_dir(home)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -327,6 +444,9 @@ def stage_collected_log(saved_path: str, device_name: str, home: str | None = No
     while target.exists():
         target = target_dir / f"{stem}-{suffix}.log"
         suffix += 1
+    # Before the move, and counting the file that is about to land: keeping five
+    # of the existing files and then adding one would end at six.
+    _prune_collected(target_dir, incoming_stem=target.name)
     shutil.move(str(saved_path), str(target))
     return str(target)
 

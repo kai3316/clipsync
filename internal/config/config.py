@@ -387,7 +387,20 @@ def _log_dir() -> Path:
     Deliberately distinct from ``_config_dir()``: on macOS and Linux logs live
     in the conventional log/data directory, not the config directory (which
     holds data files and secrets).
+
+    ``CLIPSYNC_LOG_DIR`` overrides it the same way ``CLIPSYNC_CONFIG_DIR``
+    overrides the config directory, and for the same reason: a test run (or a
+    packaged build) must be able to keep the application's log out of the
+    developer's own.  An override has to be absolute -- a relative one would put
+    the log wherever the process happened to start, which is not a directory
+    anyone can find again.
     """
+    override = os.environ.get("CLIPSYNC_LOG_DIR")
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise ValueError("CLIPSYNC_LOG_DIR must be an absolute path")
+        return path
     system = platform.system()
     if system == "Windows":
         base = os.environ.get("APPDATA", os.path.expanduser("~"))

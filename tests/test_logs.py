@@ -6,6 +6,8 @@ viewer's job only), with the documented error codes coming back instead of an
 exception.
 """
 
+import contextlib
+import logging
 import os
 import time
 from pathlib import Path
@@ -154,3 +156,251 @@ def test_collected_logs_are_named_for_the_device_that_sent_them(tmp_path):
     second = logs_module.stage_collected_log(str(again), "a/b:c\"d", home=str(tmp_path))
     assert second != path
     assert Path(second).read_text(encoding="utf-8") == "second\n"
+
+
+# —— the file handler's own level ————————————————————————————————————
+
+
+def _file_handler():
+    root = logging.getLogger()
+    return next(
+        (
+            handler
+            for handler in root.handlers
+            if isinstance(handler, logging.handlers.RotatingFileHandler)
+        ),
+        None,
+    )
+
+
+@pytest.fixture
+def file_logging(tmp_path, monkeypatch):
+    """Run setup_file_logging against a private directory, then clean up.
+
+    The handler it adds lives on the process root logger, so the test puts the
+    handler list and the root level back afterwards; otherwise every later test
+    in the process inherits both.
+    """
+    from internal.config import config as config_module
+
+    directory = tmp_path / "logs"
+    directory.mkdir()
+    monkeypatch.setattr(config_module, "_log_dir", lambda: directory)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    before_level = root.level
+    # A handler another test started for real (the entrypoint tests call
+    # setup_file_logging) would make setup_file_logging return early and point
+    # the assertions at that file; put it aside and restore it afterwards.
+    stale = [handler for handler in root.handlers if isinstance(handler, logging.FileHandler)]
+    for handler in stale:
+        root.removeHandler(handler)
+    yield directory
+    for handler in list(root.handlers):
+        if handler not in before:
+            root.removeHandler(handler)
+            with contextlib.suppress(Exception):
+                handler.close()
+    for handler in stale:
+        root.addHandler(handler)
+    root.setLevel(before_level)
+
+
+def test_the_default_file_level_matches_the_config_default():
+    """Two defaults, one meaning: a fresh config and a fresh handler are INFO."""
+    from internal.config.config import Config
+
+    assert logging.getLevelName(Config().log_level) == logs_module.DEFAULT_FILE_LEVEL
+
+
+def test_setup_file_logging_starts_the_file_handler_at_info(file_logging):
+    """DEBUG on the root must not mean DEBUG in the file.
+
+    The root logger has to stay at DEBUG for a DEBUG selection to reach the
+    handler at all, but the handler's own level decides what is written, and the
+    config default is INFO.  Before this, both were DEBUG and selecting INFO in
+    the settings page changed nothing.
+    """
+    assert logs_module.setup_file_logging()
+    handler = _file_handler()
+    assert handler is not None
+    assert handler.level == logging.INFO
+    assert logging.getLogger().level == logging.DEBUG
+
+
+def test_setup_file_logging_leaves_the_handlers_it_found_alone(file_logging):
+    """The file level is the file handler's; stderr keeps its own WARNING."""
+    root = logging.getLogger()
+    before = {id(handler): handler.level for handler in root.handlers}
+
+    assert logs_module.setup_file_logging()
+
+    for handler in root.handlers:
+        if id(handler) in before:
+            assert handler.level == before[id(handler)]
+    added_streams = [
+        handler
+        for handler in root.handlers
+        if id(handler) not in before
+        and isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+    ]
+    for handler in added_streams:
+        assert handler.level == logging.WARNING
+
+
+def test_the_default_file_level_keeps_debug_out_of_the_file(file_logging):
+    assert logs_module.setup_file_logging()
+    log = logging.getLogger("internal.data.logs.test")
+    log.debug("debug-line-must-not-land-123")
+    log.info("info-line-must-land-123")
+    _file_handler().flush()
+
+    text = (file_logging / logs_module.LOG_FILE_NAME).read_text(encoding="utf-8")
+    assert "info-line-must-land-123" in text
+    assert "debug-line-must-not-land-123" not in text
+
+
+def test_set_file_log_level_switches_and_falls_back_to_info(file_logging):
+    assert logs_module.setup_file_logging()
+    handler = _file_handler()
+
+    assert logs_module.set_file_log_level("DEBUG") is True
+    assert handler.level == logging.DEBUG
+    logging.getLogger("internal.data.logs.test").debug("debug-line-now-lands-456")
+    handler.flush()
+    assert "debug-line-now-lands-456" in (
+        file_logging / logs_module.LOG_FILE_NAME
+    ).read_text(encoding="utf-8")
+
+    assert logs_module.set_file_log_level(logging.ERROR) is True
+    assert handler.level == logging.ERROR
+
+    # A value the config should never hold still gets the documented default.
+    assert logs_module.set_file_log_level("banana") is True
+    assert handler.level == logging.INFO
+
+
+def test_setup_file_logging_applies_the_level_it_was_given(file_logging):
+    assert logs_module.setup_file_logging(file_level="DEBUG")
+    assert _file_handler().level == logging.DEBUG
+    # Idempotent, but the second call's level is not ignored.
+    assert logs_module.setup_file_logging(file_level="WARNING")
+    assert _file_handler().level == logging.WARNING
+
+
+def test_saving_log_level_applies_it_to_the_live_handler(file_logging, monkeypatch):
+    """The settings page's save has to reach the handler, not just the config.
+
+    ``setup_file_logging`` opens the handler before the config exists, so its
+    level starts at the default; the web API's ``update_settings`` is the one
+    function both the HTTP and the sidecar-RPC settings paths run through, and
+    this is the call that keeps a saved level from waiting for a restart.
+    """
+    from internal.config.config import Config
+    from internal.web.api import settings as settings_api
+
+    assert logs_module.setup_file_logging()
+    handler = _file_handler()
+    assert handler.level == logging.INFO
+
+    monkeypatch.setattr(
+        settings_api, "_persist_preserving_at_rest_private_key", lambda _cfg: None
+    )
+    cfg = Config()
+    result, status = settings_api.update_settings(
+        b'{"log_level": "DEBUG"}', cfg, on_settings_change=None, enc_mgr=None
+    )
+
+    assert (status, result["ok"]) == (200, True)
+    assert cfg.log_level == "DEBUG"
+    assert handler.level == logging.DEBUG
+
+
+def test_set_file_log_level_reports_when_no_file_handler_exists():
+    root = logging.getLogger()
+    removed = [handler for handler in root.handlers if isinstance(handler, logging.FileHandler)]
+    for handler in removed:
+        root.removeHandler(handler)
+    try:
+        assert logs_module.set_file_log_level("DEBUG") is False
+    finally:
+        for handler in removed:
+            root.addHandler(handler)
+
+
+# —— collected logs are bounded ———————————————————————————————————
+
+
+def _collected_copy(path: Path, when: float) -> Path:
+    path.write_text("copy\n", encoding="utf-8")
+    os.utime(path, (when, when))
+    return path
+
+
+def test_collected_logs_keep_the_newest_five_per_device(tmp_path):
+    """One busy phone cannot evict a laptop's logs: the sweep is per device."""
+    target = tmp_path / "ClipSync-logs"
+    target.mkdir()
+    now = time.time()
+    laptop = [
+        _collected_copy(target / f"laptop-2026010{index + 1}-101010.log", now - (8 - index) * 60)
+        for index in range(7)
+    ]
+    phone = [
+        _collected_copy(target / f"phone-2026010{index + 1}-101010.log", now - (3 - index) * 60)
+        for index in range(3)
+    ]
+    # The same-second collision suffix is that device's newest copy, not a
+    # device called "laptop-20260107-101010".
+    collision = _collected_copy(target / "laptop-20260107-101010-2.log", now)
+
+    logs_module._prune_collected(target)
+
+    kept = {path.name for path in target.glob("laptop-*.log")}
+    assert len(kept) == logs_module.COLLECTED_KEEP_PER_DEVICE
+    assert collision.name in kept
+    assert all(path.exists() for path in laptop[3:])
+    assert all(not path.exists() for path in laptop[:3])
+    assert all(path.exists() for path in phone)
+
+
+def test_collected_logs_older_than_thirty_days_are_dropped(tmp_path):
+    target = tmp_path / "ClipSync-logs"
+    target.mkdir()
+    now = time.time()
+    old = _collected_copy(
+        target / "laptop-20251201-101010.log",
+        now - (logs_module.COLLECTED_MAX_AGE_DAYS + 1) * 86400,
+    )
+    fresh = _collected_copy(target / "laptop-20260101-101010.log", now)
+
+    logs_module._prune_collected(target)
+
+    assert not old.exists()
+    assert fresh.exists()
+
+
+def test_staging_a_collected_log_leaves_five_for_that_device(tmp_path):
+    """The sweep runs on the way in, counting the file that is about to land.
+
+    Five existing copies plus the new one would be six, so the incoming device
+    keeps one slot free for it.
+    """
+    target = tmp_path / "Downloads" / "ClipSync-logs"
+    target.mkdir(parents=True)
+    now = time.time()
+    existing = [
+        _collected_copy(target / f"laptop-2026010{index + 1}-101010.log", now - (5 - index) * 60)
+        for index in range(5)
+    ]
+    saved = tmp_path / "received.log"
+    saved.write_text("came from a peer\n", encoding="utf-8")
+
+    filed = Path(logs_module.stage_collected_log(str(saved), "laptop", home=str(tmp_path)))
+
+    names = {path.name for path in target.glob("laptop-*.log")}
+    assert len(names) == logs_module.COLLECTED_KEEP_PER_DEVICE
+    assert filed.name in names
+    assert existing[0].name not in names, "the oldest copy made room"
+    assert not saved.exists()

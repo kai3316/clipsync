@@ -267,9 +267,10 @@ def test_the_same_sighting_twice_is_not_reported_twice(monkeypatch):
 # ── who is still here ───────────────────────────────────────────────────
 #
 # Presence is measured, not inferred: this machine asks the network who is
-# there every ten seconds, and a name that goes unheard for twenty is a device
-# that has left.  Nothing here needs a socket or a thread -- the round takes
-# the answers it is given.
+# there every ten seconds, and a name that goes unheard for sixty is a device
+# that has left.  Twenty was the old budget, two dropped answers, and the logs
+# showed it produced flaps while the peers were up -- so the timeout is six
+# rounds now, and the tests below pin both halves of that.
 
 
 def rig(peers):
@@ -433,6 +434,136 @@ def test_resuming_the_browse_does_not_lose_a_device_that_answers():
 
     assert lost == []
     assert subject._known_peers != {}
+
+
+def test_a_couple_of_missed_answers_does_not_report_a_peer_lost():
+    """Two dropped multicast answers are not a departure.
+
+    The old timeout was 20 s, so the silence measured here (two rounds plus a
+    second) reported the peer lost while it was still there; the logs show that
+    as the Peer lost/Discovered pairs 0.3 s apart.  The peer has to miss six
+    consecutive answers now, and the second half of the test pins that a
+    genuinely long silence is still reported.
+    """
+    subject, found, lost, answering = rig({"Kitchen-9f2a": "peer-2"})
+    peer = Discovery._hash_device_id("peer-2")
+    subject._presence_round()
+    assert [call[0] for call in found] == [peer]
+
+    with subject._heard_lock:
+        for name in subject._heard:
+            subject._heard[name] -= 2 * discovery_module.PRESENCE_INTERVAL_SECONDS + 1
+    answering.clear()
+    subject._presence_round()
+
+    assert lost == [], "two missed rounds were read as a departure"
+    assert peer in subject._known_peers
+
+    # Six missed rounds, on the other hand, is a device that has left.
+    with subject._heard_lock:
+        for name in subject._heard:
+            subject._heard[name] -= discovery_module.PRESENCE_TIMEOUT_SECONDS
+    subject._presence_round()
+
+    assert lost == [peer]
+    assert subject._known_peers == {}
+
+
+def test_a_browse_that_asks_and_hears_nobody_is_rebuilt(caplog):
+    """asked=True answered=0 for a minute is a deaf socket, not a quiet LAN.
+
+    ``zc.send`` does not raise into a socket with no route, so the presence
+    round keeps logging asked=True while the device list empties -- six ~31
+    minute runs of exactly that are in pc-zhao's log.  The repair replaces the
+    Zeroconf instance through the path the address watcher already uses, which
+    is what clears it in the field; a peer that was seen at least once is what
+    tells this apart from a network with nobody on it.
+    """
+    import logging
+
+    subject, found, lost, answering = rig({"Kitchen-9f2a": "peer-2"})
+    subject._presence_round()
+    assert found, "the rig never discovered the peer"
+
+    rebuilt: list[int] = []
+    subject._restart_zeroconf = lambda: rebuilt.append(1)
+    answering.clear()
+    with subject._heard_lock:
+        subject._heard.clear()
+
+    with caplog.at_level(logging.INFO, logger="internal.transport.discovery"):
+        for _ in range(discovery_module.BROWSE_REBUILD_AFTER_EMPTY_ROUNDS):
+            subject._presence_round()
+
+    assert rebuilt == [1], f"the deaf browse was rebuilt {len(rebuilt)} times"
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "heard nobody" in r.getMessage()
+    ]
+    assert warnings, "the rebuild was not said out loud"
+
+
+def test_a_network_with_no_peers_is_not_rebuilt():
+    """A repair that fires on an empty network is worse than none.
+
+    Nothing has ever answered here, so there is no evidence that anything is
+    broken -- the browse must not be torn down and rebuilt every minute just
+    because the user is alone on the LAN.
+    """
+    subject, found, lost, answering = rig({})
+
+    rebuilt: list[int] = []
+    subject._restart_zeroconf = lambda: rebuilt.append(1)
+
+    for _ in range(discovery_module.BROWSE_REBUILD_AFTER_EMPTY_ROUNDS + 2):
+        subject._presence_round()
+
+    assert rebuilt == []
+
+
+def test_a_removed_record_does_not_report_a_peer_that_just_answered():
+    """Removed is not proof of departure while the peer is still answering.
+
+    The field logs have the ServiceBrowser log ``Peer lost`` 0.3 s before the
+    presence round logs ``Discovered peer`` and ``answered=3 known=3`` for the
+    same device.  One path must not overrule the answers; the sweep, which
+    reads them, decides.
+    """
+    subject, found, lost, answering = rig({"Kitchen-9f2a": "peer-2"})
+    peer = Discovery._hash_device_id("peer-2")
+    subject._presence_round()
+
+    subject._handle_service_removed("Kitchen-9f2a._clipsync._tcp.local.")
+
+    assert lost == [], "a Removed flap reported a peer that was answering"
+    assert peer in subject._known_peers
+    assert "Kitchen-9f2a._clipsync._tcp.local." in subject._service_to_peer
+
+    # And the arbitration still ends: with no answer for a full timeout the
+    # sweep reports the loss it deferred.
+    goes_silent(subject, answering)
+    subject._presence_round()
+    assert lost == [peer]
+
+
+def test_a_removed_record_after_the_grace_window_is_still_reported():
+    """A goodbye from a peer that stopped answering is reported by this path.
+
+    The grace window is bounded: once the last answer is older than it, the
+    Removed record is the only evidence left and the loss is reported at once.
+    """
+    subject, found, lost, answering = rig({"Kitchen-9f2a": "peer-2"})
+    peer = Discovery._hash_device_id("peer-2")
+    subject._presence_round()
+
+    with subject._heard_lock:
+        for name in subject._heard:
+            subject._heard[name] -= discovery_module.REMOVED_GRACE_SECONDS + 1
+    subject._handle_service_removed("Kitchen-9f2a._clipsync._tcp.local.")
+
+    assert lost == [peer]
+    assert subject._known_peers == {}
 
 
 def test_only_a_pointer_that_just_arrived_counts_as_hearing_a_peer():

@@ -7,7 +7,7 @@ import sys
 from internal.adapters.sidecar.rpc import RpcServer, encode_frame
 from internal.application.bootstrap import SidecarApplication
 from internal.application.errors import ApplicationError
-from internal.data.logs import setup_file_logging
+from internal.data.logs import set_file_log_level, setup_file_logging
 
 
 def _fatal(error: dict) -> None:
@@ -89,6 +89,13 @@ def main(argv=None) -> int:
             runtime_factory=runtime_factory, update_checks=not args.history_only
         )
         app.lifecycle.start()
+        # The file handler is opened before the config exists -- startup failures
+        # have to land somewhere -- so the configured level is applied once the
+        # application has loaded it.  ``getattr`` because the entrypoint tests
+        # drive this function with a lifecycle-only stub.
+        config = getattr(app, "config", None)
+        if config is not None:
+            set_file_log_level(getattr(config, "log_level", ""))
         result = RpcServer(app, sys.stdin.buffer, sys.stdout.buffer).serve()
     except ApplicationError as exc:
         _fatal(exc.as_dict())

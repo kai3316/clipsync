@@ -39,19 +39,34 @@ logger = logging.getLogger(__name__)
 # how long a name may go unheard before it is reported lost.
 #
 # The pair is the whole latency budget for "a device left": it is reported at
-# the first round after PRESENCE_TIMEOUT, so between 20 and 30 seconds -- and a
-# device has to miss two consecutive answers to get there, which is the budget
-# for one dropped multicast packet.  Both are worth more than they look: the
-# browser fires Added only on *novelty*, so before this a peer was reported lost
-# when its cached PTR lapsed (never, the library clamps it to 1125 s) and a peer
-# that had been reported lost could not come back at all until it restarted --
-# see _PresenceListener.
+# the first round after PRESENCE_TIMEOUT, so between 60 and 70 seconds, and a
+# device has to miss six consecutive answers to get there.  Twenty seconds was
+# two consecutive answers, and the field logs showed what that cost: a Wi-Fi
+# multicast drop of a round or two turned into a stream of Peer lost/Discovered
+# pairs while both devices were up -- pc-zhao lost zzz MacBook 26 times in one
+# session, zzz lost pc-zhao 18, and one hash was lost and rediscovered 0.3 s
+# later.  The line is a departure notice, and one that fires before a device
+# could plausibly have left is worse than one that arrives a minute later.
 PRESENCE_INTERVAL_SECONDS = 10.0
 # One state line per this many presence rounds, which at a 10s cadence is about a minute.  The
 # line answers "can this machine be found, and can it find anyone" from a log alone, which is
 # what a fault that a restart cures needs.
 DISCOVERY_STATE_EVERY_ROUNDS = 6
-PRESENCE_TIMEOUT_SECONDS = 20.0
+PRESENCE_TIMEOUT_SECONDS = 60.0
+
+# A browse that asks and hears nobody at all for this many consecutive rounds is
+# a broken socket, not a quiet network: see _repair_deaf_browse.
+BROWSE_REBUILD_AFTER_EMPTY_ROUNDS = 6
+# The rebuild is a repair, not a poll: a rebuild that did not help waits this
+# long before the next one, so a genuinely empty network cannot be rebuilt in a
+# tight loop.
+BROWSE_REBUILD_COOLDOWN_SECONDS = 300.0
+# A service Removed event within this long of the peer's last answer is not
+# proof that it left -- the browser reports Removed while the peer is still
+# answering the presence query (see _handle_service_removed).  The sweep is the
+# one arbiter that reads the answers, so this path defers to it inside the
+# window.
+REMOVED_GRACE_SECONDS = PRESENCE_TIMEOUT_SECONDS * 1.5
 
 # Announce on every Nth round -- 60 seconds, deliberately half of the 120 s TTL
 # a peer caches our A records for.  A peer running this build re-hears us every
@@ -629,6 +644,13 @@ class Discovery:
         # between the rebuild and the first answers reports every peer lost for
         # having been heard under a name this side had just thrown away.
         self._browse_since = 0.0
+        # Counters behind the browse repair in _repair_deaf_browse: how many
+        # consecutive asked rounds heard nobody (answered=0), whether this
+        # machine has had a peer to miss since it started, and when the browse
+        # was last rebuilt so a broken socket is not rebuilt in a tight loop.
+        self._empty_rounds = 0
+        self._had_peers = False
+        self._last_browse_rebuild = 0.0
 
     def set_callbacks(self, on_found: Callable, on_lost: Callable):
         """Set callbacks for peer discovery events.
@@ -1024,14 +1046,31 @@ class Discovery:
                     # instead of returning None — _restart_zeroconf swaps and
                     # closes the Zeroconf this round is holding.
                     logger.debug("Presence re-read failed for %s", name, exc_info=True)
+            with self._lock:
+                known = len(self._known_peers)
+            # A peer this browse has heard is what makes an empty round a
+            # fault rather than a quiet network (see _repair_deaf_browse).  A
+            # peer still known counts too: its answer to this round may have
+            # been the one that was lost.
+            if answered or known:
+                self._had_peers = True
+            if answered:
+                self._empty_rounds = 0
+            elif sent:
+                self._empty_rounds += 1
+            else:
+                # The send itself failed and warned; that is not the
+                # asked-but-nobody-answered state the repair is for.
+                self._empty_rounds = 0
             logger.debug(
                 "Presence round %d: asked=%s answered=%d known=%d",
                 self._rounds,
                 sent,
                 len(answered),
-                len(self._known_peers),
+                known,
             )
             self._report_discovery_state(asked=sent)
+            self._repair_deaf_browse()
             self._sweep_presence()
 
     def _report_discovery_state(self, *, asked: bool) -> None:
@@ -1080,6 +1119,47 @@ class Discovery:
             self._publish()
         except Exception as exc:
             logger.warning("Re-registering mDNS failed: %s: %s", type(exc).__name__, exc)
+
+    def _repair_deaf_browse(self) -> bool:
+        """Rebuild the browse when asking produces nothing for a minute.
+
+        A query that raises is reported by the round itself (see
+        _presence_round), but a socket that has gone deaf does not raise:
+        ``zc.send`` succeeds into a socket with no route, every round logs
+        ``asked=True answered=0``, and the device list silently empties.  That
+        is what pc-zhao's log shows -- 1387 of 2742 rounds over six runs of
+        about 31 minutes, with ``known_peers=0`` on 231 state lines -- and a
+        restart is what clears it, so this uses the same rebuild as the
+        address watcher (_restart_zeroconf replaces the sockets, then
+        re-registers and re-browses).  The advertisement repair above only
+        watches the registering half; this is the listening half.
+
+        Only fires when this browse has had a peer to hear, and at most once
+        per cooldown, so an empty network is left alone and a rebuild that did
+        not help does not loop.
+        """
+        if self._empty_rounds < BROWSE_REBUILD_AFTER_EMPTY_ROUNDS:
+            return False
+        if not self._had_peers:
+            return False
+        if self._netmon_stop.is_set() or self._zc is None:
+            return False
+        now = time.monotonic()
+        if now - self._last_browse_rebuild < BROWSE_REBUILD_COOLDOWN_SECONDS:
+            return False
+        self._empty_rounds = 0
+        self._last_browse_rebuild = now
+        logger.warning(
+            "Presence asked %d rounds in a row and heard nobody while peers "
+            "were known — rebuilding mDNS browsing",
+            BROWSE_REBUILD_AFTER_EMPTY_ROUNDS,
+        )
+        try:
+            self._restart_zeroconf()
+        except Exception:
+            logger.warning("Rebuilding mDNS browsing failed", exc_info=True)
+            return False
+        return True
 
     def _publish(self) -> bool:
         """Register the service once, and record the result.
@@ -1604,9 +1684,36 @@ class Discovery:
         range never sends one.
         """
         with self._lock:
-            peer_id = self._service_to_peer.pop(name, None)
-            if peer_id is None:
+            peer_id = self._service_to_peer.get(name)
+        if peer_id is None:
+            return
+        # A Removed record is not proof that the device left.  The browser
+        # reports Removed while the peer is still answering the presence query
+        # -- the logs have Discovered following Removed by 0.2-0.3 s, in the
+        # same round that logged answered=3 known=3 -- and re-adding it there
+        # is a flap the user sees as a device blinking.  A peer that answered
+        # inside the grace window is left to _sweep_presence, the one arbiter
+        # that reads the answers; a genuine goodbye ages out of _heard and is
+        # reported by the sweep a timeout later.
+        with self._heard_lock:
+            heard_at = self._heard.get(name)
+        if heard_at is not None:
+            age = time.monotonic() - heard_at
+            if age <= REMOVED_GRACE_SECONDS:
+                logger.debug(
+                    "Service %s removed but peer %s answered %.1fs ago — "
+                    "leaving it to the presence sweep",
+                    name,
+                    peer_id[:12],
+                    age,
+                )
                 return
+        with self._lock:
+            if self._service_to_peer.get(name) != peer_id:
+                # A re-announcement overtook the Removed; that Added is the
+                # newer truth and the mapping is already repaired.
+                return
+            self._service_to_peer.pop(name, None)
             # A peer that renamed itself produces Removed(old-name) possibly
             # after Added(new-name): only declare it lost if no OTHER service
             # name still maps to it, otherwise a rename makes the device

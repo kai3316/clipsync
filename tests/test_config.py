@@ -512,3 +512,22 @@ def test_backup_roundtrips_new_config_keys(tmp_path, _isolated_favorites):
     assert fresh.peer_relay_secrets == {"peer-1": "cd" * 32}
     assert fresh.ai_config_tools == cfg.ai_config_tools
     assert fresh.ai_config_custom_paths == cfg.ai_config_custom_paths
+
+
+def test_log_dir_honours_clipsync_log_dir(tmp_path, monkeypatch):
+    """The log directory is overridable the way the config directory is.
+
+    Without this, a test run that starts the sidecar entrypoint appends to the
+    developer's real ``%APPDATA%\\ClipSync`` log; ``tests/conftest.py`` points
+    the whole session at a temporary directory through this override.
+    """
+    target = tmp_path / "test-logs"
+    monkeypatch.setenv("CLIPSYNC_LOG_DIR", str(target))
+    assert config_module._log_dir() == target
+
+
+def test_log_dir_rejects_a_relative_override(monkeypatch):
+    """A relative override would put the log wherever the process started."""
+    monkeypatch.setenv("CLIPSYNC_LOG_DIR", "relative/logs")
+    with pytest.raises(ValueError):
+        config_module._log_dir()

@@ -505,6 +505,16 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
         logger.error("Failed to persist settings: %s", e)
         return {"ok": False, "error": "failed to persist settings"}, 500
 
+    if "log_level" in updated:
+        # The rotating file handler is opened before the config is loaded and
+        # starts at its own INFO default; a level saved here has to reach it
+        # now rather than on the next restart.  Both the RPC and the HTTP
+        # settings paths run through this function, so this is the one place
+        # the live handler needs to hear about it.
+        from internal.data.logs import set_file_log_level
+
+        set_file_log_level(cfg.log_level)
+
     result = None
     if on_settings_change is not None:
         try:
