@@ -735,6 +735,23 @@ def cache_asset(asset_path: str, name: str = "") -> str | None:
                 continue
             with contextlib.suppress(OSError):
                 os.remove(os.path.join(d, other))
+            # The signature is kept beside the asset it signs, so it goes when the asset goes.
+            # The sweep used to leave it: `.sig` is not an installer, so the filter above skipped
+            # it, and the cache collected one 420-byte orphan per release.  Found on a real machine
+            # as "里面有好多不同版本的更新包，旧的都保留了" -- the installers had in fact been
+            # swept correctly, and what remained were those stale signatures, which is why it
+            # looked as though nothing was being cleaned up.
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(d, other + ".sig"))
+        # And a signature whose asset is already gone, which an older build left.  Nothing else will
+        # ever reap these, and they are cheap to find.
+        for orphan in os.listdir(d):
+            if not orphan.endswith(".sig"):
+                continue
+            if os.path.exists(os.path.join(d, orphan[: -len(".sig")])):
+                continue
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(d, orphan))
         logger.info("Cached update asset at %s", dest)
         return dest
     except OSError as exc:
