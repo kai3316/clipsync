@@ -1272,10 +1272,11 @@ describe("history rendering", () => {
   });
 
 
-  it("does not offer a download from a device that is only on the relay", async () => {
-    // The row reads online -- the relay's own view -- and has no LAN link behind it.  The files can
-    // only cross the LAN channel, because that is the one with the pinned certificate, so the ask
-    // is refused on the next hop with NOT_CONNECTED.
+  it("offers a download from a device that is only on the relay, and names the route", async () => {
+    // The row reads online -- the relay's own view -- and has no LAN link behind it.  That used to
+    // mean the files could not travel at all, because they were cut at 256 KiB for a channel whose
+    // certificate is pinned.  They are cut to fit a broker message now and chunk-acked at the far
+    // end, so the row offers the download again; what it must not do is promise a LAN route.
     vi.mocked(bridge.devices).mockResolvedValue({ items: [
       { id: "peer-1", name: "Studio away", paired: true, relay: true,
         connection_state: "online", pairing_status: "paired", pairing_code: null, sas: null },
@@ -1288,11 +1289,11 @@ describe("history rendering", () => {
     try {
       await flushPromises();
       const button = app.get('[aria-label="下载文件"]');
-      expect(button.attributes("disabled"), "a relay peer must not be offered a download").toBeDefined();
-      // And the reason is the relay, not the device being away: calling it offline would send the
-      // reader to check a connection that is working.
+      expect(button.attributes("disabled"), "a relay peer is a download source now").toBeUndefined();
+      // The route is named before the click, because a relay transfer is slower and the reader is
+      // about to move a file of unknown size across the internet.
       expect(button.attributes("title"))
-        .toBe(t("通过互联网配对的设备收不了文件，请让两台设备在同一网络下"));
+        .toBe(t("从 {name} 下载这个文件（经互联网，比局域网慢）", { name: "Studio away" }));
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });

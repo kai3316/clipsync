@@ -537,6 +537,7 @@ class FileTransferManager:
         origin_paths: list[str] | None = None,
         sha256: str = "",
         signature: str = "",
+        chunk_size: int = 0,
     ) -> str:
         """Start sending *file_path* to all connected peers.
 
@@ -573,6 +574,15 @@ class FileTransferManager:
             cached one beside the asset.  It travels with an ``update`` send so
             the receiver can verify the bytes against the release signing key
             without reaching the manifest; omitted when empty.
+        chunk_size:
+            How many bytes of the file go in one frame.  Zero means this
+            manager's own ``CHUNK_SIZE`` (256 KiB), which is what every LAN
+            send uses.  A send that may cross the relay passes the smaller size
+            that fits one broker message, because the chunk size is fixed when
+            the offer is made and the route is chosen per frame -- sizing by the
+            LAN alone hands later frames to a relay that refuses them, failing a
+            transfer that had already delivered most of itself.  Same reasoning,
+            and the same source of the number, as ``ChatManager.relay_chunk_for``.
 
         Returns
         -------
@@ -592,7 +602,12 @@ class FileTransferManager:
         file_size = file_path.stat().st_size
         file_name = file_path.name
         mime_type = _guess_mime_type(file_name)
-        total_chunks = max((file_size + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE, 1)
+        # One number per transfer, not the class constant read at send time: the
+        # receiver is told it in the offer and slices the file with the value it
+        # was told, so a chunk size that changed between the offer and the bytes
+        # would land every later frame at the wrong offset.
+        chunk_size = int(chunk_size) if int(chunk_size) > 0 else self.CHUNK_SIZE
+        total_chunks = max((file_size + chunk_size - 1) // chunk_size, 1)
 
         now = time.time()
         with self._lock:
@@ -608,6 +623,7 @@ class FileTransferManager:
                 "file_size": file_size,
                 "mime_type": mime_type,
                 "total_chunks": total_chunks,
+                "chunk_size": chunk_size,
                 "state": "awaiting_ack",
                 "start_time": now,
                 "_last_activity": now,
@@ -629,6 +645,11 @@ class FileTransferManager:
             "mime_type": mime_type,
             "kind": kind,
         }
+        # Carried whenever it is not this build's own default, so the receiver slices the file with
+        # the number the chunks were cut at rather than with its own constant.  Omitted for the LAN
+        # default to leave that wire format exactly as it was.
+        if chunk_size != self.CHUNK_SIZE:
+            request["chunk_size"] = chunk_size
         if entry_id:
             request["entry"] = entry_id
         if sha256:
@@ -1021,6 +1042,7 @@ class FileTransferManager:
         # Validate/coerce file_size -- a malformed value must not crash the
         # message handler or slip an absurd file into the pipeline.
         raw_size = payload.get("file_size", 0)
+        raw_chunk_size = payload.get("chunk_size", 0)
         if isinstance(raw_size, bool) or not isinstance(raw_size, int):
             logger.warning(
                 "Invalid file_size in request for transfer %s: %r", transfer_id[:8], raw_size
@@ -1044,8 +1066,19 @@ class FileTransferManager:
             file_size,
         )
 
+        # The sender's chunk size, taken from the offer rather than assumed to be this build's
+        # `CHUNK_SIZE`.  The chunks carry an index, not a byte offset, so the receiver slices at
+        # `index * chunk_size` -- with the wrong value every chunk after the first lands at the
+        # wrong offset and the file is silently corrupt while every frame arrives intact.  Absent
+        # from an older sender, which is the LAN default and what this used to assume.
+        try:
+            chunk_size = int(raw_chunk_size) if raw_chunk_size else self.CHUNK_SIZE
+        except (TypeError, ValueError):
+            chunk_size = self.CHUNK_SIZE
+        if chunk_size <= 0:
+            chunk_size = self.CHUNK_SIZE
         total_chunks = (
-            max((file_size + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE, 1) if file_size > 0 else 1
+            max((file_size + chunk_size - 1) // chunk_size, 1) if file_size > 0 else 1
         )
 
         now = time.time()
@@ -1104,6 +1137,10 @@ class FileTransferManager:
                 "file_size": file_size,
                 "mime_type": mime_type,
                 "total_chunks": total_chunks,
+                # The size the sender cut the chunks at, which is what every offset is computed
+                # from.  Kept on the record because the writing path and the retransmit path both
+                # need it long after the offer was parsed.
+                "chunk_size": chunk_size,
                 "received_chunks": 0,
                 "received_bytes": 0,
                 "temp_fh": None,
@@ -1254,7 +1291,11 @@ class FileTransferManager:
             if chunk_index in missing:
                 if temp_fh is not None and not temp_fh.closed:
                     try:
-                        temp_fh.seek(chunk_index * self.CHUNK_SIZE)
+                        # This transfer's chunk size, from its own offer: the index identifies a
+                        # chunk, not a byte offset, so the offset is index * the size they were
+                        # cut at.
+                        offset = chunk_index * int(transfer.get("chunk_size") or self.CHUNK_SIZE)
+                        temp_fh.seek(offset)
                         temp_fh.write(chunk_data)
                         missing.discard(chunk_index)
                         transfer["received_bytes"] += len(chunk_data)
@@ -1877,6 +1918,9 @@ class FileTransferManager:
             file_path = transfer["file_path"]
             total_chunks = transfer["total_chunks"]
             file_name = transfer.get("file_name", "?")
+            # This transfer's own chunk size, which is what the receiver was told in the offer.  A
+            # relay-capable send is smaller than the LAN default (see `send_file`).
+            chunk_size = int(transfer.get("chunk_size") or self.CHUNK_SIZE)
 
         logger.info(
             "Sending %d chunks for transfer %s (%s)",
@@ -1901,8 +1945,8 @@ class FileTransferManager:
             first pass lets the file pointer advance naturally.
             """
             if seek:
-                fh.seek(chunk_index * self.CHUNK_SIZE)
-            chunk_data = fh.read(self.CHUNK_SIZE)
+                fh.seek(chunk_index * chunk_size)
+            chunk_data = fh.read(chunk_size)
             frame = encode_binary_chunk(transfer_id, chunk_index, total, chunk_data)
             broadcast_fn(frame)
 
@@ -1941,7 +1985,9 @@ class FileTransferManager:
                     _send_one_chunk(fh, chunk_index, total_chunks, seek=False)
 
                     progress = (chunk_index + 1) / total_chunks
-                    bytes_sent = (chunk_index + 1) * self.CHUNK_SIZE
+                    # This transfer's own chunk size, for the same reason as the offsets: the
+                    # count of chunks sent does not convert to bytes with any other number.
+                    bytes_sent = (chunk_index + 1) * chunk_size
                     with self._lock:
                         t = self._transfers.get(transfer_id)
                         if t:

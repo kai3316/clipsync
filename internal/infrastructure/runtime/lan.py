@@ -1139,11 +1139,18 @@ class LanRuntime:
         came from the peer's own offer, and the paths are resolved on the
         peer's side, because a path is only meaningful on the machine it names.
 
-        Only a paired, currently-connected peer can be asked: the files travel
-        over the LAN channel, which is the one whose certificate is pinned, and
-        a request that named a relay peer would start a download that could
-        never complete.  The counters are checked here so the caller learns
-        immediately rather than watching a button do nothing.
+        A paired peer that is here on this network *or* reachable over the relay
+        can be asked.  This used to be LAN-only, on the reasoning that the frames
+        are 256 KiB and a relay cannot carry them -- which was true of the
+        frames, and is why the request is now answered with chunks cut to fit a
+        broker message instead of refusing the download.  The ask itself is
+        small, so it travels either way; the route for the answer is chosen when
+        the answer is built (``_file_route_for``).
+
+        A peer that is neither is refused here so the caller learns immediately
+        rather than watching a button do nothing.  The request still travels over
+        the LAN when there is one, because that path is the faster of the two and
+        is the one whose certificate is pinned.
         """
         if not entry_id or not isinstance(entry_id, str):
             raise ApplicationError("INVALID_ARGUMENT", "No entry to download")
@@ -1154,25 +1161,55 @@ class LanRuntime:
                 raise ApplicationError("NOT_CONNECTED", "Device is not connected")
             if not self.pairing.is_peer_paired(pid):
                 raise ApplicationError("NOT_PAIRED", "That device is not paired")
-            if pid not in (self.transport.get_connected_peers() or []):
+            local = pid in (self.transport.get_connected_peers() or [])
+            if not local and not self._peer_is_internet_reachable(pid):
                 raise ApplicationError("NOT_CONNECTED", "Device is not connected")
-            self.transport.send_to_peer(
-                pid,
-                encode_frame(
-                    {
-                        "msg_type": "clip_file_request",
-                        "entry": entry_id,
-                        "ts": time.time(),
-                    },
-                    source_device=self.config.device_id,
-                ),
+            frame = encode_frame(
+                {
+                    "msg_type": "clip_file_request",
+                    "entry": entry_id,
+                    "ts": time.time(),
+                },
+                source_device=self.config.device_id,
             )
+            if not self.transport.send_to_peer(pid, frame):
+                # No LAN link, so the ask goes over the relay.  The outstanding-request
+                # ledger is armed either way: it is what lets the *answer* be accepted
+                # without a prompt, and the answer arrives on whichever route works.
+                self._relay_publish_to_peer(frame, pid)
             with self._archive_lock:
                 self._clip_file_outstanding[pid] = (entry_id, time.monotonic() + CLIP_FILE_WINDOW)
             logger.info("Asked %s for the files behind a history entry", pid[:8])
             return {"requested": True}
 
         return self._command(run)
+
+    def _file_route_for(self, pid: str) -> tuple:
+        """How to send a file's frames to *pid*, and at what chunk size.
+
+        Two questions with one answer each, and they are coupled: the chunk size
+        is fixed when the offer is made while the route is chosen per frame, so a
+        transfer that *might* cross the relay has to be cut small enough for it
+        from the start.  Sizing by the live LAN link alone was the bug chat
+        already fixed for itself -- a link that drops halfway through a file
+        hands every remaining 256 KiB frame to a broker that refuses them,
+        failing a transfer that had already delivered most of itself.
+
+        The LAN case keeps the LAN wire format exactly as it was: the peer's own
+        send, and no ``chunk_size`` on the offer, so both that order and older
+        builds read it as they always did.
+
+        The relay case borrows the chat closure, which is LAN-first with a relay
+        fallback and carries the chunk-ack tag the public broker needs to be
+        trusted with a burst.  Sharing that closure rather than writing a second
+        one is the point: it is where "a dual-connected peer is sent to exactly
+        once" already lives, and a second copy of that rule is a second place for
+        it to be wrong.
+        """
+        if self._peer_is_internet_reachable(pid):
+            size = ChatManager.relay_chunk_for(self.config.relay_max_message_bytes)
+            return self._chat_send_fn(pid), size
+        return (lambda data: self.transport.send_to_peer(pid, data)), 0
 
     def _serve_clip_file(self, pid: str, payload: dict) -> None:
         """Answer a peer's request for the files behind an entry we published.
@@ -1235,7 +1272,9 @@ class LanRuntime:
                 return
             prepared.append((subject, archive))
 
-        send_fn = lambda data: self.transport.send_to_peer(pid, data)  # noqa: E731
+        # Asked for here rather than at the send: a peer that drops off the LAN mid-click is still
+        # the same peer on the relay, and this is the one place that decides which frames go where.
+        send_fn, chunk_size = self._file_route_for(pid)
         sent = 0
         orphaned: list[tuple[str, str]] = []
         # walk the same order ``prepared`` was built in, so each entry keeps the
@@ -1253,6 +1292,7 @@ class LanRuntime:
                     kind="clip_file",
                     entry_id=entry_id,
                     origin_paths=[path] if archive else None,
+                    chunk_size=chunk_size,
                 )
             except OSError as error:
                 logger.info("Could not send a file to a peer: %s", error)
@@ -5852,12 +5892,27 @@ class LanRuntime:
                 self._on_log_denied(pid, getattr(msg, "_raw_payload", {}) or {})
             return
         if kind in CLIP_FILE_MSG_TYPES:
-            # Asked and answered on the LAN only.  The files travel over the
-            # channel whose certificate is pinned, so a request that arrived
-            # over the relay could only be answered with a transfer that never
-            # completes — and answering it anyway would mean reading a peer's
-            # files on the strength of a claim made on the public relay.
-            if not (trusted and not via_relay):
+            # Answered over either route now.  This used to be LAN-only for two
+            # reasons and only one of them still holds:
+            #
+            #   * "a request that arrived over the relay could only be answered
+            #     with a transfer that never completes" -- that was true of 256 KiB
+            #     frames, and it is why the answer is now cut to fit a broker
+            #     message and chunk-acked at the far end.  The receiver's own
+            #     replies travel the same way (see the file family's handler).
+            #   * "answering it anyway would mean reading a peer's files on the
+            #     strength of a claim made on the public relay" -- the claim is
+            #     not the frame's.  A relay frame's source is bound to the channel
+            #     it arrived on (the bind above), and a channel's topic and key
+            #     come from the pairing secret, so a broker can neither forge a
+            #     request nor replay one as a device it does not hold a secret
+            #     for.  That is the same trust a LAN peer's pinned certificate
+            #     carries, reached by a different mechanism -- which is why the
+            #     rest of the file family, clipboard content and chat already
+            #     cross this way.  What it is *not* is weaker consent: the reply
+            #     still only serves the entry this side was asked for, through
+            #     `_clip_file_source`.
+            if not trusted:
                 return
             if kind == "clip_file_request":
                 self._serve_clip_file(pid, getattr(msg, "_raw_payload", {}))
@@ -5936,9 +5991,6 @@ class LanRuntime:
         ):
             return
         if kind.startswith("file_") or kind.startswith("speed_test"):
-            # Dashboard transfers keep their LAN-only send closure (as legacy
-            # did), so a relayed one could never answer anyway.
-            #
             # An unpaired peer is admitted here for everything the file family
             # carries, and the manager is what settles each kind: an update or a
             # log blob against a ledger this machine armed by asking, and a
@@ -5954,12 +6006,26 @@ class LanRuntime:
             #
             # Speed tests still need the pairing: there is nothing on the other
             # side of one but this machine's bandwidth.
+            #
+            # Relayed frames are handled now, which is what makes a file copied
+            # on an internet-paired device downloadable here.  They used to be
+            # dropped, with the note that the receiver's own send closure was
+            # LAN-only so a relayed transfer "could never answer anyway" -- the
+            # same 256 KiB reasoning the sender no longer holds to.  The closure
+            # below is the chat one, which is LAN-first with a relay fallback, so
+            # every reply this manager sends (a chunk ack, a retransmit request,
+            # the completion handshake) can reach a peer that has no LAN link.
             allowed = trusted or kind in UNPAIRED_FILE_MSG_TYPES
-            if allowed and not via_relay:
+            if allowed:
                 self.file_transfer.handle_message(
                     kind,
                     getattr(msg, "_raw_payload", {}),
-                    lambda data: self.transport.send_to_peer(pid, data),
+                    # The route-aware closure, not the LAN-only one: a transfer that arrived over
+                    # the relay has to be able to answer over it.  `via_relay` is deliberately not
+                    # part of the choice -- an internet-reachable peer is chunk-acked and
+                    # relay-sized even while its LAN link is up, so a link that drops mid-transfer
+                    # does not fail the half that already arrived.
+                    self._chat_send_fn(pid),
                     pid,
                 )
             return

@@ -642,15 +642,13 @@ function isRemoteFile(item: HistoryItem) {
 function remoteFileDevice(item: HistoryItem) {
   const id = item.source_device || "";
   if (!id) return undefined;
-  // `!device.relay` is not a refinement, it is the condition.  On a relay row `connection_state` is
-  // the *relay's* view of the peer, so a device paired by internet code reads `online` while having
-  // no LAN link at all -- and the clip's files only travel over the LAN channel, whose certificate
-  // is the pinned one.  Without this the button drew live, promised 从 X 下载这个文件, and the
-  // request was refused on the next hop with NOT_CONNECTED (lan.py), which is a promise the layer
-  // behind it was written to reject.  `relay` is the field that marks the reading; see its
-  // docstring in `api/types.ts`.
+  // A relay row counts, and `relay` is what says which route the download will take.  On such a row
+  // `connection_state` is the *relay's* view of the peer (see `api/types.ts`), so `online` means the
+  // relay can see it -- which is now a route a clip's files can travel, cut to fit a broker message
+  // and chunk-acked at the far end.  Reading it as a LAN link was the earlier bug in the other
+  // direction: the row offered a download the protocol refused.
   return state.devices.find(
-    (device) => device.id === id && !device.relay && device.connection_state === "online",
+    (device) => device.id === id && device.connection_state === "online",
   );
 }
 /** Whether the row names a file this window can actually ask for.
@@ -673,12 +671,13 @@ function remoteFileTitle(item: HistoryItem) {
   if (remoteFileBusy(item)) return t("已请求下载，正在等待那台设备");
   if (!remoteFileAskable(item)) return t("这条记录无法下载");
   if (!remoteFileDevice(item)) {
-    // Two reasons a device cannot be asked, and they are not the same one: it is not here on this
-    // network, or it is here only through the relay -- where a file cannot travel at all.  Calling
-    // the second one offline would send the reader to check a connection that is working.
-    const device = state.devices.find((entry) => entry.id === (item.source_device || ""));
-    if (device?.relay) return t("通过互联网配对的设备收不了文件，请让两台设备在同一网络下");
     return t("{name} 当前不在线", { name: item.source_name || t("未知") });
+  }
+  // The route decides what to promise, and both routes now work.  A relay transfer is real and
+  // slower -- it is cut small enough for a public broker and every chunk is acked -- so the reader
+  // about to move a few hundred megabytes is told which one they are getting before they click.
+  if (remoteFileDevice(item)?.relay) {
+    return t("从 {name} 下载这个文件（经互联网，比局域网慢）", { name: item.source_name || t("未知") });
   }
   return t("从 {name} 下载这个文件", { name: item.source_name || t("未知") });
 }
