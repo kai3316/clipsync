@@ -1270,6 +1270,58 @@ describe("history rendering", () => {
       })]));
     }
   });
+
+
+  it("does not offer a download from a device that is only on the relay", async () => {
+    // The row reads online -- the relay's own view -- and has no LAN link behind it.  The files can
+    // only cross the LAN channel, because that is the one with the pinned certificate, so the ask
+    // is refused on the next hop with NOT_CONNECTED.
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "peer-1", name: "Studio away", paired: true, relay: true,
+        connection_state: "online", pairing_status: "paired", pairing_code: null, sas: null },
+    ] });
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
+      historyRow({ id: "7", content_type: "FILE_REMOTE", preview: "report.pdf",
+        source_device: "peer-1", source_name: "Studio away", offer_entry: "42" }),
+    ] });
+    const app = mountOn("history");
+    try {
+      await flushPromises();
+      const button = app.get('[aria-label="下载文件"]');
+      expect(button.attributes("disabled"), "a relay peer must not be offered a download").toBeDefined();
+      // And the reason is the relay, not the device being away: calling it offline would send the
+      // reader to check a connection that is working.
+      expect(button.attributes("title"))
+        .toBe(t("通过互联网配对的设备收不了文件，请让两台设备在同一网络下"));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+    }
+  });
+
+  it("still offers the download from the same device when it is here on this network", async () => {
+    // The control.  `relay` marks the row, not the pairing: the same device paired by code *and*
+    // seen on this network gets a LAN row, and there the file does travel.
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "peer-1", name: "Studio", paired: true, relay: false,
+        connection_state: "online", pairing_status: "paired", pairing_code: null, sas: null },
+    ] });
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
+      historyRow({ id: "7", content_type: "FILE_REMOTE", preview: "report.pdf",
+        source_device: "peer-1", source_name: "Studio", offer_entry: "42" }),
+    ] });
+    const app = mountOn("history");
+    try {
+      await flushPromises();
+      const button = app.get('[aria-label="下载文件"]');
+      expect(button.attributes("disabled")).toBeUndefined();
+      expect(button.attributes("title")).toBe(t("从 Studio 下载这个文件"));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+    }
+  });
+
   it("offers the download on a row whose kind says text but whose offer is a file", async () => {
     vi.clearAllMocks();
     vi.mocked(bridge.devices).mockResolvedValue({ items: [

@@ -642,7 +642,16 @@ function isRemoteFile(item: HistoryItem) {
 function remoteFileDevice(item: HistoryItem) {
   const id = item.source_device || "";
   if (!id) return undefined;
-  return state.devices.find((device) => device.id === id && device.connection_state === "online");
+  // `!device.relay` is not a refinement, it is the condition.  On a relay row `connection_state` is
+  // the *relay's* view of the peer, so a device paired by internet code reads `online` while having
+  // no LAN link at all -- and the clip's files only travel over the LAN channel, whose certificate
+  // is the pinned one.  Without this the button drew live, promised 从 X 下载这个文件, and the
+  // request was refused on the next hop with NOT_CONNECTED (lan.py), which is a promise the layer
+  // behind it was written to reject.  `relay` is the field that marks the reading; see its
+  // docstring in `api/types.ts`.
+  return state.devices.find(
+    (device) => device.id === id && !device.relay && device.connection_state === "online",
+  );
 }
 /** Whether the row names a file this window can actually ask for.
  *
@@ -663,7 +672,14 @@ function remoteFileBusy(item: HistoryItem) {
 function remoteFileTitle(item: HistoryItem) {
   if (remoteFileBusy(item)) return t("已请求下载，正在等待那台设备");
   if (!remoteFileAskable(item)) return t("这条记录无法下载");
-  if (!remoteFileDevice(item)) return t("{name} 当前不在线", { name: item.source_name || t("未知") });
+  if (!remoteFileDevice(item)) {
+    // Two reasons a device cannot be asked, and they are not the same one: it is not here on this
+    // network, or it is here only through the relay -- where a file cannot travel at all.  Calling
+    // the second one offline would send the reader to check a connection that is working.
+    const device = state.devices.find((entry) => entry.id === (item.source_device || ""));
+    if (device?.relay) return t("通过互联网配对的设备收不了文件，请让两台设备在同一网络下");
+    return t("{name} 当前不在线", { name: item.source_name || t("未知") });
+  }
   return t("从 {name} 下载这个文件", { name: item.source_name || t("未知") });
 }
 async function downloadRemoteFile(item: HistoryItem) {
@@ -4573,7 +4589,7 @@ async function translateText() {
                      machine, so what the row offers is the ask.  It replaces
                      rather than sits beside the copy button — two buttons on one
                      row where only one of them can work is worse than one. -->
-                <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('下载文件')" :title="remoteFileTitle(item)" :disabled="historyBusy || remoteFileBusy(item) || !remoteFileAskable(item)" @click="downloadRemoteFile(item)"><Check v-if="remoteFileBusy(item)" :size="17" /><Download v-else :size="17" /></button>
+                <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('下载文件')" :title="remoteFileTitle(item)" :disabled="historyBusy || remoteFileBusy(item) || !remoteFileAskable(item) || !remoteFileDevice(item)" @click="downloadRemoteFile(item)"><Check v-if="remoteFileBusy(item)" :size="17" /><Download v-else :size="17" /></button>
                 <button class="icon-button" :class="{ pinned: item.pinned }" :aria-label="item.pinned ? t('取消收藏') : t('收藏')" :title="item.pinned ? t('取消收藏') : t('收藏')" :disabled="historyBusy" @click="store.pin(item)"><Pin :size="17" /></button>
                 <button class="icon-button" :aria-label="t('翻译记录')" :title="t('翻译记录')" :disabled="historyBusy || translateItemReading" @click="openTranslateItem(item)"><Globe :size="17" /></button>
                 <button v-if="isWebLink(item)" class="icon-button" :aria-label="t('在浏览器打开')" :title="t('在浏览器打开')" :disabled="historyBusy" @click="openHistoryLink(item)"><ExternalLink :size="17" /></button>

@@ -490,6 +490,7 @@ export const EN: Record<string, string> = {
   "聊天中": "Chatting",
   "关闭": "Close",
   "关闭提示": "Dismiss this notice",
+  "通过互联网配对的设备收不了文件，请让两台设备在同一网络下": "A device paired over the internet cannot send files; both devices need to be on the same network",
   "关闭会话": "Close conversation",
   "会话": "Sessions",
   "附近没有可聊天的设备。": "No devices nearby to chat with.",
