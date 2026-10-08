@@ -403,9 +403,29 @@ class InternetPairingService:
         return None
 
     def note_hello(self, peer_id, name):
-        if peer_id:
-            self._names[peer_id] = name or ""
-            self._last_seen[peer_id] = time.time()
+        """Record that a peer said hello, and keep the name it gave.
+
+        The name is written to the config as well as to memory, but **not saved
+        here**: every caller already writes the config for the state change that
+        brought the hello in, and saving inside this one made a pairing write
+        twice — which the pairing tests assert against, and which is work the disk
+        does not need.  Persisting the name matters because it used to live only
+        in `self._names`, so a restart or an upgrade forgot it until that peer
+        next connected, and a history row in the meantime printed the raw peer
+        id.  Reported as "升级完以后，它的名字显示也会不太对".
+        """
+        if not peer_id:
+            return
+        self._names[peer_id] = name or ""
+        self._last_seen[peer_id] = time.time()
+        # Not for a provisional tag: the key is replaced by the peer's real id
+        # before anything is saved, so a row for it would be a name attached to
+        # nothing.
+        if not name or peer_id.startswith("pending:"):
+            return
+        names = getattr(self.config, "netpair_names", None)
+        if names is not None and names.get(peer_id) != name:
+            names[peer_id] = name
 
     def note_relay_source(self, source) -> bool:
         """Record that a relay frame came from ``source``, which may re-key it.

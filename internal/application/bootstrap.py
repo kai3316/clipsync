@@ -23,7 +23,7 @@ from internal.application.use_cases.history import (
 from internal.application.use_cases.overview import build_overview
 from internal.clipboard.format import ClipboardContent, ContentType
 from internal.clipboard.history_db import ClipboardHistoryDB
-from internal.config.config import config_dir, load, save
+from internal.config.config import config_dir, known_device_names, load, save
 from internal.data.logs import export_log, read_log_tail, split_log_lines
 from internal.data.recovery import (
     config_problem,
@@ -300,20 +300,16 @@ class SidecarApplication:
         Read from the config on every call rather than captured once: a peer
         paired after startup has clips arriving with its id on them, and the
         window would otherwise label them with a raw id until the next restart.
+
+        The map comes from `config.known_device_names`, which includes the
+        internet pairings as well as the LAN peers.  Building it here from
+        `config.peers` alone left a clip from an internet-paired device labelled
+        with its 16-character peer id -- reported as "在历史记录里下面显示的名字不对".
         """
-        names = {WEB_SOURCE: WEB_SOURCE_LABEL}
         config = self.config
+        names = {WEB_SOURCE: WEB_SOURCE_LABEL}
         if config is not None:
-            names[config.device_id] = config.device_name
-            # Under the lock that every writer of ``peers`` takes: this runs on
-            # the history read path, and a peer landing while the comprehension
-            # walks the dict is a "dictionary changed size during iteration" out
-            # of a page render rather than a stale name.
-            from internal.config.config import config_lock
-            with config_lock:
-                names.update(
-                    {peer.device_id: peer.device_name for peer in config.peers.values()}
-                )
+            names.update(known_device_names(config))
         return source_name(
             source_device, names, config.device_name if config is not None else ""
         )

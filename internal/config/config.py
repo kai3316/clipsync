@@ -321,6 +321,14 @@ class Config:
     # device_id → alias).  Local-only view — the peer never learns it.  Empty /
     # missing entry = no alias (the web UI falls back to the device name).
     netpair_aliases: dict[str, str] = field(default_factory=dict)
+    # The name an internet-paired peer published about itself when it said hello
+    # (peer device_id → device name).  Kept because that name used to live only in
+    # memory (`internet_pairing._names`), so a machine that had never been given an
+    # alias lost the peer's name at every restart and every upgrade — until that
+    # peer next connected and said hello again — and a history row in the meantime
+    # was labelled with the raw peer id.  Reported as "升级完以后，它的名字显示也会
+    # 不太对".  A user-assigned alias outranks it; see `known_device_names`.
+    netpair_names: dict[str, str] = field(default_factory=dict)
     # Round 22: optional user-set pairing passphrase.  When set, netpair
     # channel keys are derived from the passphrase (with the 35-bit code secret
     # as a salt) instead of the code alone, closing the code's brute-force
@@ -379,6 +387,72 @@ def _config_dir() -> Path:
 # backup, web, UI); keep the historic private name working for existing
 # callers while new code uses the public form.
 config_dir = _config_dir
+
+
+def known_device_names(cfg) -> dict:
+    """Every device this machine can name, as ``device_id -> display name``.
+
+    One function because there were two callers and each built the map from
+    ``cfg.peers`` alone — the **LAN** peers.  A device paired by internet code
+    has no `PeerInfo`, so it was absent from both, and a history row from one
+    printed the raw peer id instead of a name:
+
+        LAN peer                          -> "Studio"        (worked)
+        internet-paired, alias set        -> "a1b2c3d4e5f6..." (the id)
+        internet-paired, no alias         -> "a1b2c3d4e5f6..." (the id)
+
+    The alias comes first, which is the rule the device list already applies
+    (`lan.py` builds a relay row as ``alias or name or pid``) — it is the name
+    the user chose for that device, and it outranks the one the peer published
+    about itself.  A LAN peer's `notes` is the equivalent user-assigned name and
+    is already what the list shows, so it is honoured here too rather than being
+    the one surface where a note did not apply.
+
+    This machine is in the map as well.  The probe written to check the fix is
+    what caught it missing: `source_name` falls back to *this* device's name only
+    for an **empty** source, so a row that carried this machine's own id — which
+    the relay path does stamp — still printed the id.  Two callers had been
+    adding it themselves, which is exactly the kind of thing that goes missing
+    when the map is assembled in more than one place.
+
+    Reported as "在历史记录里下面显示的名字不对" and again after an upgrade, which is
+    one defect seen twice: the alias survives an upgrade but the name the runtime
+    learned from a peer's hello does not — that lives in memory
+    (`internet_pairing._names`) — so the list could look right while the history
+    row printed the id, and an upgrade made both worse.
+
+    What this cannot supply is that in-memory hello name for a peer with no
+    alias; the runtime owns it.  `config.netpair_aliases` is the user's own
+    choice and the one that must survive, which is why it is what this reads.
+    """
+    names: dict = {}
+    if cfg is None:
+        return names
+    local_id = str(getattr(cfg, "device_id", "") or "")
+    local_name = str(getattr(cfg, "device_name", "") or "")
+    if local_id and local_name:
+        names[local_id] = local_name
+    aliases = getattr(cfg, "netpair_aliases", None) or {}
+    with config_lock:
+        peers = list(getattr(cfg, "peers", {}).values())
+    for peer in peers:
+        device_id = str(getattr(peer, "device_id", "") or "")
+        if not device_id:
+            continue
+        name = str(getattr(peer, "notes", "") or "") or str(
+            getattr(peer, "device_name", "") or ""
+        )
+        if name:
+            names[device_id] = name
+    # What each internet pairing last told us it was called, then the alias last, so a user-chosen
+    # name outranks anything a peer published about itself.
+    for device_id, learned_name in (getattr(cfg, "netpair_names", None) or {}).items():
+        if learned_name:
+            names[str(device_id)] = str(learned_name)
+    for device_id, alias in aliases.items():
+        if alias:
+            names[str(device_id)] = str(alias)
+    return names
 
 
 def _log_dir() -> Path:
@@ -517,6 +591,7 @@ FIELD_RULES: dict[str, tuple] = {
     "peer_relay_secrets": ("strdict",),
     "netpair_secrets": ("strdict",),
     "netpair_aliases": ("strdict",),
+    "netpair_names": ("strdict",),
     "netpair_dh_key": ("str",),
     "netpair_peer_keys": ("strdict",),
     "ai_config_tools": ("strlist_nonnull",),
@@ -794,6 +869,7 @@ def load() -> Config:
                 "peer_relay_secrets",
                 "netpair_secrets",
                 "netpair_aliases",
+    "netpair_names",
                 "netpair_dh_key",
                 "netpair_peer_keys",
                 "ai_config_tools",
@@ -974,6 +1050,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "peer_relay_secrets": cfg.peer_relay_secrets,
             "netpair_secrets": cfg.netpair_secrets,
             "netpair_aliases": cfg.netpair_aliases,
+    "netpair_names": cfg.netpair_names,
             "netpair_dh_key": cfg.netpair_dh_key,
             "netpair_peer_keys": cfg.netpair_peer_keys,
             "ai_config_tools": cfg.ai_config_tools,

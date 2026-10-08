@@ -9,7 +9,7 @@ import time
 import uuid
 
 from internal.clipboard.format import decode_text
-from internal.config.config import FIELD_RULES
+from internal.config.config import FIELD_RULES, known_device_names
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +73,10 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
     if limit > 0 and len(items) > limit:
         items = items[:limit]
     device_names = {cfg.device_id: cfg.device_name}
-    for peer in list(cfg.peers.values()):
-        device_names[peer.device_id] = peer.device_name
+    # Every name this machine knows, not only the LAN peers: a clip from an
+    # internet-paired device used to be labelled with its raw peer id here for
+    # the same reason the window did it.  See `config.known_device_names`.
+    device_names.update(known_device_names(cfg))
     device_names["__web__"] = "\U0001f4f1 Web"
     result = []
     for entry in items:
@@ -126,8 +128,7 @@ def get_history_item(query_params, history, cfg):
         return {"ok": False, "error": "not found"}, 404
 
     device_names = {cfg.device_id: cfg.device_name}
-    for peer in list(cfg.peers.values()):
-        device_names[peer.device_id] = peer.device_name
+    device_names.update(known_device_names(cfg))
     sid = entry.get("source_device", "")
     result = {
         "timestamp": entry.get("timestamp"),
