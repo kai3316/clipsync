@@ -35,6 +35,7 @@ from internal.security.pairing import (
     PairingManager,
 )
 from internal.sync.ai_config import PENDING_TTL
+from internal.sync.file_transfer import CHUNK_SIZE
 from internal.system import updater
 from internal.transport.connection import TransportManager
 from internal.transport.ids import peer_id_hash
@@ -1405,6 +1406,39 @@ def test_transfer_snapshot_normalizes_progress_and_pause(rig, monkeypatch):
     assert rows[1]["status"] == "pending"
     assert rows[1]["direction"] == "down"
     assert rows[2]["progress"] == 100
+
+
+def test_an_offer_cut_for_the_relay_publishes_the_internet_route(rig):
+    """The reader is told which route the file is arriving by, before they accept.
+
+    Nothing new crosses the wire for this: the sender's own chunk size is the
+    signal -- `send_file` cuts a relay-bound offer at one broker message and
+    leaves a LAN offer at this build's default -- so the published request
+    carries the route the receiver read off it, and a LAN arrival's payload
+    keeps saying exactly what it always did.
+    """
+    runtime, pairing, transport, _, _, _, events, *_ = rig
+    runtime.file_transfer.set_file_open_to_all(False)
+    connect(pairing, transport)
+
+    for transfer_id, chunk_size in (("lan-1", None), ("relay-1", CHUNK_SIZE // 6)):
+        offer = {
+            "transfer_id": transfer_id,
+            "file_name": f"{transfer_id}.bin",
+            "file_size": 10,
+            "mime_type": "application/octet-stream",
+        }
+        if chunk_size is not None:
+            offer["chunk_size"] = chunk_size
+        transport.message(frame("file_request", **offer), "remote")
+
+    published = {row["transfer_id"]: row for row in events_named(events, "transfer.request")}
+    assert published["lan-1"]["relay"] is False
+    assert published["relay-1"]["relay"] is True
+    # The keys the window already reads are untouched by the addition.
+    assert published["relay-1"]["filename"] == "relay-1.bin"
+    assert published["relay-1"]["size"] == 10
+    assert published["relay-1"]["mime"] == "application/octet-stream"
 
 
 def test_cancel_all_cancels_every_active_row_through_the_single_row_path(rig, monkeypatch):

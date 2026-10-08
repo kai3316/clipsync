@@ -510,8 +510,16 @@ class _Recorder:
     def __init__(self):
         self.requested: list[str] = []
         self.accepted: list[str] = []
+        # The route each prompt was told about: `transfer.request`'s payload
+        # carries it, so the recorder stands where the runtime stands.
+        self.relays: list[bool] = []
 
-    def on_request(self, transfer_id, file_name, file_size, mime, send_fn):
+    def on_request(self, transfer_id, file_name, file_size, mime, send_fn, *, relay=False):
+        # `relay` is the route the offer was cut for (see
+        # `FileTransferManager.set_on_transfer_request`).  Recorded rather than
+        # ignored: the cases below are about who may skip the prompt, and this
+        # keeps the recorder honest about the whole callback it stands in for.
+        self.relays.append(relay)
         self.requested.append(file_name)
 
     def accept(self, manager, transfer_id, send_fn):

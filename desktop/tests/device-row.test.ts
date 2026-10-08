@@ -49,11 +49,25 @@ describe("a device's state word", () => {
     expect(deviceStatus(row({ paired: true, connection_state: "online" }))).toBe("syncing");
   });
 
-  it("calls a paired device with no link paired, whatever the attempt is doing", () => {
-    // The word is about the pairing and the link, and a retry in flight does not
-    // make it syncing: nothing is moving yet.
+  it("says a retry is in flight rather than calling the device settled", () => {
+    // The word is about the pairing and the link, and a retry in flight makes it neither: nothing is
+    // moving yet, so it is not syncing -- but it is not 已配对 either, which says nothing is
+    // happening to a device that is being worked on right now.
+    //
+    // This case asserted `paired` for the `connecting` row, which contradicted the e2e case for the
+    // retry count: the chip's title there says 重连中 3/10 while its text said 已配对, and one row
+    // cannot claim both.  The title is the more specific fact, so the text was the one that was wrong.
     expect(deviceStatus(row({ paired: true, connection_state: "offline" }))).toBe("paired");
-    expect(deviceStatus(row({ paired: true, connection_state: "connecting" }))).toBe("paired");
+    expect(deviceStatus(row({ paired: true, connection_state: "connecting" }))).toBe("connecting");
+    // The sidecar's own flag, which is the same fact and what it sends for a retry it is running.
+    expect(
+      deviceStatus(row({ paired: true, connection_state: "offline", reconnecting: true })),
+    ).toBe("connecting");
+    // A *linked* device is never reported as connecting, whatever a stale flag says: the link is the
+    // stronger evidence.
+    expect(
+      deviceStatus(row({ paired: true, connection_state: "online", reconnecting: true })),
+    ).toBe("syncing");
   });
 
   it("counts a relay link as a link, and the relay's own reading for a relay-only row", () => {

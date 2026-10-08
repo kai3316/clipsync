@@ -96,6 +96,28 @@ describe("desktop application store", () => {
     store.dispose();
   });
 
+  it("names the internet when a transfer request is arriving over the relay", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "transfer.request", session_id: "session",
+      data: { transfer_id: "relay", filename: "report.pdf", size: 42, relay: true } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t("{file} 经互联网传输，速度比同一网络慢，请在文件传输页确认接收。", { file: "report.pdf" }),
+    ]);
+    store.dispose();
+  });
+
+  it("leaves a LAN arrival's notice as the filename it always was", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "transfer.request", session_id: "session",
+      data: { transfer_id: "lan", filename: "report.pdf", size: 42, relay: false } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual(["report.pdf"]);
+    store.dispose();
+  });
+
   it("says what a nearby-chat message said, and stays quiet when it is not news", async () => {
     const store = createApplicationStore();
     await store.start();

@@ -142,7 +142,7 @@ class TestFileTransferManager:
         # The setting off plus a prompt registered is the state a pending
         # transfer exists in; with the setting on there is nothing pending.
         self.mgr.set_file_open_to_all(False)
-        self.mgr.set_on_transfer_request(lambda *a: None)
+        self.mgr.set_on_transfer_request(lambda *a, **k: None)
         self.mgr.handle_message(
             "file_request",
             {
@@ -171,7 +171,7 @@ class TestFileTransferManager:
         # setting off: with the setting on the file is taken on arrival and is
         # no longer rejectable.
         self.mgr.set_file_open_to_all(False)
-        self.mgr.set_on_transfer_request(lambda *a: None)
+        self.mgr.set_on_transfer_request(lambda *a, **k: None)
         self.mgr.handle_message(
             "file_request",
             {
@@ -513,7 +513,7 @@ class TestFileTransferManager:
 
     def test_chunk_for_pending_transfer(self):
         """Chunk arriving before ack (pending state) should be ignored."""
-        self.mgr.set_on_transfer_request(lambda *a: None)  # suppress auto-accept
+        self.mgr.set_on_transfer_request(lambda *a, **k: None)  # suppress auto-accept
         self.mgr.handle_message(
             "file_request",
             {

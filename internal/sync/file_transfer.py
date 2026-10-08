@@ -302,7 +302,11 @@ class FileTransferManager:
         self._on_transfer_progress: Callable[[str, float], None] | None = None
         self._on_transfer_complete: Callable[[str, bool, bool, str], None] | None = None
         self._on_file_received: Callable[[str, str, str], None] | None = None
-        self._on_transfer_request: Callable[[str, str, int, str, Callable], None] | None = None
+        # The prompt callback carries the route as a keyword-only `relay`; see
+        # `set_on_transfer_request`.  Spelled loosely here because the annotation
+        # cannot express a keyword-only argument, and the one registrar that
+        # exists is `lan.py`.
+        self._on_transfer_request: Callable[..., None] | None = None
         self._clip_file_guard: Callable[[str, str], bool] | None = None
         self._update_guard: Callable[[str], bool] | None = None
         self._log_guard: Callable[[str], bool] | None = None
@@ -514,10 +518,19 @@ class FileTransferManager:
 
     def set_on_transfer_request(
         self,
-        callback: Callable[[str, str, int, str, Callable], None],
+        callback: Callable[..., None],
     ) -> None:
-        """*callback(transfer_id, file_name, file_size, mime_type, send_fn)* --
+        """*callback(transfer_id, file_name, file_size, mime_type, send_fn, *, relay)* --
         called when a remote peer wants to send a file.
+
+        *relay* is carried rather than left for the caller to re-derive: the fact
+        is already on the transfer record, because ``send_file`` sizes a send for
+        the route it may cross, so an offer whose chunk size is not this build's
+        ``CHUNK_SIZE`` was cut to fit one internet-relay broker message (see
+        ``lan.py::_file_route_for``).  The comparison is made here, where that
+        constant lives, and handed out as one boolean, so the runtime and the UI
+        cannot come to different conclusions about which number means which route.
+        A LAN offer reports ``relay=False`` and nothing about it changes.
 
         The callback should call :meth:`accept_transfer` or :meth:`reject_transfer`
         with *transfer_id* and *send_fn* to indicate the user's choice.
@@ -1077,6 +1090,14 @@ class FileTransferManager:
             chunk_size = self.CHUNK_SIZE
         if chunk_size <= 0:
             chunk_size = self.CHUNK_SIZE
+        # The route the sender was cut for, read off the offer's own number: a
+        # send that may cross the relay is cut to one broker message and names
+        # that size in the offer, while a LAN send leaves the field out and reads
+        # back as this build's `CHUNK_SIZE` (see `send_file` and
+        # `lan.py::_file_route_for`).  Computed once here, kept on the record and
+        # handed to the prompt below, so the transfers snapshot the page draws
+        # and the notification the reader gets cannot disagree about the route.
+        relay = chunk_size != self.CHUNK_SIZE
         total_chunks = (
             max((file_size + chunk_size - 1) // chunk_size, 1) if file_size > 0 else 1
         )
@@ -1141,6 +1162,10 @@ class FileTransferManager:
                 # from.  Kept on the record because the writing path and the retransmit path both
                 # need it long after the offer was parsed.
                 "chunk_size": chunk_size,
+                # Whether that size means the offer was cut for the internet relay rather than
+                # for the LAN.  Kept beside the size it was read from, so the transfers snapshot
+                # can warn the reader before they accept.
+                "relay": relay,
                 "received_chunks": 0,
                 "received_bytes": 0,
                 "temp_fh": None,
@@ -1190,7 +1215,9 @@ class FileTransferManager:
             )
             self.accept_transfer(transfer_id, send_fn)
         elif self._on_transfer_request is not None:
-            self._on_transfer_request(transfer_id, file_name, file_size, mime_type, send_fn)
+            self._on_transfer_request(
+                transfer_id, file_name, file_size, mime_type, send_fn, relay=relay
+            )
         else:
             # Nowhere to raise the prompt, and the setting says files need one.
             # This used to auto-accept here -- "headless operation" -- which read
@@ -2175,8 +2202,10 @@ class FileTransferManager:
           ``transfer_id``, ``file_name``, ``file_size``, ``direction``,
           ``state``, ``progress`` (0.0–1.0), ``speed_bytes_per_sec``
           (instantaneous rate over the last few seconds of real progress —
-          0 while paused/awaiting/stalled), and ``eta_seconds`` derived from
-          that live rate.
+          0 while paused/awaiting/stalled), ``eta_seconds`` derived from
+          that live rate, and ``relay``: whether an inbound offer was cut for
+          the internet relay rather than for the LAN, which is what lets the
+          page warn the reader before they accept it.
 
         Background kinds (:data:`UI_HIDDEN_KINDS`) are left out: they hold their
         entries in ``_transfers`` exactly as any other send does, so the ticks,
@@ -2217,6 +2246,10 @@ class FileTransferManager:
                         "speed_bytes_per_sec": speed,
                         "eta_seconds": eta,
                         "paused": t.get("paused", False),
+                        # The route the offer was cut for, on the row that asks the reader to
+                        # accept it.  Outgoing rows carry the field too, and it is false there:
+                        # the route this machine chose is not a warning for the sender.
+                        "relay": bool(t.get("relay", False)),
                     }
                 )
         return result

@@ -1017,6 +1017,13 @@ export const EN: Record<string, string> = {
     "Sent {count} pull requests; waiting for the files",
   "；部分请求失败：{errors}": "; some requests failed: {errors}",
   "正在接收 {done} / {total} 个文件": "Receiving {done} of {total} files",
+  // A file arriving over the internet relay rather than over the same network.
+  // The row asks the reader before the file is taken; the notice words the same
+  // route for the arrival that lands while the transfers page is not on screen.
+  "此文件经互联网传输，速度比同一网络慢。确定要接收吗？":
+    "This file travels over the internet, which is slower than on the same network. Receive it?",
+  "{file} 经互联网传输，速度比同一网络慢，请在文件传输页确认接收。":
+    "{file} travels over the internet, which is slower than on the same network; confirm receiving it on the File Transfer page.",
   "拉取完成：{count} 个文件已更新": "Pull complete: {count} files updated",
   "拉取完成：{ok} 个成功、{failed} 个失败":
     "Pull complete: {ok} succeeded, {failed} failed",

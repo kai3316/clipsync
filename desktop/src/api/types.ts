@@ -64,6 +64,10 @@ export interface Transfer {
   path?: string;
   peer_id?: string;
   timestamp?: number;
+  /** Whether an inbound offer was cut for the internet relay rather than for
+   *  the LAN.  Read off the offer's own chunk size by the sidecar, and what
+   *  lets the pending row warn the reader before they accept. */
+  relay?: boolean;
 }
 
 export interface TransfersPage {

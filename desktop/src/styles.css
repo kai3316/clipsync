@@ -1378,6 +1378,12 @@ button.danger-outline:hover:not(:disabled),
 .speed-failed { color: var(--danger-text); }
 .transfer-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 240px) auto auto auto; gap: 12px; align-items: center; padding: var(--row-pad) 0; border-bottom: 1px solid var(--line); }
 .transfer-main { min-width: 0; display: grid; gap: 5px; overflow-wrap: anywhere; }
+/* The one thing on a pending row the reader has not been told before: this
+   file is crossing the internet relay, which is slower than the same two
+   devices on one network.  The accept/reject pair beside it answers it, so the
+   warning wears the warning colour rather than reading as another status line
+   that can be skimmed past. */
+.transfer-relay-warning { color: var(--warn-text); }
 .transfer-row progress { width: 100%; accent-color: var(--accent); }
 /* The history card's rows are not the running card's rows.  A running row has a
    progress bar, which is what the 120–240px second column is for; a history row

@@ -2,13 +2,25 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import TransfersView from "../src/components/TransfersView.vue";
 import { bridge } from "../src/api/bridge";
+import { t } from "../src/i18n";
+
+/** The snapshot every case reads unless it installs its own.
+ *
+ * Hoisted so the module mock can install it and a case can put it back.  A case
+ * that overrides the read and then fails must not leave its own rows — or a
+ * queued `mockResolvedValueOnce` — behind for the next case to read as its poll.
+ */
+const defaultTransfers = vi.hoisted(() => ({
+  active: [
+    { id: "incoming", filename: "request.txt", direction: "down", status: "pending", progress: 0 },
+    { id: "paused", filename: "half.txt", direction: "up", status: "paused", progress: 50 },
+  ],
+  history: [],
+}));
 
 vi.mock("../src/api/bridge", () => ({
   bridge: {
-    transfers: vi.fn().mockResolvedValue({ active: [
-      { id: "incoming", filename: "request.txt", direction: "down", status: "pending", progress: 0 },
-      { id: "paused", filename: "half.txt", direction: "up", status: "paused", progress: 50 },
-    ], history: [] }),
+    transfers: vi.fn().mockResolvedValue(defaultTransfers),
     transferAction: vi.fn().mockResolvedValue({}),
     cancelAllTransfers: vi.fn().mockResolvedValue({ cancelled: 2 }),
     clearTransferHistory: vi.fn().mockResolvedValue({ cleared: 2 }),
@@ -84,6 +96,73 @@ describe("transfer controls", () => {
       expect(bridge.transferAction).toHaveBeenLastCalledWith("resume", "paused");
       expect(view.find('[aria-label="暂停传输"]').exists()).toBe(false);
     } finally { view.unmount(); }
+  });
+
+  it("warns that a pending relay arrival travels over the internet, before it is accepted", async () => {
+    vi.mocked(bridge.transferAction).mockClear();
+    const page = {
+      active: [
+        { id: "relay-1", filename: "over-net.bin", direction: "down", status: "pending", progress: 0, size: 10, relay: true },
+        { id: "relay-live", filename: "already-coming.bin", direction: "down", status: "receiving", progress: 20, size: 10, relay: true },
+        { id: "lan-1", filename: "same-room.bin", direction: "down", status: "pending", progress: 0, size: 10 },
+      ],
+      history: [],
+    };
+    // The page polls on mount and again after the answer.
+    vi.mocked(bridge.transfers).mockResolvedValue(page as any);
+    const view = mount(TransfersView);
+    try {
+      await flushPromises();
+      const rows = view.findAll(".transfer-list--active .transfer-row");
+      const relayRow = rows.find((row) => row.text().includes("over-net.bin"))!;
+      const lanRow = rows.find((row) => row.text().includes("same-room.bin"))!;
+      const liveRow = rows.find((row) => row.text().includes("already-coming.bin"))!;
+
+      // The route is named on the same row as the accept/reject pair that
+      // answers it — that pair is the prompt, and the file has not been taken
+      // while the row is still pending.
+      expect(relayRow.get(".transfer-relay-warning").text())
+        .toBe(t("此文件经互联网传输，速度比同一网络慢。确定要接收吗？"));
+      // A LAN arrival asks its reader nothing new.
+      expect(lanRow.find(".transfer-relay-warning").exists()).toBe(false);
+      // Nor does a relay transfer that has already been accepted: the warning
+      // belongs to the question, not to the row it was asked on.
+      expect(liveRow.find(".transfer-relay-warning").exists()).toBe(false);
+
+      expect(bridge.transferAction).not.toHaveBeenCalled();
+      await relayRow.get('[aria-label="拒绝文件"]').trigger("click");
+      await flushPromises();
+      // Cancelling is an answer, and it does not take the file.
+      expect(bridge.transferAction).toHaveBeenLastCalledWith("reject", "relay-1");
+      expect(bridge.transferAction).not.toHaveBeenCalledWith("accept", "relay-1");
+    } finally {
+      view.unmount();
+      vi.mocked(bridge.transfers).mockReset();
+      vi.mocked(bridge.transfers).mockResolvedValue(defaultTransfers as any);
+    }
+  });
+
+  it("keeps a LAN arrival's accept path exactly as it was", async () => {
+    vi.mocked(bridge.transferAction).mockClear();
+    const page = {
+      active: [
+        { id: "lan-2", filename: "same-room.bin", direction: "down", status: "pending", progress: 0, size: 10, relay: false },
+      ],
+      history: [],
+    };
+    vi.mocked(bridge.transfers).mockResolvedValue(page as any);
+    const view = mount(TransfersView);
+    try {
+      await flushPromises();
+      expect(view.find(".transfer-relay-warning").exists()).toBe(false);
+      await view.get('[aria-label="接受文件"]').trigger("click");
+      await flushPromises();
+      expect(bridge.transferAction).toHaveBeenLastCalledWith("accept", "lan-2");
+    } finally {
+      view.unmount();
+      vi.mocked(bridge.transfers).mockReset();
+      vi.mocked(bridge.transfers).mockResolvedValue(defaultTransfers as any);
+    }
   });
 
   it("opens and reveals a received file from the history", async () => {

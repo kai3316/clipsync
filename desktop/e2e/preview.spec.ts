@@ -246,8 +246,11 @@ test("an invitation shows its band above an empty conversation", async ({ page }
  *  apart from a peer that is gone.
  *
  * Both rows are paired and neither is online; only one of them is being worked
- * on, and the difference the reader sees is 正在同步 against 已配对 — the same
- * two words the rest of the list uses.
+ * on.  The difference the reader sees is 连接中 against 已配对 — not 正在同步,
+ * which promises content is moving and would be untrue of a device with no link
+ * at all.  The list keeps one word per state for exactly this reason
+ * (`lib/device-row.ts::deviceStatus`), and 连接中 is the sidecar's own word for
+ * `connection_state === "connecting"`.
  *
  * The *count* is in the chip's title rather than in its text, which is where it
  * moved when the state was collapsed from two chips into one: 本地·在线 and
@@ -263,7 +266,7 @@ test("a device being retried says how far along it is", async ({ page }) => {
   const retrying = page.locator(".device-row", { hasText: "家里的台式机" }).first();
   const chip = retrying.locator(".channel").first();
   await expect(chip).toHaveAttribute("title", T("重连中 3/10", "Reconnecting 3/10"));
-  await expect(chip).toHaveText(T("正在同步", "Syncing"));
+  await expect(chip).toHaveText(T("连接中", "Connecting"));
 
   const settled = page.locator(".device-row", { hasText: "Mac mini" }).first();
   // The peer that is not being worked on reads as paired, not as syncing, and
@@ -379,59 +382,27 @@ test("the removed-device row fits a narrow window and keeps its own hairline", a
 });
 
 
-/** The row pages stop stretching, which is what a maximised window showed.
+/** Where the "no stretching at a maximised width" case went, and why it is not here.
  *
- * Nothing in this file rendered above 1280, and 1920 is where the fault is: the
- * content column is 1708px there, so a device row's name sits in the left quarter and
- * its buttons against the far right with ~900px of nothing between, and a note field
- * draws a 1550px box around a four-word note.  A page that never gets that wide cannot
- * show it, which is why every screenshot this was reviewed against looked fine.
+ * It read a design token this build does not define:
+ *
+ *     ceiling: parseFloat(root.getPropertyValue("--content-width"))
+ *
+ * `--content-width` was added by `fe3cf3d` (the reading-width ceiling) and removed by `ece8a06`,
+ * which reverted that rule: a fixed ceiling makes a margin only when the window is wider than it,
+ * so it left a large gap on this machine's maximised 1707px window and *no* gap below the ceiling,
+ * and was reported as both faults in turn.  `parseFloat("")` is NaN, so `expect(contentW)
+ * .toBeGreaterThan(NaN)` could not pass -- this case has measured nothing since the revert, which
+ * the revert half-remembered: it deleted the test written to replace this one and left this behind.
+ *
+ * Measured, for whoever revisits: at 1920 the content column is 1708px and `.content` computes
+ * `max-width: none`.  What bounds the pages is per-element, which is the decision `ece8a06` made --
+ * the case directly below still checks the settings card's 715px, and the row rules do the rest.
+ *
+ * Not restored as a card measurement because the case below is exactly that.  Not restored as a
+ * column measurement because the column is deliberately uncapped; a test asserting the reverted
+ * rule back into existence would be arguing with a decision the user asked for.
  */
-test("the row pages stop stretching at a maximised width", async ({ page }) => {
-  const failures = await open(page, 1920, 1040);
-  const rows: string[] = [];
-  for (const [id, label] of [
-    ["devices", T("设备", "Devices")],
-    ["settings", T("设置", "Settings")],
-    ["favorites", T("收藏库", "Favorites")],
-    ["history", T("剪贴板历史", "Clipboard History")],
-    ["transfers", T("文件传输", "File Transfer")],
-  ] as [string, string][]) {
-    await page.getByRole("button", { name: label, exact: true }).click();
-    await page.waitForTimeout(120);
-    const m = await page.evaluate(() => {
-      const content = document.querySelector(".content") as HTMLElement;
-      const header = document.querySelector("header") as HTMLElement;
-      const root = getComputedStyle(document.documentElement);
-      // The widest element that is a page container rather than a full-bleed band.
-      const bands = ["toolbar", "error-band", "bottom-status", "notice-stack"];
-      let widest = 0;
-      for (const child of [...content.children]) {
-        const cls = (child.className || "").toString();
-        if (bands.some((b) => cls.includes(b))) continue;
-        if (!(child as HTMLElement).offsetParent) continue;
-        widest = Math.max(widest, Math.round(child.getBoundingClientRect().width));
-      }
-      return {
-        contentW: Math.round(content.getBoundingClientRect().width),
-        widest,
-        ceiling: parseFloat(root.getPropertyValue("--content-width")),
-        contentLeft: Math.round(content.getBoundingClientRect().left),
-        headerLeft: Math.round(header.getBoundingClientRect().left),
-      };
-    });
-    // The window is wider than the ceiling, so the ceiling is what is being tested.
-    expect(m.contentW, id).toBeGreaterThan(m.ceiling);
-    if (m.widest > m.ceiling + 1) {
-      rows.push(`${id}: ${m.widest}px > ceiling ${m.ceiling}`);
-    }
-    // Left-aligned to the header, not centred: a centred cap leaves a blank band
-    // under the header where the two edges part company.
-    expect(Math.abs(m.contentLeft - m.headerLeft), `${id} alignment`).toBeLessThanOrEqual(2);
-  }
-  expect(rows).toEqual([]);
-  expect(failures).toEqual([]);
-});
 
 
 /** The settings card is the size of the form in it, not the size of the window.

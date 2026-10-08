@@ -189,6 +189,17 @@ export function createApplicationStore() {
       }
       return t("{name}：{text}", { name: peerLabel(data), text: String(entry.text || "") });
     }
+    // A file arriving over the internet relay.  The route changes what the
+    // reader is agreeing to — the same two devices on one network move it much
+    // faster — so the notice says which route it is on its way by.  The
+    // accept/cancel pair that answers it is on the transfers page, which is
+    // where the notice points; a LAN arrival keeps the filename it always
+    // showed, because there is nothing new for that reader to weigh.
+    if (name === "transfer.request" && data.relay === true) {
+      return t("{file} 经互联网传输，速度比同一网络慢，请在文件传输页确认接收。", {
+        file: String(data.filename || ""),
+      });
+    }
     // The two ways a Connect click comes to nothing. The runtime publishes the
     // reason next to the bare `{accepted: false}` answer, so the click never
     // looks like a silent no-op; the wording is legacy's, advice included.

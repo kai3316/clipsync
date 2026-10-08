@@ -432,9 +432,19 @@ class LanRuntime:
             )
         )
         self.file_transfer.set_on_transfer_request(
-            lambda tid, name, size, mime, send_fn: self._publish(
+            lambda tid, name, size, mime, send_fn, *, relay=False: self._publish(
                 "transfer.request",
-                {"transfer_id": tid, "filename": name, "size": size, "mime": mime},
+                {
+                    "transfer_id": tid,
+                    "filename": name,
+                    "size": size,
+                    "mime": mime,
+                    # The route the offer was cut for, decided by the manager and never on the
+                    # wire: a relay-sized offer is that sender's own signal that the file is
+                    # arriving over the internet, and the reader is told before they accept it.
+                    # False is the LAN default, so nothing a LAN arrival carries changes.
+                    "relay": bool(relay),
+                },
             )
         )
         # Peer-sent update blobs arrive as ordinary transfers (kind="update") and

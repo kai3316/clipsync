@@ -53,6 +53,18 @@ function activeStatus(item: Transfer): string {
   return "";
 }
 
+/** Whether a pending inbound row is arriving over the internet relay.
+ *
+ * The sidecar reads the route off the offer's own chunk size (a send bound for
+ * the relay is cut to one broker message), so this is a fact about the transfer
+ * rather than something the page works out.  It belongs on the pending row and
+ * nowhere else: the file has not been taken while the row is pending, and the
+ * accept/reject pair beside the sentence is the prompt that answers it.
+ */
+function relayArrival(item: Transfer): boolean {
+  return item.direction === "down" && item.status === "pending" && item.relay === true;
+}
+
 /** The peers a file can be sent to: any device reachable over the LAN.
  *
  * Pairing is not on the list.  A file is the same kind of act a chat message is
@@ -430,7 +442,12 @@ onUnmounted(() => {
       </div>
       <div v-if="!active.length" class="empty"><FileUp :size="30" /><p class="note">{{ t("暂无进行中的传输") }}</p></div>
       <article v-for="item in active" :key="item.id" class="transfer-row">
-        <div class="transfer-main"><strong>{{ item.filename || t("未知文件") }}</strong><span class="note">{{ [item.direction === "up" ? t("发送") : t("接收"), activeStatus(item), formatSize(item.size), formatSpeed(item.speed), item.eta].filter(Boolean).join(" · ") }}</span></div>
+        <div class="transfer-main"><strong>{{ item.filename || t("未知文件") }}</strong><span class="note">{{ [item.direction === "up" ? t("发送") : t("接收"), activeStatus(item), formatSize(item.size), formatSpeed(item.speed), item.eta].filter(Boolean).join(" · ") }}</span>
+          <!-- Before the reader accepts: a relay arrival is slower than the
+               same file over the same network, and the buttons beside this line
+               are the accept/cancel the warning is asking about. -->
+          <span v-if="relayArrival(item)" class="note transfer-relay-warning">{{ t("此文件经互联网传输，速度比同一网络慢。确定要接收吗？") }}</span>
+        </div>
         <progress :value="item.progress || 0" max="100" :aria-label="t('{name} 进度', { name: item.filename || t('未知文件') })" /><span class="small">{{ item.progress || 0 }}%</span>
         <template v-if="item.direction === 'down' && item.status === 'pending'">
           <button class="icon-button icon-button--sm" :disabled="busy" :aria-label="t('接受文件')" :title="t('接受文件')" @click="action('accept', item.id)"><Check :size="16" /></button>

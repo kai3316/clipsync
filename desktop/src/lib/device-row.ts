@@ -106,12 +106,20 @@ export function deviceStatus(
 ): "syncing" | "connected" | "paired" | "connecting" | "discovered" | "offline" {
   const paired = Boolean(device.paired || device.relay_paired);
   const linked = localLinkEstablished(device);
+  // A dial in flight is asked about *before* the settled states, because it is the one state that is
+  // not settled: a paired device being retried has no link, so reading it as 已配对 reported a
+  // machine that is actively being worked on as one nothing is happening to.  The chip's own title
+  // said 重连中 3/10 while its text said 已配对 -- two claims about one row that cannot both be
+  // true, and the e2e case for the retry count is what caught it.
+  //
+  // `reconnecting` is the sidecar's explicit flag; `connection_state === "connecting"` is the same
+  // fact without it, which is what an older peer sends.
+  if (!linked && (device.reconnecting || device.connection_state === "connecting")) {
+    return "connecting";
+  }
   if (paired) return linked ? "syncing" : "paired";
   if (linked) return "connected";
-  // Reachable but not linked: a dial in flight, or a device only seen.  Each gets
-  // its own word, because 离线 is a claim about the device and these are claims
-  // about the link.
-  if (device.connection_state === "connecting") return "connecting";
+  // Reachable but not linked and not being dialled: a device only seen.
   return device.connection_state === "discovered" ? "discovered" : "offline";
 }
 
