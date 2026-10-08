@@ -81,36 +81,36 @@ jobs:
 
           What is new in this release:
 
-          - **A device that cannot send a file no longer promises it.**  A clip's files travel as
-            256 KiB chunks with pause and resume, which the public broker can neither carry nor
-            resume — so that protocol is LAN-only, and a device paired *only* over the internet
-            arrives at the transfer as NOT_CONNECTED.  The history row drew the download button
-            anyway: `connection_state` on a relay row is the *relay's* view of the peer, so it read
-            在线 and the tooltip promised 从 X 下载这个文件, and the click was refused one layer
-            down.  Reported as "互联网配对的时候文件复制有问题".  The button is disabled now and
-            says why: 通过互联网配对的设备收不了文件，请让两台设备在同一网络下.  Files **do** cross
-            the internet as chat attachments, which chunk to the relay's size.
+          - **A file copied on a device paired over the internet is downloadable.**  This was
+            LAN-only, and the two reasons were: the frames are 256 KiB and a public broker cannot
+            carry them, and answering a request that arrived over the relay would mean reading a
+            peer's files on the strength of a claim made on a public relay.  The first is fixed the
+            way chat attachments already fixed it — the file is cut into chunks that fit one broker
+            message and every chunk is acknowledged at the far end.  The second does not hold: a
+            relay frame's source is bound to the channel it arrived on, and that channel's key comes
+            from the pairing secret, so a broker can neither forge a request nor replay one as a
+            device it has no secret for — the same trust a LAN peer's pinned certificate carries.
+            The row names the route before the click: 从 X 下载这个文件（经互联网，比局域网慢）.
+            Sending files the other way, from the transfers page, is still LAN-only.
+
+          - **A device that cannot send a file no longer promises it.**  1.0.63 fixed the opposite
+            mistake — a relay device drew a live download button whose click was refused one layer
+            down — by disabling it.  The button works now, so it is offered again.
 
           - **A refused request can be dismissed.**  The failure band rendered two buttons and both
-            were conditional — a repair for a data directory the sidecar refuses, and a retry for a
-            code the app knows how to retry — so an error in neither left a red line with **no
-            control at all**, staying until some later action cleared it as a side effect of
-            starting.  Reported as "VALIDATION_ERROR 这样的提示关不掉".  The band offers 重新连接 when
-            there is something to retry and 关闭 otherwise.
+            were conditional, so an error the app does not know how to retry left a red line with no
+            control at all.  It offers 重新连接 when there is something to retry and 关闭 otherwise.
 
-          - **Pulling a large skill folder works again.**  It failed intermittently — "大部分的 skill
-            拉取都没有问题" — which is what a count boundary looks like from the outside.  The request
-            validator capped the item list at **100** while the feature behind it expands up to
-            **2000** and reports per item, so ticking a skill folder of more than a hundred files was
-            refused as a malformed request, with nothing naming the limit that had been hit.  The cap
-            is now the feature's own constant, imported from the module that owns it.
+          - **Pulling a large skill folder works again.**  The request validator capped the item list
+            at **100** while the feature behind it expands up to **2000** and reports per item, so
+            ticking a skill folder of more than a hundred files was refused as a malformed request.
+            The cap is now the feature's own constant, imported from the module that owns it.
 
           - **Optional features that are switched off are no longer warnings.**  Remote access and
             internet sync are optional, and having them off is the default state of a working
             install — but both reported a warning, so the page's verdict read **存在警告** for a
-            machine with nothing wrong.  The two items derived from them were worse: the relay
-            reported **failure** for "no brokers configured" when it was off *because* internet sync
-            was off.  All four report normally now and still say what is off.
+            machine with nothing wrong.  The relay also reported **failure** for having no brokers
+            when it was off *because* internet sync was off.
 
           - **The diagnostics page reports the update cache** — the file and its version.  That cache
             decides whether this machine can send an update at all: measured, one holding a build the
