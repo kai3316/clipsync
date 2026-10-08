@@ -31,6 +31,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -56,6 +57,12 @@ logger = logging.getLogger(__name__)
 # ---- Constants -----------------------------------------------------------
 
 CHUNK_SIZE = 262144  # 256 KB per chunk
+# The counter `_reserve_dest_name` appends on a name collision, as a matcher can strip it:
+# `name (1).exe` -> `name.exe`.  Spelled once, because two spellings of it would drift.
+_COUNTERED_NAME = re.compile(r"^(.*) \(\d+\)(\..*)$")
+# This application's own asset names, and not another product whose name merely contains the word:
+# `ClipSync_1.0.66_x64-setup.exe`, `ClipSync.app.tar.gz`.
+_CLIPSYNC_NAME = re.compile(r"^clipsync(?:_\d|\.app\.tar\.gz$)", re.IGNORECASE)
 # The release signature is a small base64 blob; the cap keeps one file_request
 # from carrying an unbounded string into the transfer record and the state.  The
 # host checks the signature itself before anything runs -- this is only a bound.
@@ -1421,6 +1428,56 @@ class FileTransferManager:
             self._finalize_received_file(transfer_id, transfer, total, send_fn)
             return
 
+    def _prune_older_update_blobs(self, keep: str) -> None:
+        """Remove other copies of one update installer, so a received build is stored once.
+
+        A peer-sent installer lands in the receive directory like any other file, and a second copy
+        of the same name is written as ``...(1).exe`` by :func:`_reserve_dest_name`.  That name
+        matches none of the release's asset patterns, so the cache sweep in `updater.cache_asset`
+        skips it for good -- reported as a peer-sent update package that never goes away.  Keeping
+        the file that *this* transfer just validated and removing the siblings of the same build
+        leaves one file per build, which is what "keep the newest" means here.
+
+        Only same-build siblings: the version is read from the name with the same parser the update
+        guard uses, so a genuinely different build is left alone.  Failures are swallowed -- this is
+        housekeeping on a path that has already succeeded.
+        """
+        from internal.system import updater
+
+        keep_name = os.path.basename(keep)
+        # This application's own names, not another product whose name merely contains the word.
+        # The version parse below reads a version out of `MyApp_1.0.66_x64-setup.exe` happily, so
+        # the product test is what keeps another application's installer out of this.
+        if not _CLIPSYNC_NAME.match(keep_name):
+            return
+        keep_version = updater.version_in_asset_name(keep_name)
+        if not keep_version:
+            return
+        directory = os.path.dirname(keep)
+        if not directory:
+            return
+        try:
+            entries = os.listdir(directory)
+        except OSError:
+            return
+        for entry in entries:
+            if entry == keep_name:
+                continue
+            # Same product -- the name test at the top -- and minus the counter a collision adds,
+            # since that counter form is the shape this exists to reap.  The version then has to
+            # read as the same build, and that is the whole test: `version_in_asset_name` answers
+            # nothing for a name with no readable version.  (`_asset_matchers` is deliberately not
+            # also required: it describes the shell this process is rather than the file, so under a
+            # test run it answers the legacy pattern and would make this a no-op.)
+            stem = _COUNTERED_NAME.sub(r"\1\2", entry)
+            if not _CLIPSYNC_NAME.match(stem):
+                continue
+            candidate_version = updater.version_in_asset_name(stem)
+            if not candidate_version or candidate_version != keep_version:
+                continue
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(directory, entry))
+
     def _finalize_received_file(
         self,
         transfer_id: str,
@@ -1587,7 +1644,7 @@ class FileTransferManager:
                 self._fire_complete_once(transfer_id, False, False, "error_size_mismatch")
                 return
 
-            # Move to final destination, avoiding name collisions
+            # Move to final destination, avoiding name collisions.
             dest_path = self._output_dir / _sanitize_file_name(file_name)
             if dest_path.resolve().parent != self._output_dir.resolve():
                 logger.error(
@@ -1664,6 +1721,13 @@ class FileTransferManager:
             )
             self._add_to_history(transfer, True, saved_path=saved, status="success")
 
+            # An update blob replaces rather than accumulates.  It is an installer this machine did
+            # not ask for by name and will never need twice, and the collision counter in
+            # `_reserve_dest_name` would name the second copy `...(1).exe` -- matching none of the
+            # release's asset patterns, so the cache sweep cannot see it and it stays on disk for
+            # good.  Reported as a peer-sent update package that never goes away.
+            if transfer.get("kind") == "update" and saved:
+                self._prune_older_update_blobs(saved)
             if self._on_file_received is not None:
                 # The kind and the sender, kept together: the callback is handed
                 # a saved path and a file name, and the routes that act on a

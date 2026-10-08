@@ -567,6 +567,42 @@ def _verify_against(
     return True, verdict
 
 
+def _manifest_signature_for(asset_name: str, timeout: float = 10.0) -> str:
+    """The release signature `latest.json` publishes for *asset_name*, or "".
+
+    The manifest is the one place a signature is available without the updater plugin, so the
+    download that already happens here can leave it beside the cached asset.  Without it this
+    machine serves a signature-less installer and every peer that receives one falls back to a
+    manual install -- `install_staged_update` requires `peer_verified` **and** a non-empty
+    signature, or it calls `reveal_staged_update`, which opens the folder.  Measured: the Windows
+    entry carries 420 bytes of signature.
+
+    The entry is found by the URL it names rather than by rebuilding the platform key: that key
+    carries the bundle target (`windows-x86_64-nsis`, `darwin-aarch64-app`), and a second copy of
+    that mapping is a second thing to get wrong.  Any failure answers "" -- no signature is the
+    behaviour that came before, not an error.
+    """
+    if not asset_name:
+        return ""
+    url = f"https://github.com/{_GITHUB_REPO}/releases/latest/download/latest.json"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "clipsync"})
+        with urllib.request.urlopen(req, timeout=timeout, context=_https_context()) as resp:
+            manifest = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        logger.debug("Could not read the release manifest for a signature: %s", exc)
+        return ""
+    for entry in (manifest.get("platforms") or {}).values():
+        named = str((entry or {}).get("url") or "")
+        if not named:
+            continue
+        if os.path.basename(named.split("?")[0]) != asset_name:
+            continue
+        return str((entry or {}).get("signature") or "").strip()
+    logger.debug("The release manifest names no signature for %r", asset_name)
+    return ""
+
+
 def download_latest_release(
     dest_dir: str,
     progress_cb: Callable | None = None,
@@ -674,6 +710,15 @@ def download_latest_release(
                 os.remove(temp_path)
             raise
         logger.info("Downloaded release asset to %s", dest_path)
+        # Kept beside the asset so this machine can hand a peer something the peer can check
+        # offline.  A failure here is not a download failure: the installer is on disk and
+        # installable, and the only cost is that peers keep the manual path.  See
+        # `_manifest_signature_for`.
+        signature = _manifest_signature_for(asset_name)
+        if signature:
+            cache_signature(asset_name, signature)
+        else:
+            logger.debug("Downloaded %s with no signature to cache", asset_name)
         return dest_path, None, version
     except Exception as exc:
         logger.error("Release download failed: %s", exc)
