@@ -81,21 +81,33 @@ jobs:
 
           What is new in this release:
 
-          - **A file copied on a device paired over the internet is downloadable.**  This was
-            LAN-only, and the two reasons were: the frames are 256 KiB and a public broker cannot
-            carry them, and answering a request that arrived over the relay would mean reading a
-            peer's files on the strength of a claim made on a public relay.  The first is fixed the
-            way chat attachments already fixed it — the file is cut into chunks that fit one broker
-            message and every chunk is acknowledged at the far end.  The second does not hold: a
-            relay frame's source is bound to the channel it arrived on, and that channel's key comes
-            from the pairing secret, so a broker can neither forge a request nor replay one as a
-            device it has no secret for — the same trust a LAN peer's pinned certificate carries.
-            The row names the route before the click: 从 X 下载这个文件（经互联网，比局域网慢）.
-            Sending files the other way, from the transfers page, is still LAN-only.
+          - **A file arriving over the internet asks before it is taken.**  A transfer that comes
+            over the relay is slower than the same two devices on one network, so the pending row now
+            says 此文件经互联网传输，速度比同一网络慢。确定要接收吗？ above the accept and reject
+            buttons that answer it.  A file arriving on the local network behaves exactly as before.
+            The route is read off the offer's own chunk size — a send bound for the relay is cut to
+            fit one broker message — so the protocol is unchanged and an older peer is unaffected.
 
-          - **A device that cannot send a file no longer promises it.**  1.0.63 fixed the opposite
-            mistake — a relay device drew a live download button whose click was refused one layer
-            down — by disabling it.  The button works now, so it is offered again.
+          - **A device being reconnected no longer reads as settled.**  Its chip showed 已配对 while
+            its own tooltip said 重连中 3/10: two claims about one row that cannot both be true.  A
+            dial in flight now outranks the settled words, so the chip says 连接中 — which is what it
+            is doing — and a device with a live link is never reported as connecting whatever a stale
+            flag says.
+
+          - **One test of this suite never measured anything, and is gone.**  "The row pages stop
+            stretching at a maximised width" claimed to compare the content column against a
+            `--content-width` token that this build does not define, so its ceiling was `NaN` and the
+            comparison could not pass — it has not checked anything since the reading-width ceiling
+            was reverted, and the revert deleted the test written to replace it while leaving this
+            one behind.  Measured for the record: at 1920 the column is 1708px with
+            `max-width: none`, and the pages are bounded per element instead, which is the layout the
+            user asked for.  The remaining 18 cases are unchanged and green.
+
+          - **A file copied on a device paired over the internet is downloadable.**  The clip path was
+            LAN-only because 256 KiB frames do not fit a broker message; it is now cut to fit and
+            every chunk is acknowledged, the way chat attachments already worked.  The row names the
+            route before the click: 从 X 下载这个文件（经互联网，比局域网慢）.  Sending from the
+            transfers page is still local-network only, and says so.
 
           - **A refused request can be dismissed.**  The failure band rendered two buttons and both
             were conditional, so an error the app does not know how to retry left a red line with no
@@ -104,29 +116,21 @@ jobs:
           - **Pulling a large skill folder works again.**  The request validator capped the item list
             at **100** while the feature behind it expands up to **2000** and reports per item, so
             ticking a skill folder of more than a hundred files was refused as a malformed request.
-            The cap is now the feature's own constant, imported from the module that owns it.
+            The cap is now that feature's own constant, imported from the module that owns it.
 
           - **Optional features that are switched off are no longer warnings.**  Remote access and
             internet sync are optional, and having them off is the default state of a working
             install — but both reported a warning, so the page's verdict read **存在警告** for a
-            machine with nothing wrong.  The relay also reported **failure** for having no brokers
-            when it was off *because* internet sync was off.
+            machine with nothing wrong.
 
           - **The diagnostics page reports the update cache** — the file and its version.  That cache
-            decides whether this machine can send an update at all: measured, one holding a build the
-            peer already runs makes the device refuse with `cached_not_newer`.
-            `<data>/update_cache/` is `~/Library/Application Support/ClipSync/update_cache/` on macOS
-            and `%APPDATA%\ClipSync\update_cache\` on Windows.
+            decides whether this machine can send an update at all.  `<data>/update_cache/` is
+            `~/Library/Application Support/ClipSync/update_cache/` on macOS and
+            `%APPDATA%\ClipSync\update_cache\` on Windows.
 
-          - **A device row no longer flickers while anything is happening**, and **the update button
-            says what it is doing**.  The row wrote its note only after the peer answered — and the
-            peer is what answers — so a slow device left it blank for the whole round trip.  And
-            every button on the row was disabled by `busy`, which includes `state.refreshing`, so any
-            background activity disabled and re-enabled the whole row.
-
-          - **A refusal says which build was held back.**  "It has no installer to send" was
-            misleading: the sending device does have one, and the advice pointed at the wrong
-            machine.  It names the build now and says the sending device has to upgrade itself first.
+          - **A device row no longer flickers while anything is happening**, **the update button says
+            what it is doing**, and **a refusal names the build it held back** rather than sending the
+            reader to the wrong machine.
 
           - **An mDNS repair that only failed on CI is fixed**, and a log line that repeated a value
             fixed for the life of the process — **1078 lines in one Mac's log and 1254 in the
