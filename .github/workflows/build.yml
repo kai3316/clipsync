@@ -81,50 +81,46 @@ jobs:
 
           What is new in this release:
 
+          - **Clipboard content too large for one relay message now arrives, and a clip that did not
+            arrive says so.**  This is the real cause of "mac 复制 win 甚至都看不到", and it is not about
+            files: the public broker caps one message at 48968 bytes, and every clip bigger than that
+            was refused, dropped, and still **recorded as synced** — a 1.8 MB copied image, a large
+            HTML clip, all of it.  Found in a Mac log as
+
+                relay publish skipped: 1893212-byte frame exceeds this relay's 48968-byte limit
+
+            with ten different frame sizes in one session, each retried six times.  An oversized clip
+            is now carried as the same binary chunks an internet file transfer uses — cut to fit,
+            acknowledged, retransmitted if a piece is lost, and rebuilt on the far side — and a clip
+            that still could not be delivered raises a named failure instead of reporting success.
+            A clip that fits goes out as exactly one frame, byte-identical to before.
+
           - **A device with no route to GitHub can install an update a peer sent it, without being
-            asked to do it by hand.**  Installing silently needs the release's own signature, and
-            only one of the two ways this machine caches an installer was keeping it: the shell kept
-            it, the sidecar's own download did not.  So a device that upgraded that way served bytes
-            with no signature, and every peer that received them was sent to the folder instead —
-            "只打开了一个资源管理器".  The download now leaves the signature beside the installer, read
-            from the release manifest.
+            asked to do it by hand.**  Installing silently needs the release's own signature, and one
+            of the two ways this machine caches an installer was not keeping it, so a peer that
+            received those bytes was sent to the folder instead — "只打开了一个资源管理器".
 
           - **The update cache holds one installer, and no longer a pile of leftovers.**  Reported as
-            "里面有好多不同版本的更新包，旧的都保留了".  Measured, the installers *were* being swept —
-            what accumulated was a 420-byte signature per release, left behind because the sweep only
-            looks at installers.  A signature now goes with the asset it signs, and one whose asset is
-            already gone is removed too.
-
-          - **A second copy of one installer can no longer sit there for good.**  A peer-sent
-            installer arriving twice was stored as `... (1).exe`, and that name matches none of the
-            release's asset patterns — so the cache sweep could never see it.  Reported as
-            "如果是其他设备从另一个设备更新过来的 ... 更新包好像会一直留下来".  Same-build siblings are
-            pruned now, for names this application publishes and with the version read from the name,
-            so other files in the same folder are left alone.
+            "里面有好多不同版本的更新包，旧的都保留了": the installers *were* being swept, and what
+            accumulated was a 420-byte signature per release, left because the sweep only looks at
+            installers.  Same-build duplicates under a ` (1).exe` name — which no sweep could see —
+            are pruned too.
 
           - **A clipboard history row names the device a clip came from, whatever route it arrived
-            by.**  A clip that arrived over the internet was labelled with a raw device id —
-            `2222222222222222` — while the device list showed its name.  Reported as
-            "在历史记录里下面显示的名字不对", and again after an upgrade, which was the same defect
-            seen later: the name a device publishes when it connects was kept only in memory.  It is
-            stored with the pairing now.
+            by** — 在历史记录里下面显示的名字不对 — and **a device's name survives a restart and an
+            upgrade**, where the name a peer published used to live only in memory.
 
-          - **A file arriving over the internet asks before it is taken** — 此文件经互联网传输，速度
-            比同一网络慢。确定要接收吗？ — while a local-network arrival behaves exactly as before.
-            **A file copied on a device paired over the internet is downloadable**, with the route
-            named before the click: 从 X 下载这个文件（经互联网，比局域网慢）.  Sending from the
-            transfers page is still local-network only, and says so.
+          - **A file arriving over the internet asks before it is taken**, while a local-network
+            arrival behaves exactly as before, and **a file copied on a device paired over the
+            internet is downloadable**, with the route named before the click.
 
-          - **A device being reconnected says 连接中 rather than 已配对**, which it said while its own
-            tooltip said 重连中 3/10 — two claims about one row that cannot both be true.
+          - **A refused request can be dismissed**, **pulling a large skill folder works again**,
+            **optional features that are switched off are no longer warnings**, and **a device being
+            reconnected says 连接中 rather than 已配对**.
 
-          - **A refused request can be dismissed**, **pulling a large skill folder works again**, and
-            **optional features that are switched off are no longer warnings** — remote access and
-            internet sync off is the default state of a working install, not a fault.
-
-          - **The diagnostics page reports the update cache** — the file and its version, which is
-            what decides whether this machine can send an update at all.  **A device row no longer
-            flickers while anything is happening**, and **the update button says what it is doing**.
+          - **The diagnostics page reports the update cache**, which decides whether this machine can
+            send an update at all.  **A device row no longer flickers while anything is happening**,
+            and **the update button says what it is doing**.
 
           - **An mDNS repair that only failed on CI is fixed**, and a log line that repeated a value
             fixed for the life of the process — **1078 lines in one Mac's log and 1254 in the
