@@ -2165,6 +2165,24 @@ fn offline_signed_update(
 
 /// The answer for a staged file this build will not install on its own: leave
 /// it where the card can point at it and let the reader decide.
+/// Tell the sidecar what this host decided about a staged update, so it reaches the log.
+///
+/// Every refusal below ends in `reveal_staged_update`, which opens the folder and explains nothing
+/// afterwards: the reason exists only on a card the reader has already dismissed.  A real report --
+/// "可以收到更新的压缩包，但只会弹出访达目录" -- therefore could not be diagnosed from the logs at all,
+/// because the sidecar's log said only that the asset and the signature had been cached.
+///
+/// Best effort by design: a report that fails must never turn a working install into a reported
+/// failure, and this runs on the path that is about to stop the sidecar anyway.
+async fn note_install_decision(bridge: &Arc<Bridge>, stage: &str, detail: &str, version: &str) {
+    let _ = bridge
+        .call(
+            "update.note_install",
+            json!({"stage": stage, "detail": detail, "version": version}),
+        )
+        .await;
+}
+
 async fn reveal_staged_update(bridge: &Arc<Bridge>) -> Result<Value, BridgeError> {
     bridge.call("update.open_folder", json!({})).await?;
     Ok(json!({"ok": true, "installed": false, "reason": "manual"}))
@@ -2205,11 +2223,28 @@ async fn install_verified_update(
             // executed.
             return match offline_update::install_offline_from_bytes(bytes, signed_name) {
                 Ok(()) => {
+                    note_install_decision(
+                        bridge,
+                        "installing_offline",
+                        &format!("swapped the bundle for {signed_name}; restarting"),
+                        version,
+                    )
+                    .await;
                     bridge.stop().await;
                     emit_update_state(app, json!({"phase": "installing", "version": version}));
                     app.restart();
                 }
                 Err(err) => {
+                    // The one that matters for "只会弹出访达目录": the swap itself failed, and this
+                    // line says which way -- an archive that would not extract, a bundle that would
+                    // not move, or a privileged swap that exited non-zero.
+                    note_install_decision(
+                        bridge,
+                        "bundle_swap_failed",
+                        &err.localized_message(),
+                        version,
+                    )
+                    .await;
                     emit_update_state(
                         app,
                         json!({"phase": "failed", "error": err.localized_message()}),
@@ -2302,12 +2337,25 @@ pub(crate) async fn install_staged_update(
         || path.is_empty()
         || !std::path::Path::new(&path).is_file()
     {
+        note_install_decision(
+            bridge,
+            "no_staged_update",
+            &format!(
+                "phase={:?} path={:?} exists={}",
+                state.get("phase"),
+                path,
+                std::path::Path::new(&path).is_file()
+            ),
+            &version,
+        )
+        .await;
         return Err(BridgeError::new(
             "NOT_FOUND",
             "No verified update is staged",
         ));
     }
     let Some(pubkey) = updater_pubkey(app) else {
+        note_install_decision(bridge, "no_embedded_key", "no updater public key in the bundle", &version).await;
         return reveal_staged_update(bridge).await;
     };
     match updater(app)?.check().await {
@@ -2318,6 +2366,17 @@ pub(crate) async fn install_staged_update(
             let Some((signed_name, _signed_version)) =
                 verify_signed_release(&bytes, &update.signature, &pubkey)
             else {
+                note_install_decision(
+                    bridge,
+                    "manifest_signature_mismatch",
+                    &format!(
+                        "the staged bytes do not verify against the published {} signature ({} bytes staged)",
+                        update.version,
+                        bytes.len()
+                    ),
+                    &version,
+                )
+                .await;
                 return reveal_staged_update(bridge).await;
             };
             let display_version = update.version.clone();
@@ -2335,6 +2394,17 @@ pub(crate) async fn install_staged_update(
             if version == app.package_info().version.to_string() {
                 Ok(json!({"ok": true, "installed": false, "reason": "up_to_date"}))
             } else {
+                note_install_decision(
+                    bridge,
+                    "no_manifest_entry",
+                    &format!(
+                        "the manifest names no update, and the staged build {} is not the running {}",
+                        version,
+                        app.package_info().version
+                    ),
+                    &version,
+                )
+                .await;
                 reveal_staged_update(bridge).await
             }
         }
@@ -2342,17 +2412,41 @@ pub(crate) async fn install_staged_update(
         // peer-sent blob exists for.  Only a peer_verified blob that carries a
         // signature verifying against the embedded key, and whose signed
         // version is newer than this build, may install; all else is manual.
-        Err(_) => {
+        Err(err) => {
+            // The manifest is unreachable, which is the case a peer-sent blob exists for -- and the
+            // case where the transferred signature is the only thing that can authorise an install.
             if verified != "peer_verified" || peer_signature.is_empty() {
+                note_install_decision(
+                    bridge,
+                    "no_usable_signature",
+                    &format!(
+                        "manifest unreachable ({err}); verified={verified:?} signature_bytes={}",
+                        peer_signature.len()
+                    ),
+                    &version,
+                )
+                .await;
                 return reveal_staged_update(bridge).await;
             }
             let Ok(bytes) = tokio::fs::read(&path).await else {
+                note_install_decision(bridge, "staged_file_unreadable", &path, &version).await;
                 return reveal_staged_update(bridge).await;
             };
             let current = app.package_info().version.clone();
             let Some((signed_name, signed_version)) =
                 offline_signed_update(&bytes, &peer_signature, &pubkey, &current)
             else {
+                note_install_decision(
+                    bridge,
+                    "signature_or_version_refused",
+                    &format!(
+                        "the transferred signature did not verify against the embedded key, or its \
+                         signed version is not newer than the running {current} ({} bytes staged)",
+                        bytes.len()
+                    ),
+                    &version,
+                )
+                .await;
                 return reveal_staged_update(bridge).await;
             };
             install_verified_update(app, bridge, &bytes, &signed_name, &signed_version, None).await

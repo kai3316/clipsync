@@ -437,6 +437,23 @@ class Dispatcher:
         if method == "logs.tail":
             validate_params(params, {"lines": (int, lambda v: 1 <= v <= 1000)})
             return self.app.read_logs(params.get("lines", 200))
+        if method == "update.note_install":
+            # The desktop shell reporting what it decided about a staged update.  The judgement is
+            # the host's -- seven reasons it may fall back to a manual install -- and until this
+            # existed none of them reached any log, which is why a report of "only opens the folder"
+            # could not be diagnosed at all.  Host-only, and bounded.
+            validate_params(
+                params,
+                {
+                    "stage": (str, lambda v: 0 < len(v) <= 64),
+                    "detail": (str, lambda v: len(v) <= 2000),
+                    "version": (str, lambda v: len(v) <= 64),
+                },
+                ("stage",),
+            )
+            return self.app.note_update_install(
+                params["stage"], params.get("detail", ""), params.get("version", "")
+            )
         if method == "logs.export":
             # The destination comes from the host's own save dialog, never from
             # the WebView: the sidecar copies its log there and nothing else.

@@ -81,20 +81,27 @@ jobs:
 
           What is new in this release:
 
+          - **When an update cannot be installed, the log now says why.**  Reported as "mac 端可以
+            收到更新的压缩包，但只会弹出访达目录，不能自动安装重启", and it could not be diagnosed from
+            two rounds of logs: the transfer worked, the signature was carried, the host entered the
+            install path and stopped the app — and then the reason existed only on a card the reader
+            had already dismissed.  There are seven different reasons the host falls back to a manual
+            install, and each one now writes itself to the log as
+            Update install decision: stage=… version=… detail=….  A successful install writes that
+            it is installing too, so the next attempt explains itself either way.
+
           - **A device reachable over the internet is no longer called offline on its own history
-            row.**  Its download button was grey and its tooltip said "{name} 当前不在线" while that
-            device's clips were arriving over the relay.  A device paired on this network and reachable
-            over the relay while it is away reported its connection from the local link alone, so the
-            one field that says "online" knew only about the route it was not using.  The gate now
-            accepts either route, which is the rule the device list already applied.  A device that
-            neither route reaches still reads offline.
+            row.**  Its download button was grey and said "{name} 当前不在线" while that device's clips
+            were arriving over the relay, because the row reported its connection from the local link
+            alone.  The gate accepts either route now; a device neither route reaches still reads
+            offline.
 
           - **Clipboard content too large for one relay message now arrives, and a clip that did not
             arrive says so.**  The public broker caps one message at 48968 bytes, and every clip bigger
             than that was refused, dropped, and still **recorded as synced** — the real cause of
             "mac 复制 win 甚至都看不到".  An oversized clip is carried as the same binary chunks an
-            internet file transfer uses, and a clip that still could not be delivered raises a named
-            failure.  A clip that fits goes out as exactly one frame, byte-identical to before.
+            internet file transfer uses.  A clip that fits goes out as one frame, byte-identical to
+            before.
 
           - **A device with no route to GitHub can install an update a peer sent it**, without being
             asked to do it by hand — the release signature is cached beside the installer now, which is
@@ -105,8 +112,7 @@ jobs:
             same-build duplicates under a  (1).exe name that no sweep could see, are removed.
 
           - **A clipboard history row names the device a clip came from, whatever route it arrived
-            by**, and **a device's name survives a restart and an upgrade**, where the name a peer
-            published used to live only in memory.
+            by**, and **a device's name survives a restart and an upgrade**.
 
           - **A file arriving over the internet asks before it is taken**, while a local-network
             arrival behaves exactly as before, and **a file copied on a device paired over the

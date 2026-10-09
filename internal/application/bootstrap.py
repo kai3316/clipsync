@@ -673,6 +673,10 @@ class SidecarApplication:
                 "app.open_link", "app.factory_reset",
                 "diagnostics.report", "diagnostics.request",
                 "update.check", "update.status", "update.download", "update.open_folder",
+                # The desktop shell reporting why it did or did not install a staged update.  It has
+                # to work with the runtime down: the install decision is made while the app is being
+                # replaced, and the whole point is that the reason reaches a log afterwards.
+                "update.note_install",
                 # The host's own upgrade hands the installer it is about to
                 # install over through this one, so that a peer can be given
                 # that file instead of this machine fetching a second copy.
@@ -771,6 +775,37 @@ class SidecarApplication:
             "reachable": sum(1 for row in results if row.get("ok")),
             "total": len(ordered),
         }
+
+    def note_update_install(self, stage: str, detail: str = "", version: str = "") -> dict:
+        """Record what the *host* decided about installing a staged update.
+
+        The install judgement lives in the desktop shell (`main.rs::install_staged_update`), which
+        has seven reasons to fall back to a manual install -- no embedded key, a manifest that
+        answered with a different signature, an unreachable manifest with no usable transferred
+        signature, a version that is not newer, a payload that will not extract, a bundle swap that
+        failed, a privileged swap that exited non-zero.  Every one of them called
+        `reveal_staged_update`, which opens the folder, and **none of them said why anywhere a
+        reader could look afterwards**.
+
+        That is why a real report -- "可以收到更新的压缩包，但只会弹出访达目录" -- could not be
+        diagnosed from two rounds of logs: the sidecar's log said the asset and the signature were
+        cached, and then nothing.  The reason only existed on screen, in a card the reader had
+        already dismissed.
+
+        So the host reports each decision here and it lands in `clipsync.log` with everything else,
+        which is the file the diagnostics collector and the log viewer already read.  Inbound from
+        the host only: the caller is the shell, not a peer.
+        """
+        detail = str(detail or "")[:2000]
+        version = str(version or "")[:64]
+        stage = str(stage or "")[:64]
+        logger.warning(
+            "Update install decision: stage=%s version=%s detail=%s",
+            stage or "unknown",
+            version or "-",
+            detail or "-",
+        )
+        return {"ok": True}
 
     def read_logs(self, lines=200) -> dict:
         """Tail the application log, redacted, for the native log viewer.
