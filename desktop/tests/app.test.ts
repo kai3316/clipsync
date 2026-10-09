@@ -1300,6 +1300,57 @@ describe("history rendering", () => {
     }
   });
 
+  it("offers the download when the device is reachable over the relay, not the local link", async () => {
+    // The reported state: a LAN-owned device (relay false) that is away, so `connection_state` says
+    // offline, while the relay join it also holds is up.  The clips arrive; the button must not say
+    // 当前不在线.
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "peer-1", name: "Kais-MacBook", paired: true, relay: false,
+        relay_paired: true, relay_online: true, connection_state: "offline",
+        pairing_status: "paired", pairing_code: null, sas: null },
+    ] });
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
+      historyRow({ id: "7", content_type: "FILE_REMOTE", preview: "report.pdf",
+        source_device: "peer-1", source_name: "Kais-MacBook", offer_entry: "42" }),
+    ] });
+    const app = mountOn("history");
+    try {
+      await flushPromises();
+      const button = app.get('[aria-label="下载文件"]');
+      const title = button.attributes("title");
+      expect(title, "the row said the device was offline while its clips were arriving")
+        .not.toContain(t("当前不在线"));
+      expect(button.attributes("disabled")).toBeUndefined();
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+    }
+  });
+
+  it("still says a device is offline when neither route reaches it", async () => {
+    // The control: the same row with the relay down as well.  The button must go back to grey, or
+    // the fix above would have removed the offline case entirely.
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "peer-1", name: "Kais-MacBook", paired: true, relay: false,
+        relay_paired: true, relay_online: false, connection_state: "offline",
+        pairing_status: "paired", pairing_code: null, sas: null },
+    ] });
+    vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
+      historyRow({ id: "7", content_type: "FILE_REMOTE", preview: "report.pdf",
+        source_device: "peer-1", source_name: "Kais-MacBook", offer_entry: "42" }),
+    ] });
+    const app = mountOn("history");
+    try {
+      await flushPromises();
+      const button = app.get('[aria-label="下载文件"]');
+      expect(button.attributes("title")).toContain(t("当前不在线"));
+      expect(button.attributes("disabled")).toBeDefined();
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+    }
+  });
+
   it("still offers the download from the same device when it is here on this network", async () => {
     // The control.  `relay` marks the row, not the pairing: the same device paired by code *and*
     // seen on this network gets a LAN row, and there the file does travel.

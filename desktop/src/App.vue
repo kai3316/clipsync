@@ -642,13 +642,20 @@ function isRemoteFile(item: HistoryItem) {
 function remoteFileDevice(item: HistoryItem) {
   const id = item.source_device || "";
   if (!id) return undefined;
-  // A relay row counts, and `relay` is what says which route the download will take.  On such a row
-  // `connection_state` is the *relay's* view of the peer (see `api/types.ts`), so `online` means the
-  // relay can see it -- which is now a route a clip's files can travel, cut to fit a broker message
-  // and chunk-acked at the far end.  Reading it as a LAN link was the earlier bug in the other
-  // direction: the row offered a download the protocol refused.
+  // Reachable by *either* route.  `connection_state` on a LAN-owned row is computed from the local
+  // link alone (`lan.py`: `"online" if pid in connected ... else "offline"`), so a device that is
+  // paired on this network, reachable over the relay while it is away, and carrying clipboard
+  // traffic right now still reads `offline` here -- and the row's download button told the reader the
+  // device was not online, about a device whose clips were arriving.  Reported exactly that way.
+  //
+  // This is the rule `device-row.ts::localLinkEstablished` already applies for the state word, and
+  // `relay_paired && relay_online` is how a LAN-owned row reports the relay join it also holds.
+  // A relay-only row arrives separately with `relay: true` and its own `connection_state`.
   return state.devices.find(
-    (device) => device.id === id && device.connection_state === "online",
+    (device) =>
+      device.id === id &&
+      (device.connection_state === "online" ||
+        Boolean(device.relay_paired && device.relay_online)),
   );
 }
 /** Whether the row names a file this window can actually ask for.
