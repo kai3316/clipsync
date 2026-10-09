@@ -63,6 +63,13 @@ HEADER_SIZE = 7
 # expanding into a zip-bomb OOM during decode.
 MAX_FRAME_SIZE = 10 * 1024 * 1024  # 10 MB
 
+# The binary chunk frame's header: magic (2) + transfer_id (32) + chunk_index (4)
+# + total_chunks (4) + data_length (4).  Named because a caller that has to size
+# a chunk against a message limit needs it (see ``relay_chunks`` and the
+# clipboard's fragmented carriage in ``lan.py``) -- a second 46 written by hand
+# is a second answer to what a chunk frame costs.
+BINARY_HEADER_SIZE = 2 + 32 + 4 + 4 + 4  # 46 bytes
+
 # Wire-protocol type labels.  These are fixed for cross-version
 # compatibility and intentionally differ from the persistence labels
 # (internal.clipboard.dedup.CONTENT_TYPE_LABELS, where IMAGE_PNG is "IMAGE"):
@@ -439,8 +446,7 @@ def encode_binary_chunk(
 
 def _decode_binary_frame(data: bytes):
     """Decode a binary frame into a SyncMessage, or return None."""
-    BIN_HEADER_SIZE = 2 + 32 + 4 + 4 + 4  # 46 bytes  # noqa: N806
-    if len(data) < BIN_HEADER_SIZE:
+    if len(data) < BINARY_HEADER_SIZE:
         return None
     magic, tid_bytes, chunk_index, total_chunks, data_len = struct.unpack_from(
         ">H32sIII",
@@ -449,13 +455,13 @@ def _decode_binary_frame(data: bytes):
     )
     if magic != BINARY_MAGIC:
         return None
-    if BIN_HEADER_SIZE + data_len > len(data):
+    if BINARY_HEADER_SIZE + data_len > len(data):
         return None
     try:
         transfer_id = tid_bytes.decode("ascii")
     except (UnicodeDecodeError, ValueError):
         return None
-    raw_data = data[BIN_HEADER_SIZE : BIN_HEADER_SIZE + data_len]
+    raw_data = data[BINARY_HEADER_SIZE : BINARY_HEADER_SIZE + data_len]
 
     content = ClipboardContent(timestamp=time.time())
     result = SyncMessage(content=content, msg_id=transfer_id, source_device="")

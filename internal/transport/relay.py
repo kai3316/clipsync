@@ -822,6 +822,17 @@ class RelayTransport:
             return self._state
 
     @property
+    def max_frame(self) -> int:
+        """Largest frame one message of this relay's configuration carries.
+
+        The publish path refuses against exactly this number, so a caller that
+        has to decide whether a frame needs cutting (the clipboard's fragmented
+        carriage, ``internal/transport/relay_chunks.py``) reads it here rather
+        than re-deriving it from the configuration and risking a second answer.
+        """
+        return self._max_frame
+
+    @property
     def current_broker(self) -> str:
         """Endpoint URL of the broker the primary client is connected to
         ("" when offline).  The UI shows this so a user can tell at a glance

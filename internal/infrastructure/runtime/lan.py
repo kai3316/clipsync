@@ -35,6 +35,7 @@ from internal.infrastructure.runtime.internet_pairing import (
 from internal.infrastructure.runtime.relay_delivery import RelayDelivery
 from internal.platform.notify import notification_mgr
 from internal.protocol.codec import (
+    BINARY_HEADER_SIZE,
     CLIP_FILE_MSG_TYPES,
     ENDING_MSG_TYPES,
     PAIRING_MSG_TYPES,
@@ -53,6 +54,7 @@ from internal.sync.nearby_chat import CHAT_MSG_TYPES, ChatManager
 from internal.system import updater
 from internal.system.archive import ArchiveEmptyError, create_archive
 from internal.system.update_service import _verdict_is_rejection
+from internal.transport import relay_chunks
 from internal.transport.connection import (
     _REJECT_REASONS,
     MAX_FRAME_SIZE,
@@ -66,7 +68,15 @@ from internal.transport.relay import (
     MAX_RELAY_PAYLOAD,
     RelayTransport,
     build_paho_client,
+    frame_limit_for,
     netpair_device_tag,
+)
+from internal.transport.relay_chunks import (
+    ClipChunkAssembler,
+    ClipChunkSends,
+    is_clip_transfer_id,
+    mint_clip_transfer_id,
+    split_frame,
 )
 from internal.version import __version__
 
@@ -263,6 +273,11 @@ class LanRuntime:
     # spaced to what a bar can show rather than to what the disk can report.
     PROGRESS_INTERVAL = 0.25
     PAIRING_SEND_WAIT = 12.0
+    # How long a fragmented clipboard frame may sit with chunks missing before
+    # this side asks its sender for them again (see ``_sweep_clip_chunks``).
+    # The value is ``relay_chunks.STALL_GRACE`` narrowed into a class attribute
+    # so a test can shrink it the way it already shrinks ``REFRESH_INTERVAL``.
+    CLIP_CHUNK_STALL_GRACE = relay_chunks.STALL_GRACE
     # How long a device keeps its row after its mDNS record lapses.
     #
     # An mDNS announcement is the advertiser's to schedule and the network's to
@@ -370,6 +385,14 @@ class LanRuntime:
         self._pending_certs = {}
         self._cert_alert_seen = {}
         self._last_error = ""
+        self._last_error_detail = ""
+        # A clipboard frame larger than one relay message crosses as binary
+        # chunks (see ``internal/transport/relay_chunks.py``).  These two hold
+        # the receiving and the sending half of that exchange: the assembler
+        # rebuilds what a peer cut, and the send registry answers a peer's
+        # request for the chunks it is missing.
+        self._clip_chunks = ClipChunkAssembler()
+        self._clip_sends = ClipChunkSends()
         # The pairing panel reports the relay's own state beside the peers', so
         # it is given the accessor that already answers it: a peer list that
         # reads 离线 throughout means one thing when this machine is on the
@@ -3001,13 +3024,26 @@ class LanRuntime:
         self._progress_at = now
         return True
 
-    def _error(self, code):
-        logger.warning("LAN runtime: %s", code)
+    def _error(self, code, detail: str = ""):
+        """Report one runtime failure: a code the front ends localize, and the
+        facts of *this* one beside it.
+
+        *detail* is what a code cannot carry on its own -- which limit was hit,
+        which peer did not get the frame -- so the log line and the event say
+        something a reader can act on.  It is part of the change test as well as
+        the code: two oversized clips to two different peers are two reports,
+        because the second one's peer is the whole point of it.
+        """
+        logger.warning("LAN runtime: %s%s", code, f" ({detail})" if detail else "")
         with self._lock:
-            changed = self._last_error != code
+            changed = self._last_error != code or self._last_error_detail != detail
             self._last_error = code
+            self._last_error_detail = detail
         if changed:
-            self._publish("runtime.error", {"code": code, "message": "LAN operation failed"})
+            payload = {"code": code, "message": "LAN operation failed"}
+            if detail:
+                payload["detail"] = detail
+            self._publish("runtime.error", payload)
 
     def start(self):
         with self._lock:
@@ -3274,6 +3310,9 @@ class LanRuntime:
         # start runs on its own thread -- see _auto_update_from_peers.
         self._auto_update_from_peers()
         self.delivery.tick()
+        # Fragmented clipboard frames: ask for the gaps in one that has gone
+        # quiet, and forget the ones nobody is going to finish.
+        self._sweep_clip_chunks()
         # From the clock, not from the next pull: the panel waits for one event
         # per request before it stops saying "waiting to receive files", and a
         # reply that never arrives has no other moment to be reported at.
@@ -5249,14 +5288,24 @@ class LanRuntime:
         # dropped packet; the receiver's per-index chunk dedup absorbs the
         # at-least-once duplicates that buys.
         is_chunk = getattr(msg, "msg_type", "") == "file_chunk"
-        try:
-            ok = bool(self.relay.publish(frame, topic, key, qos=1 if is_chunk else 0))
-        except Exception:
-            logger.debug("Relay publish to %s failed", str(peer_id)[:12], exc_info=True)
-            return False
-        if ok:
+        # A clipboard frame reaches this method when the offline queue retries a
+        # publish that failed, and a frame too big for one relay message is the
+        # case that queue exists for here -- so the same cutting the first
+        # attempt does has to happen on the retry, or the queued row retries its
+        # way to a failure it could never avoid.  Chat and receipt frames size
+        # themselves and are published in one message, exactly as before.
+        outcome = self._relay_publish(
+            self.relay,
+            frame,
+            topic,
+            key,
+            peer_id,
+            qos=1 if is_chunk else 0,
+            clipboard=getattr(msg, "msg_type", "") == "clipboard",
+        )
+        if outcome == "sent":
             self._note_chat_sent(peer_id, msg)
-        return ok
+        return outcome == "sent"
 
     @staticmethod
     def _decode_frame(data):
@@ -5554,12 +5603,34 @@ class LanRuntime:
             self._error("CLIPBOARD_TOO_LARGE")
             return False
         if not self._stop_event.is_set() and self.config.sync_enabled:
-            self._send_local_sync(data)
+            undelivered = self._send_local_sync(data)
+            if undelivered:
+                # The frame did not reach a peer that had no other route to it.
+                # Say which limit it was cut for and who is missing the clip, and
+                # report the capture as not synced: returning True here is what
+                # made an oversized clip read as delivered while the other
+                # machine's clipboard never changed.  Which of the pieces the
+                # broker refused is not attributed to the limit -- the limit is
+                # why the frame had to be cut at all, and the refusal is the
+                # relay's own answer.
+                self._error(
+                    "CLIPBOARD_TOO_LARGE",
+                    f"{len(data)}-byte clipboard frame over the relay's "
+                    f"{self._relay_frame_limit()}-byte message limit did not reach "
+                    f"{', '.join(str(peer)[:12] for peer in undelivered)}: it was cut "
+                    f"into chunks that fit and the broker refused some of them",
+                )
+                return False
             return True
         return False
 
-    def _send_local_sync(self, data: bytes) -> None:
+    def _send_local_sync(self, data: bytes) -> list[str]:
         """Hand one clipboard frame to each paired peer: LAN first, relay after.
+
+        Returns the peers the relay could not carry the frame to, so the caller
+        can report a send that did not happen instead of a success.  An empty
+        list means every peer that was in scope has the frame (or nothing had to
+        be sent).
 
         ``transport.broadcast`` answers only whether *some* peer took the frame,
         which is not enough to decide who still needs the relay copy — a peer
@@ -5599,7 +5670,7 @@ class LanRuntime:
                     lan_delivered.add(pid)
             except Exception:
                 logger.debug("Local sync: LAN send to %s failed", str(pid)[:12], exc_info=True)
-        self._publish_relay(data, lan_delivered=lan_delivered)
+        return self._publish_relay(data, lan_delivered=lan_delivered)
 
     def syncs_to(self, peer_id) -> bool:
         """Whether the user lets this machine send clipboard content to *peer_id*.
@@ -5620,8 +5691,11 @@ class LanRuntime:
         real = self._resolve(peer_id)
         return peer_id not in peers and real not in peers and peer_id_hash(real) not in peers
 
-    def _publish_relay(self, data: bytes, lan_delivered=()) -> None:
+    def _publish_relay(self, data: bytes, lan_delivered=()) -> list[str]:
         """Mirror a clipboard frame to every internet-reachable peer.
+
+        Returns the peers the relay could not carry the frame to (empty when
+        every peer in scope has it, or when there is nothing to mirror to).
 
         *lan_delivered* names the peers the local link already carried it to;
         they are skipped, so the broker is handed a clip only when this machine
@@ -5639,7 +5713,7 @@ class LanRuntime:
         """
         relay = self.relay
         if relay is None or not self.config.internet_sync_enabled:
-            return
+            return []
         from internal.transport.relay import (
             derive_key,
             derive_topic,
@@ -5647,6 +5721,7 @@ class LanRuntime:
         )
 
         delivery = self._delivery_metadata(data)
+        undelivered: list[str] = []
         # This machine's own secret, generated on first use and shared by every
         # enrolled peer below: the derivation is symmetric — both ends compute
         # the same topic from the same pair of secrets — so there is one per
@@ -5673,9 +5748,11 @@ class LanRuntime:
                 continue
             if not secret:
                 secret = self.internet_pairing.ensure_relay_secret()
-            ok = self._relay_publish(relay, data, derive_topic(secret, peer_secret),
-                                     derive_key(secret, peer_secret))
-            self._record_relay_send(peer_id, ok, delivery, data)
+            outcome = self._relay_publish(relay, data, derive_topic(secret, peer_secret),
+                                          derive_key(secret, peer_secret), peer_id)
+            self._record_relay_send(peer_id, outcome == "sent", delivery, data)
+            if outcome == "undeliverable":
+                undelivered.append(str(peer_id))
         for peer_id, peer_secret in netpair_secrets.items():
             if not peer_secret or peer_id == self.config.device_id or peer_id in removed:
                 continue  # a stray self-entry must never mirror to ourselves
@@ -5689,16 +5766,211 @@ class LanRuntime:
             key = self.internet_pairing.netpair_key_for(peer_secret, peer_id)
             if key is None:
                 continue
-            ok = self._relay_publish(relay, data, netpair_topic(peer_secret), key)
-            self._record_relay_send(peer_id, ok, delivery, data)
+            outcome = self._relay_publish(relay, data, netpair_topic(peer_secret), key, peer_id)
+            self._record_relay_send(peer_id, outcome == "sent", delivery, data)
+            if outcome == "undeliverable":
+                undelivered.append(str(peer_id))
+        return undelivered
 
-    def _relay_publish(self, relay, data: bytes, topic, key) -> bool:
-        """Hand one frame to the broker; any failure counts as not delivered."""
+    def _relay_publish(self, relay, data: bytes, topic, key, peer_id: str = "",
+                       *, qos: int = 0, clipboard: bool = True) -> str:
+        """Hand one clipboard frame to the broker, cut to fit when it is too big.
+
+        Returns one of:
+
+        ``"sent"``
+            the broker took every frame this message needed.
+        ``"queued"``
+            the frame fits one relay message and the broker refused it just now
+            (offline, or its queue full).  The offline queue retries it, exactly
+            as it always has, so this is a deferral rather than a drop.
+        ``"undeliverable"``
+            the frame is larger than one relay message and was still not carried
+            after being cut into chunks that fit.  Nothing retries a partly
+            carried fragmented frame into a whole one, so the caller must not
+            report it as sent.
+
+        The size decision is made against the live relay's own limit
+        (:meth:`_relay_frame_limit`) rather than by attempting the publish and
+        seeing it fail, so a frame that fits still goes out as exactly one frame
+        on the first try -- the common path on a healthy LAN is untouched, and a
+        broker that is merely away is not mistaken for an oversized frame.
+        """
+        if len(data) > self._relay_frame_limit() and clipboard:
+            return self._relay_publish_chunked(relay, data, topic, key, peer_id)
+        # A frame that fits -- and every frame kind that sizes itself (chat cuts
+        # its own file chunks) -- goes out as one message on the first try, the
+        # way it always has.
+        return (
+            "sent"
+            if self._relay_publish_one(relay, data, topic, key, qos=qos, peer=peer_id)
+            else "queued"
+        )
+
+    def _relay_publish_chunked(self, relay, data: bytes, topic, key, peer_id: str) -> str:
+        """Carry a frame too big for one relay message as binary chunks.
+
+        The return values are the caller's: ``"sent"`` only when every chunk was
+        taken by the broker, ``"undeliverable"`` otherwise (see
+        :meth:`_relay_publish`).
+        """
         try:
-            return bool(relay.publish(data, topic, key))
+            # The same arithmetic an internet file transfer is cut with: the
+            # largest raw chunk whose binary frame still packs under this
+            # relay's limit (``ChatManager.relay_chunk_for``).
+            chunk_size = ChatManager.relay_chunk_for(self.config.relay_max_message_bytes)
+            # The chunk frame is a ``BINARY_HEADER_SIZE``-byte (46) binary
+            # header plus the payload, and `relay_chunk_for` is derived from the
+            # *configured* limit while the check above used the live relay's.
+            # Those are the same number in practice (the transport is built from
+            # the setting); shrinking to the live one here is what keeps a drift
+            # between them a smaller chunk rather than a piece the broker
+            # refuses.
+            chunk_size = min(chunk_size, max(1, self._relay_frame_limit() - BINARY_HEADER_SIZE))
+            transfer_id = mint_clip_transfer_id()
+            frames = split_frame(data, chunk_size, transfer_id)
         except Exception:
-            logger.debug("Relay publish failed", exc_info=True)
+            logger.exception("Could not cut an oversized clipboard frame for the relay")
+            return "undeliverable"
+        # Kept so this peer's resend request has something to answer with.  The
+        # registry is bounded and times out; a frame nobody asks about is
+        # forgotten on the maintenance tick.
+        self._clip_sends.remember(transfer_id, peer_id, frames)
+        carried = True
+        for frame in frames:
+            # QoS 1, like every other chunk frame: a best-effort public broker
+            # redelivers what it drops in flight, and the receiver dedups by
+            # index.  Every chunk is offered even after a refusal, because a
+            # refused one may be the queue filling rather than the link dying,
+            # and the receiver's own resend request repairs the gap.
+            if not self._relay_publish_one(relay, frame, topic, key, qos=1, peer=peer_id):
+                carried = False
+        logger.info(
+            "Clipboard frame of %d bytes crossed the relay as %d chunk(s) of %d bytes%s",
+            len(data),
+            len(frames),
+            chunk_size,
+            "" if carried else " (some chunks were refused)",
+        )
+        return "sent" if carried else "undeliverable"
+
+    def _relay_publish_one(self, relay, frame: bytes, topic, key, *, qos: int = 0,
+                           peer: str = "") -> bool:
+        """One publish attempt; its own failures are never propagated."""
+        try:
+            return bool(relay.publish(frame, topic, key, qos=qos))
+        except Exception:
+            logger.debug(
+                "Relay publish%s failed",
+                f" to {str(peer)[:12]}" if peer else "",
+                exc_info=True,
+            )
             return False
+
+    def _relay_frame_limit(self) -> int:
+        """The largest frame one relay message of this configuration carries.
+
+        Read off the live relay when it can say (``RelayTransport.max_frame``),
+        so the number that decides whether to cut a frame is the number the
+        publish path refuses against.  The configuration is the fallback for a
+        transport that cannot be asked -- a test double, or one built by hand.
+        """
+        limit = getattr(self.relay, "max_frame", None)
+        if isinstance(limit, int) and limit > 0:
+            return limit
+        payload = getattr(self.config, "relay_max_message_bytes", MAX_RELAY_PAYLOAD)
+        return frame_limit_for(int(payload or MAX_RELAY_PAYLOAD))
+
+    def _sweep_clip_chunks(self) -> None:
+        """Ask for the gaps in a fragmented clipboard frame, and forget the rest.
+
+        The receiving half of the retransmit file transfers already use
+        (``file_chunk_ack`` with ``missing_chunks``): a burst of chunks over a
+        best-effort broker loses some, the sender is asked again for exactly
+        those, and an assembly nobody finishes times out instead of being held
+        for the life of the process.
+        """
+        for transfer_id, peer_id, missing in self._clip_chunks.claim_retransmit(
+            self.CLIP_CHUNK_STALL_GRACE
+        ):
+            if not self._peer_is_internet_reachable(peer_id):
+                continue
+            logger.info(
+                "Clipboard frame %s: %d chunk(s) missing -- asking %s to resend",
+                transfer_id[:8],
+                len(missing),
+                str(peer_id)[:12],
+            )
+            self._relay_publish_to_peer(
+                encode_frame(
+                    {
+                        "msg_type": "file_chunk_ack",
+                        "transfer_id": transfer_id,
+                        "missing_chunks": missing,
+                    },
+                    # The source has to travel.  A relay frame with no source is
+                    # read for the binary chunk type alone -- there is nowhere in
+                    # that 46-byte header to put a device id (see
+                    # ``_receive_relay``) -- so a source-less control frame is
+                    # dropped at the far end, and a request sent that way is a
+                    # request never heard.
+                    source_device=self.config.device_id,
+                ),
+                peer_id,
+            )
+        self._clip_chunks.sweep()
+        self._clip_sends.sweep()
+
+    def _receive_clip_chunk(self, payload: dict, pid: str, via_relay: bool) -> None:
+        """One chunk of a fragmented clipboard frame: assemble it, then route it.
+
+        The rebuilt bytes go back through the very router the single frame would
+        have taken, so the far side sees exactly the clipboard message it would
+        have seen without the fragmentation -- same channel binding, same trust
+        gate, same dedup, same receipt back to the sender.  Anything else would
+        make an oversized clip behave differently from an ordinary one on the
+        receiving machine, which is the whole thing the framing exists to hide.
+        """
+        frame = self._clip_chunks.add(
+            payload.get("transfer_id"),
+            payload.get("chunk_index"),
+            payload.get("total_chunks"),
+            payload.get("_raw_data"),
+            pid,
+        )
+        if frame is None:
+            return
+        logger.info(
+            "Clipboard frame %s reassembled from chunks (%d bytes) -- routing it",
+            str(payload.get("transfer_id"))[:8],
+            len(frame),
+        )
+        if via_relay:
+            self._receive_relay(frame)
+            return
+        rebuilt = decode_message(frame)
+        if rebuilt is not None:
+            self._receive(rebuilt, pid)
+
+    def _resend_clip_chunks(self, payload: dict, pid: str) -> None:
+        """Answer a peer's request for the chunks it did not get.
+
+        The whole chunk set is held from the moment it was cut, and the request
+        names only the indices that are missing, so the repair costs the gap and
+        not the frame.
+        """
+        transfer_id = str(payload.get("transfer_id") or "")
+        frames = self._clip_sends.resend(transfer_id, pid, payload.get("missing_chunks"))
+        if not frames:
+            return
+        logger.info(
+            "Clipboard frame %s: resending %d requested chunk(s) to %s",
+            transfer_id[:8],
+            len(frames),
+            str(pid)[:12],
+        )
+        for frame in frames:
+            self._relay_publish_to_peer(frame, pid)
 
     def _record_relay_send(self, peer_id, ok, delivery, data) -> None:
         """Ledger/queue one relayed clipboard send (legacy ``delivery`` dict)."""
@@ -5996,6 +6268,32 @@ class LanRuntime:
             ):
                 self.internet_pairing.offer_enroll(pid)
             return
+        if kind == "file_chunk":
+            payload = getattr(msg, "_raw_payload", {}) or {}
+            if is_clip_transfer_id(payload.get("transfer_id")):
+                # A clipboard frame that was too big for one relay message,
+                # arriving as the binary chunks it was cut into.  Clipboard
+                # content never reaches an unpaired peer on either channel, so
+                # these pieces are held to the same gate the whole frame is --
+                # and a chunk the trust check refuses is dropped here rather
+                # than handed to the chat or file layer under a name of its own.
+                if trusted:
+                    self._receive_clip_chunk(payload, pid, via_relay)
+                else:
+                    logger.debug(
+                        "Dropping clipboard chunk for %s from an untrusted peer",
+                        str(payload.get("transfer_id"))[:8],
+                    )
+                return
+        if kind == "file_chunk_ack":
+            payload = getattr(msg, "_raw_payload", {}) or {}
+            if is_clip_transfer_id(payload.get("transfer_id")):
+                # The far side is missing chunks of a fragmented clipboard
+                # frame this machine cut.  Same message, same meaning, as the
+                # file transfer's own retransmit request.
+                if trusted:
+                    self._resend_clip_chunks(payload, pid)
+                return
         if kind == "file_chunk" and self.chat.handle_binary_chunk(
             getattr(msg, "_raw_payload", {}), pid, self._chat_send_fn(pid)
         ):
