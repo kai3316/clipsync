@@ -63,6 +63,12 @@ class SyncManager:
         self._enabled = True
         self._on_send: Callable | None = None
         self._on_history_change: Callable | None = None
+        # Asked about a capture identical to a recent one: does it still have a
+        # peer to reach?  Only the transport can answer -- it is the one that
+        # knows which peers it delivered the last frame to and which are in scope
+        # now -- so the answer arrives as a callback and absence of one means
+        # "drop the duplicate", which is what every host did before this existed.
+        self._on_needs_resend: Callable | None = None
         self._lock = threading.Lock()
         # Serializes _do_read_and_send executions.  A rich-content capture
         # can take ~1.4s, during which _pending_timer is already cleared, so
@@ -81,6 +87,12 @@ class SyncManager:
         # suppressed forever.
         self._last_hash_ts: float = 0.0
         self._dedup_ring: list[tuple[str, float]] = []  # (hash, monotonic_ts)
+        # Hashes whose "copy it again" retry has already been made, and when.
+        # Bounded by the same window as the suppression it overrides, so a
+        # deliberate re-copy is one more attempt rather than an unbounded stream
+        # of them: the retry is for content that never arrived, not a second
+        # send path for every capture the platform hands back.
+        self._resend_tried: list[tuple[str, float]] = []  # (hash, monotonic_ts)
         self._sync_debounce = sync_debounce
         self._pending_timer: threading.Timer | None = None
         # Platform monitors (macOS/Linux) store their poll interval on the
@@ -134,6 +146,22 @@ class SyncManager:
     @on_history_change.setter
     def on_history_change(self, callback: Callable):
         self._on_history_change = callback
+
+    @property
+    def on_needs_resend(self) -> Callable | None:
+        return self._on_needs_resend
+
+    @on_needs_resend.setter
+    def on_needs_resend(self, callback: Callable | None):
+        """Set the predicate asked about a capture that duplicates a recent one.
+
+        Called with the :class:`ClipboardContent` of the duplicate; returns
+        whether it still has somewhere to go.  True sends it again — the
+        receive side already drops a frame it has seen, so a retry that was not
+        needed costs one frame and no side effect — and False, or no callback at
+        all, drops it silently, which is what the dedup did before this existed.
+        """
+        self._on_needs_resend = callback
 
     def set_enabled(self, enabled: bool):
         with self._lock:
@@ -419,6 +447,50 @@ class SyncManager:
         if len(self._dedup_ring) > DEDUP_RING_SIZE:
             self._dedup_ring = self._dedup_ring[-DEDUP_RING_SIZE:]
 
+    def _resend_duplicate(self, content_hash: str, content) -> bool:
+        """Whether a capture identical to a recent one should go out anyway.
+
+        The checks that call this exist for two loop cases — the platform handing
+        the same clipboard back, and this machine's own write being read back —
+        and for both, dropping the capture is right.  It is wrong for the third
+        case, which is the one a user reports: content copied while nothing could
+        carry it, then copied again once something could.  Suppressing that by
+        content suppresses it forever, because the content is the one thing that
+        did not change.
+
+        The transport is asked, because only the transport knows: it holds what
+        the last frame reached and who is in scope now.  A caller that never sets
+        ``on_needs_resend`` — every host before this existed — keeps the old
+        behaviour exactly.
+
+        One retry per content per window.  The retry is for a copy that never
+        arrived, not a second send path for every capture the platform repeats,
+        and a re-sent frame costs the receiver one dedup hit it already knows how
+        to drop.
+        """
+        ask = self._on_needs_resend
+        if ask is None:
+            return False
+        now = time.monotonic()
+        self._resend_tried = [
+            (h, ts) for h, ts in self._resend_tried if now - ts <= DEDUP_RING_TTL
+        ]
+        if any(h == content_hash for h, _ in self._resend_tried):
+            return False
+        try:
+            if not ask(content):
+                return False
+        except Exception:
+            logger.debug("on_needs_resend failed", exc_info=True)
+            return False
+        self._resend_tried.append((content_hash, now))
+        # Said out loud because it is the difference between "the copy was
+        # swallowed" and "the copy went out again": the report that led here was
+        # only diagnosable from the code, and this line is what makes the next one
+        # answerable from the log.
+        logger.info("Copy repeated and nothing had carried it — sending it again")
+        return True
+
     def _reset_dedup_hashes(self) -> None:
         """Clear the loop-prevention hash state.
 
@@ -497,14 +569,15 @@ class SyncManager:
             # value, so the second could only be reached when the first was
             # already false -- an unreachable branch whose two comments read as
             # though they meant different things.
-            if (
+            #
+            # Inside the window a duplicate is dropped *unless the transport says
+            # a peer could take it now* -- see `_resend_duplicate`: the case the
+            # window is wrong about is a copy made while nothing could carry it.
+            duplicate = (
                 content_hash == self._last_local_hash
                 and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL
-            ):
-                return
-            # Skip if recently seen (e.g. a remote write reflected back whose
-            # read-back was not re-encoded)
-            if self._dedup_seen(content_hash):
+            ) or self._dedup_seen(content_hash)
+            if duplicate and not self._resend_duplicate(content_hash, content):
                 return
 
             self._last_local_hash = content_hash

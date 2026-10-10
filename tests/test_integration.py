@@ -433,5 +433,79 @@ class TestNetworkResilience:
         # Should not raise, no crash
 
 
+class TestRepeatedCopyWithNothingToCarryIt:
+    """Reported as "连接后再重复复制一个东西，那么这个东西就不会传送过去".
+
+    The capture path drops a copy whose content hash it has just seen, which is
+    right for the two loop cases it exists for and wrong for the third: content
+    copied while nothing could carry it, copied again once something could.  The
+    content is the one thing that did not change, so suppressing by content
+    suppresses that copy forever -- and a *different* copy always went out, which
+    is exactly what the report says.
+
+    The transport answers the question (`on_needs_resend`), because only it knows
+    who is in scope now.
+    """
+
+    def setup_method(self):
+        self.dev = _make_device("dev-a", "A", "windows")
+        self.dev.reader.content = ClipboardContent(types={ContentType.TEXT: b"hello"})
+
+    def teardown_method(self):
+        self.dev.mgr.stop()
+
+    def test_a_repeated_copy_reaches_the_wire_when_somebody_can_take_it(self):
+        self.dev.mgr._do_read_and_send()
+        assert len(self.dev.sent) == 1
+
+        self.dev.mgr.on_needs_resend = lambda content: True
+        self.dev.mgr._do_read_and_send()
+
+        assert len(self.dev.sent) == 2, "the repeated copy was swallowed"
+
+    def test_a_repeated_copy_is_still_dropped_when_nothing_can(self):
+        """The control, and the old behaviour: the predicate is asked, and no means no."""
+        self.dev.mgr._do_read_and_send()
+        assert len(self.dev.sent) == 1
+
+        self.dev.mgr.on_needs_resend = lambda content: False
+        self.dev.mgr._do_read_and_send()
+
+        assert len(self.dev.sent) == 1
+
+    def test_a_caller_that_sets_nothing_keeps_the_old_behaviour(self):
+        """No predicate is what every host was before this existed."""
+        self.dev.mgr._do_read_and_send()
+        self.dev.mgr._do_read_and_send()
+
+        assert len(self.dev.sent) == 1
+
+    def test_the_retry_happens_once_per_window(self):
+        """A retry is for a copy that never arrived, not a second send path."""
+        self.dev.mgr.on_needs_resend = lambda content: True
+        self.dev.mgr._do_read_and_send()
+        self.dev.mgr._do_read_and_send()
+        self.dev.mgr._do_read_and_send()
+
+        assert len(self.dev.sent) == 2
+
+    def test_a_predicate_that_fails_does_not_send(self):
+        """A transport that cannot answer is not a reason to send twice."""
+        def broken(content):
+            raise RuntimeError("no transport")
+
+        self.dev.mgr.on_needs_resend = broken
+        self.dev.mgr._do_read_and_send()
+
+        assert len(self.dev.sent) == 1
+
+    def test_different_content_is_unaffected(self):
+        self.dev.mgr._do_read_and_send()
+        self.dev.reader.content = ClipboardContent(types={ContentType.TEXT: b"other"})
+        self.dev.mgr._do_read_and_send()
+
+        assert len(self.dev.sent) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -81,6 +81,26 @@ jobs:
 
           What is new in this release:
 
+          - **A file offered by a device paired by code can be downloaded.**  Reported as the 下载
+            button on an internet-paired device being live and then answering "已与那台设备解除配对"
+            — the button worked, and the request never left the machine.  The download path required
+            a certificate in the local pairing repository, and a pairing made by code has none: the
+            peer is held by `netpair_secrets` while `peers[..].paired` is false, so the one pairing
+            the user had could never satisfy the gate.  Either pairing is accepted now, and the
+            answer travels the relay the way the rest of that path already promised — the receiver
+            accepts the request there, the chunk size was already cut for it, and the method's own
+            contract said either route may ask.
+
+          - **Copying the same thing again once a device is connected now sends it.**  Reported as
+            "连接后再重复复制一个东西，那么这个东西就不会传送过去。新的一个就可以" — and the second
+            half of that sentence was the diagnosis: by content the copy was a duplicate of one seen
+            inside the last 90 seconds, and a duplicate was dropped without going anywhere, while
+            different content always went out.  A repeated copy is put to the transport now, which
+            is the only side that knows who can receive it: with a paired, unpaused device in reach
+            it goes out again — once per copy, and a receiver drops content it has already applied.
+            It writes `Copy repeated and nothing had carried it — sending it again` when it does, so
+            the next report of this is answerable from a log.
+
           - **A device's name is one name, on every screen it appears on.**  Reported as "设备名的
             时候会变成'试试'……历史记录里下面显示的名字不对".  The name was kept in two fields — the
             alias an internet pairing is renamed through and the note a saved LAN peer is renamed

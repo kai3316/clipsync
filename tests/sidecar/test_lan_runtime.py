@@ -4101,6 +4101,119 @@ def test_a_peer_this_machine_has_no_name_for_keeps_the_one_it_gave(rig):
     assert runtime.chat_sessions()["sessions"][0]["peer_name"] == REPORTED_OWN_NAME
 
 
+# ── a download is a pairing question, and a code pairing is a pairing ────────
+#
+# Reported on a build where the two devices were paired by code: the download
+# button on a file the peer had offered was live, and clicking it answered
+# "已与那台设备解除配对" (that device is no longer paired) without the request
+# ever leaving the machine.  The live install says why: `netpair_secrets` holds
+# the peer and `peers[..].paired` is false, with no pairing repository on disk at
+# all -- so a gate that required the repository could never be satisfied by the
+# one pairing the user actually made.  The rest of the path already promised the
+# opposite: the receiver accepts a request over the relay, `_file_route_for`
+# sizes the answer for it, and this method's own docstring says either route may
+# ask.
+
+
+def _code_paired(runtime, transport, pid="remote"):
+    """*pid* paired by code, and not on the local link."""
+    runtime.config.netpair_secrets = {pid: "s3cret"}
+    runtime.config.internet_sync_enabled = True
+    runtime.config.peers[pid] = PeerInfo(
+        device_id=pid, device_name="Kais-MacBook", paired=False
+    )
+    transport.connected.discard(pid)
+
+
+def test_a_device_paired_by_code_can_be_asked_for_a_file(rig):
+    runtime, pairing, transport, *_ = rig
+    _code_paired(runtime, transport)
+
+    result = runtime.request_entry_files("remote", "entry-1")
+
+    assert result == {"requested": True}
+    # The ask is armed for the answer, which is what lets the relay's reply be
+    # accepted without a prompt.
+    assert "remote" in runtime._clip_file_outstanding
+
+
+def test_a_device_with_no_pairing_at_all_is_still_refused(rig):
+    """The control: the gate still refuses, and says the true thing when it does."""
+    runtime, pairing, transport, *_ = rig
+    runtime.config.peers["remote"] = PeerInfo(device_id="remote", device_name="Kais-MacBook")
+    transport.connected.discard("remote")
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.request_entry_files("remote", "entry-1")
+
+    assert refused.value.code == "NOT_PAIRED"
+
+
+def test_a_removed_device_is_refused_however_it_was_paired(rig):
+    """A code pairing whose secret is still on disk must not outlive removal."""
+    runtime, pairing, transport, *_ = rig
+    _code_paired(runtime, transport)
+    runtime.config.removed_peers["remote"] = PeerInfo(
+        device_id="remote", device_name="Kais-MacBook"
+    )
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.request_entry_files("remote", "entry-1")
+
+    assert refused.value.code == "NOT_PAIRED"
+
+
+# ── "copy it again" is a question only this side can answer ──────────────────
+
+
+def test_a_repeated_copy_is_asked_for_when_a_peer_can_take_it(rig):
+    """The runtime's half of bug 2's fix: is anybody in scope now?
+
+    The reported install pairs by code — `netpair_secrets` holds the peer while
+    `peers[..].paired` is false, and there is no pairing repository on disk — so
+    the LAN half of the send is skipped and the relay is the only route to the
+    very device the user was copying to.  A scope check that read the LAN pairing
+    alone would answer "nobody" for exactly that device.
+    """
+    runtime, pairing, transport, *_ = rig
+    content = ClipboardContent(types={ContentType.TEXT: b"hello"})
+
+    # Wired at start, and nobody paired yet: nothing can carry a repeated copy.
+    assert runtime.sync.on_needs_resend is not None
+    assert runtime.sync.on_needs_resend(content) is False
+
+    _code_paired(runtime, transport)
+
+    assert runtime.sync.on_needs_resend(content) is True
+
+
+def test_a_paired_peer_on_the_local_link_is_somewhere_to_send(rig):
+    """The other half of the send, which is the one that was never in doubt."""
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer(
+        REPORTED_PEER, REPORTED_OWN_NAME, pairing.get_peer_certificate(REPORTED_PEER), paired=True
+    )
+    transport.connected.add(REPORTED_PEER)
+
+    assert REPORTED_PEER in runtime._clip_targets()
+
+
+def test_a_paused_or_removed_device_is_not_somewhere_to_send(rig):
+    """The user's per-device switch, and removal, both silence the retry."""
+    runtime, pairing, transport, *_ = rig
+    _code_paired(runtime, transport)
+    assert runtime._clip_targets() == {REPORTED_PEER}
+
+    runtime.config.sync_paused_peers = [REPORTED_PEER]
+    assert runtime._clip_targets() == set()
+
+    runtime.config.sync_paused_peers = []
+    runtime.config.removed_peers[REPORTED_PEER] = PeerInfo(
+        device_id=REPORTED_PEER, device_name=REPORTED_OWN_NAME
+    )
+    assert runtime._clip_targets() == set()
+
+
 # ── an upgrade is the version, and only the version ──────────────────────────
 #
 # Reported as "某个设备，在线显示的版本是旧版本。我把它重新升级后，打开 B 设备看这个设备，还是

@@ -469,6 +469,11 @@ class LanRuntime:
         self.sync.set_enabled(False)
         self.sync.set_app_filter(lambda app: is_app_allowed(app, self.config))
         self.sync.on_send = lambda msg: self._background(self._on_local_sync, msg)
+        # Asked about a copy identical to a recent one: the manager drops those,
+        # which is right for the two loop cases it exists for and wrong for the
+        # copy that was made while nothing could carry it.  This side is the one
+        # that knows whether anybody is in scope now.
+        self.sync.on_needs_resend = lambda content: bool(self._clip_targets())
         self.sync.on_history_change = lambda: self._publish("history.changed", {})
         self.sync.set_on_write_error(lambda: self._error("CLIPBOARD_WRITE_FAILED"))
         self.file_transfer = FileTransferManager(
@@ -1224,7 +1229,17 @@ class LanRuntime:
             pid = self._resolve(device_id)
             if not pid:
                 raise ApplicationError("NOT_CONNECTED", "Device is not connected")
-            if not self.pairing.is_peer_paired(pid):
+            if not (
+                self.pairing.is_peer_paired(pid) or self._peer_is_internet_reachable(pid)
+            ):
+                # Either pairing is enough.  A pinned certificate is the LAN
+                # side's answer to "is this device trusted"; an internet
+                # pairing's channel key is the same trust reached a different
+                # way, and this gate used to require the first alone — which is
+                # what made a device paired by code answer its own 下载 with
+                # "已与那台设备解除配对" while the receiver below, the route
+                # chooser in `_file_route_for` and this method's own docstring
+                # all already treated the relay as a route a download may take.
                 raise ApplicationError("NOT_PAIRED", "That device is not paired")
             local = pid in (self.transport.get_connected_peers() or [])
             if not local and not self._peer_is_internet_reachable(pid):
@@ -5920,6 +5935,45 @@ class LanRuntime:
                 return False
             return True
         return False
+
+    def _clip_targets(self) -> set:
+        """The peers a local clip could be carried to right now, either route.
+
+        The union of the two halves ``_send_local_sync`` sends through: a peer
+        whose certificate is pinned and that is on the local link, and a peer this
+        machine holds a relay secret for.  A removed device is in neither — the
+        repository drops the first, ``_peer_is_internet_reachable`` refuses the
+        second — and the user's per-device pause is applied to both, the same way
+        the two sending halves apply it.
+
+        It exists to answer one question: a copy the manager has already seen is
+        being copied again, and sending it again is only worth doing if somebody
+        can receive it now.  Deliberately conservative — a peer counted here that
+        a sending half would then skip costs one frame, and the receiver drops a
+        frame whose content it has already applied.
+        """
+        targets = set()
+        try:
+            connected = list(self.transport.get_connected_peers() or ())
+        except Exception:
+            logger.debug("Clip targets: connected peers unavailable", exc_info=True)
+            connected = []
+        for pid in connected:
+            try:
+                if self.pairing.is_peer_paired(pid) and self.syncs_to(pid):
+                    targets.add(pid)
+            except Exception:
+                logger.debug("Clip targets: %s unreadable", str(pid)[:12], exc_info=True)
+        relay_ids = set(getattr(self.config, "netpair_secrets", {}) or ()) | set(
+            getattr(self.config, "peer_relay_secrets", {}) or ()
+        )
+        for pid in relay_ids:
+            try:
+                if self._peer_is_internet_reachable(pid) and self.syncs_to(pid):
+                    targets.add(pid)
+            except Exception:
+                logger.debug("Clip targets: %s unreadable", str(pid)[:12], exc_info=True)
+        return targets
 
     def _send_local_sync(self, data: bytes) -> list[str]:
         """Hand one clipboard frame to each paired peer: LAN first, relay after.
