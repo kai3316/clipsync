@@ -138,6 +138,36 @@ export function deviceLabel(device: Device): string {
   return String(device.note || "").trim() || device.name;
 }
 
+/** Which of the two name fields a rename from this row has to write.
+ *
+ * There are two destinations and they are not interchangeable.  The alias is the
+ * name an internet pairing carries (`config.netpair_aliases`); the note is the
+ * one a saved LAN peer carries (`config.peers[pid].notes`), and the backend that
+ * writes a note needs that saved peer to exist — `set_device_note` answers
+ * NOT_FOUND without one, because a name has to be attached to a device this
+ * machine actually knows.  An internet-only pairing has no saved peer at all,
+ * which is exactly why it needs the alias call.
+ *
+ * **The question is whether the row holds an internet pairing, not whether it is
+ * paired.**  Reading `paired` instead put four cases in the wrong bucket:
+ *
+ *   LAN-paired                      -> note    (right by luck)
+ *   LAN-paired + internet-paired    -> note    (right by luck)
+ *   internet-paired only, seen here -> alias   (right by luck)
+ *   known but not paired           -> alias    (wrong: NOT_FOUND)
+ *
+ * The last one is a device this machine has dialed — `connect_to_peer` records
+ * the certificate of every peer it meets, paired or not, so a device chatted
+ * with once is in `config.peers` — and its name was the one rename in the window
+ * that could not be saved.  `relay_paired` is the field that answers the real
+ * question, and it is on the row for exactly this reason.
+ *
+ * A relay-only row never reaches here: `deviceMenu` draws its menu from
+ * `device.relay` and calls the alias entry directly. */
+export function renameWritesAlias(device: Device): boolean {
+  return device.relay_paired === true;
+}
+
 /** Where a row sorts, most present first.
  *
  * The tray's own ranking (`tray.rs::DeviceState::rank`), which is itself the

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chatReachable, deviceStatus, localLinkEstablished } from "../src/lib/device-row";
+import { chatReachable, deviceStatus, localLinkEstablished, renameWritesAlias } from "../src/lib/device-row";
 import type { Device } from "../src/api/types";
 
 /** A row with only the fields these three predicates read. */
@@ -109,5 +109,47 @@ describe("a device's state word", () => {
         expect(claiming).not.toContain(word);
       }
     }
+  });
+});
+
+// A rename has two destinations and they are not interchangeable: the alias an
+// internet pairing carries, and the note a saved LAN peer carries.  The backend
+// that writes a note needs that peer to exist (`set_device_note` answers
+// NOT_FOUND without one), so the question is whether the row holds an *internet*
+// pairing — which is `relay_paired`, not `paired`.
+describe("which name field a rename writes", () => {
+  it("writes the note for a device this machine dialed but never paired", () => {
+    // `connect_to_peer` records the certificate of every peer it meets, paired
+    // or not, so a device chatted with once is in `config.peers` and can hold a
+    // note.  Asking `paired` sent it to the alias call instead, where a device
+    // with no internet pairing has nothing to write — the one rename in the
+    // window that could not be saved.
+    expect(renameWritesAlias(row({ paired: false, relay_paired: false }))).toBe(false);
+    expect(renameWritesAlias(row({ paired: false }))).toBe(false);
+  });
+
+  it("writes the note for a LAN pairing, which is where its name is kept", () => {
+    expect(renameWritesAlias(row({ paired: true, relay_paired: false }))).toBe(false);
+  });
+
+  it("writes the alias when the row holds an internet pairing", () => {
+    // Paired both ways: either destination works, and the alias is the one this
+    // row's own card writes.
+    expect(renameWritesAlias(row({ paired: true, relay_paired: true }))).toBe(true);
+    // The case that `paired` got right by luck and must keep working: an
+    // internet-only pairing seen on this network has no saved peer to hold a
+    // note, so the note call would answer NOT_FOUND.
+    expect(renameWritesAlias(row({ paired: false, relay_paired: true }))).toBe(true);
+    // And the relay-only row, which `deviceMenu` sends straight to the alias
+    // entry without asking this at all.
+    expect(renameWritesAlias(row({ relay: true, paired: true, relay_paired: true }))).toBe(true);
+  });
+
+  it("does not follow the paired flag, which is the wrong question", () => {
+    // The two rows that differ only in which pairing they hold, asserted side by
+    // side: this is the pair the old rule answered identically and wrongly.
+    const dialedButUnpaired = row({ paired: false, relay_paired: false });
+    const internetOnly = row({ paired: false, relay_paired: true });
+    expect(renameWritesAlias(dialedButUnpaired)).not.toBe(renameWritesAlias(internetOnly));
   });
 });

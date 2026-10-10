@@ -27,6 +27,16 @@
     },
 
     computed: {
+      // The card's heading: the name the user gave this device, else the one
+      // the peer published.  The rename in this card's own context menu writes
+      // `note`, so a heading that read `device_name` first did not move when the
+      // user renamed the device from the menu it was drawn on.  One rule, shared
+      // with the rest of the dashboard and the phone page: see
+      // `ClipsyncFormat.deviceName`.
+      displayName: function () {
+        return ClipsyncFormat.deviceName(this.device);
+      },
+
       isLocal: function () {
         return this.device.device_id === this.store.deviceId;
       },
@@ -197,7 +207,7 @@
         '</div>' +
         '<div class="device-card__icon">{{ osIcon }}</div>' +
         '<div class="device-card__info">' +
-          '<span class="device-card__name text-ellipsis">{{ device.device_name || device.name || device.device_id }}</span>' +
+          '<span class="device-card__name text-ellipsis">{{ displayName }}</span>' +
           '<span class="device-card__id text-ellipsis selectable">{{ isLocal ? \'💻 \' + t(\'device.this_computer\') : device.device_id }}</span>' +
           '<span v-if="device.os" class="device-card__os">{{ osLabel }}</span>' +
           '<!-- Note. Not offered on the local device: notes are cross-device' +
@@ -249,7 +259,7 @@
       startChat: function () {
         var self = this;
         var peerId = this.device.device_id;
-        var name = this.device.device_name || this.device.name || this.device.note || peerId;
+        var name = ClipsyncFormat.deviceName(this.device) || peerId;
         ClipsyncAPI.chatInvite(peerId, name).then(function (res) {
           if (res && res.session_id) {
             self.store.activeChatSession = res.session_id;
@@ -365,7 +375,7 @@
           return;
         }
         if (key === 'unpair') {
-          var deviceName = self.device.device_name || self.device.name || peerId;
+          var deviceName = ClipsyncFormat.deviceName(self.device) || peerId;
           this.store.confirm(
             self.t('device.unpair_confirm_title'),
             self.t('device.unpair_confirm_msg', {name: deviceName})
@@ -378,7 +388,7 @@
           // A full "forget" — same confirm dialog and result toast as the
           // context menu's 忘记设备, so both paths are one behavior (the
           // backend archives the device so it can be Restored).
-          var deviceName = self.device.device_name || self.device.name || peerId;
+          var deviceName = ClipsyncFormat.deviceName(self.device) || peerId;
           this.store.confirm(
             self.t('devices.forget_title'),
             self.t('devices.forget_message', {name: deviceName})

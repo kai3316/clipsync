@@ -453,6 +453,13 @@ export type DiagnosticStatus = "ok" | "warn" | "fail";
 export interface DiagnosticCheck {
   id: string;
   ok: boolean;
+  /** Not a pass and not a failure: what this check reads is still coming up.
+   *
+   * Only the ones the application brings up asynchronously behind the report
+   * set it — `advertising` is the one today, false for as long as our own mDNS
+   * record is still being published.  `summary` leaves these out of the
+   * verdict, so a surface that reads `ok` alone must do the same. */
+  pending?: boolean;
   detail: string;
   guidance?: string | null;
   detail_key?: string;

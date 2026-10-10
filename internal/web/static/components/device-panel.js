@@ -329,7 +329,7 @@
             '<div v-if="sections.removed">' +
               '<div v-for="dev in removedDevices" :key="dev.device_id" class="removed-device-row">' +
                 '<div class="removed-device-row__info">' +
-                  '<span class="removed-device-row__name text-ellipsis">{{ dev.device_name || dev.device_id }}</span>' +
+                  '<span class="removed-device-row__name text-ellipsis">{{ deviceLabel(dev) || dev.device_id }}</span>' +
                   '<span class="removed-device-row__id text-mono selectable">{{ shortId(dev.device_id) }}</span>' +
                   '<span v-if="dev.removed_at" class="removed-device-row__time">' +
                     '{{ t(\'devices.removed_at\', { time: relTime(dev.removed_at) }) }}' +
@@ -495,7 +495,7 @@
       // "Paired · offline" and reconnects when it comes back.
       restoreRemovedDevice: function (dev) {
         var self = this;
-        var name = dev.device_name || dev.device_id;
+        var name = this.deviceLabel(dev) || dev.device_id;
         this.store.confirm(
           this.t('devices.restore_confirm_title'),
           this.t('devices.restore_confirm_msg', { name: name })
@@ -521,7 +521,7 @@
       // confirm before proceeding.
       purgeRemovedDevice: function (dev) {
         var self = this;
-        var name = dev.device_name || dev.device_id;
+        var name = this.deviceLabel(dev) || dev.device_id;
         this.store.confirm(
           this.t('devices.purge_confirm_title'),
           this.t('devices.purge_confirm_msg', { name: name })
@@ -891,6 +891,14 @@
 
       shortId: function (id) {
         return (id && id.length > 8) ? id.slice(0, 8) : (id || '');
+      },
+
+      // What this page calls a device: the name the user gave it, else the one
+      // its owner publishes.  The shared rule — same one the cards, the transfer
+      // selector and the phone use — so the archive rows and the two dialogs that
+      // name them cannot disagree with the list they sit in.
+      deviceLabel: function (device) {
+        return ClipsyncFormat.deviceName(device);
       },
 
       refresh: function () {

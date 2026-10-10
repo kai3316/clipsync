@@ -538,7 +538,7 @@
         var device = this.targetDevice;
         if (!device) return;
         var peerId = device.device_id;
-        var name = device.device_name || device.device_id;
+        var name = ClipsyncFormat.deviceName(device) || peerId;
         var wasConnected = !!device.connected;
         var self = this;
         this.closeMenu();
@@ -567,7 +567,7 @@
         var device = this.targetDevice;
         if (!device) return;
         var peerId = device.device_id;
-        var name = device.device_name || device.note || device.device_id || '';
+        var name = ClipsyncFormat.deviceName(device);
         var self = this;
         this.closeMenu();
         ClipsyncAPI.chatInvite(peerId, name).then(function (res) {
@@ -585,7 +585,7 @@
         if (!device) return;
         // The backend only supports a per-device alias ("note"); use it as the
         // user-editable label so the rename actually persists.
-        var currentName = device.note || device.device_name || device.device_id || '';
+        var currentName = ClipsyncFormat.deviceName(device);
         var self = this;
         this.closeMenu();
         this.store.prompt(this.t('context.rename_title'), this.t('context.rename_prompt'), currentName)
@@ -609,7 +609,7 @@
       forgetDevice: function () {
         var device = this.targetDevice;
         if (!device) return;
-        var deviceName = device.device_name || device.note || device.device_id || 'Unknown';
+        var deviceName = ClipsyncFormat.deviceName(device) || 'Unknown';
         var self = this;
         this.store.confirm(this.t('devices.forget_title'), this.t('devices.forget_message', { name: deviceName }))
           .then(function () {

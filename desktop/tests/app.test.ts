@@ -87,6 +87,10 @@ vi.mock("../src/api/bridge", () => ({
     chatSessions: vi.fn().mockResolvedValue({ sessions: [], muted: [] }),
     chatMessages: vi.fn().mockResolvedValue({ messages: [] }),
     markChatRead: vi.fn().mockResolvedValue({ ok: true }),
+    // "Connecting" is the quietest answer the invite can give: the sidecar
+    // answers before its dial finishes, so a case about the row's own state
+    // (see "inviting a device to chat") says what it wants the answer to be.
+    inviteChat: vi.fn().mockResolvedValue({ chat_session_id: null, connecting: true }),
     aiLocal: vi.fn(),
     aiInventory: vi.fn(),
     aiPreview: vi.fn(),
@@ -2850,6 +2854,154 @@ describe("the failure band", () => {
     } finally {
       app.unmount();
       vi.mocked(bridge.factoryReset).mockReset().mockResolvedValue(null);
+    }
+  });
+});
+
+// Reported as "设备页'附近聊天'按钮有时卡住".  The invite used to be the one row
+// action with no busy state, and the sidecar used to hold its own answer until
+// the dial it starts had finished — so the button looked dead for as long as
+// that took, and a second click sent a second invite.  The sidecar now answers at
+// once (the dial is its own thread's); what these hold is the window's half.
+describe("inviting a device to chat", () => {
+  /** One device that answers, so the row offers 打开聊天 at all. */
+  function onlineDevice() {
+    return {
+      id: "n", name: "Studio", paired: true, connection_state: "online",
+      pairing_status: "", pairing_code: null, sas: null,
+    };
+  }
+
+  async function devicesPage(app: VueWrapper) {
+    await flushPromises();
+    await app.get('[aria-label="设备"]').trigger("click");
+    await flushPromises();
+  }
+
+  it("says it is connecting at once, and sends no second invite while it waits", async () => {
+    // A deferred answer rather than a resolved one: with a resolved mock the
+    // interim message is replaced in the same tick and is never observable,
+    // which is exactly how "the button looks dead" went unnoticed.
+    let release: (value: { chat_session_id: string; connecting: boolean }) => void = () => {};
+    const pending = new Promise<{ chat_session_id: string; connecting: boolean }>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [onlineDevice()] });
+    vi.mocked(bridge.inviteChat).mockReturnValue(pending);
+
+    const app = mount(App);
+    try {
+      await devicesPage(app);
+      const chat = app.get('[aria-label="打开聊天"]');
+      await chat.trigger("click");
+      await flushPromises();
+
+      // Before the sidecar has answered.
+      expect(app.text()).toContain(t("正在连接 {name}…", { name: "Studio" }));
+      // The row's chat button is closed while it waits...
+      expect(chat.attributes("disabled")).toBeDefined();
+      // ...and a click that lands anyway is not a second invite.
+      await chat.trigger("click");
+      await flushPromises();
+      expect(vi.mocked(bridge.inviteChat)).toHaveBeenCalledTimes(1);
+
+      release({ chat_session_id: "", connecting: true });
+      await flushPromises();
+      // And the row is released rather than left closed.  Read on the devices
+      // page, which `chatWith` navigated away from: the element captured above
+      // is detached by then, and a detached element keeps the last value it was
+      // drawn with.
+      await app.get('[aria-label="设备"]').trigger("click");
+      await flushPromises();
+      expect(app.get('[aria-label="打开聊天"]').attributes("disabled")).toBeUndefined();
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.inviteChat).mockReset().mockResolvedValue({
+        chat_session_id: null, connecting: true,
+      });
+    }
+  });
+
+  it("stops waiting after the timeout instead of leaving the row stuck", async () => {
+    // The one thing the window can fix on its own: an engine that never answers
+    // must not cost the reader the button.  `shouldAdvanceTime` keeps the rest of
+    // the window's own timers working while the 8s one is fast-forwarded.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [onlineDevice()] });
+    vi.mocked(bridge.inviteChat).mockReturnValue(new Promise(() => {}));
+
+    const app = mount(App);
+    try {
+      await devicesPage(app);
+      const chat = app.get('[aria-label="打开聊天"]');
+      await chat.trigger("click");
+      await flushPromises();
+      expect(app.text()).toContain(t("正在连接 {name}…", { name: "Studio" }));
+
+      await vi.advanceTimersByTimeAsync(8_001);
+      await flushPromises();
+
+      expect(app.text()).toContain(t("连接超时，请重试"));
+      expect(chat.attributes("disabled")).toBeUndefined();
+    } finally {
+      app.unmount();
+      vi.useRealTimers();
+      vi.mocked(bridge.inviteChat).mockReset().mockResolvedValue({
+        chat_session_id: null, connecting: true,
+      });
+    }
+  });
+});
+
+// 重新检测 counts what the scan decided.  A check still coming up (`pending`) is
+// neither a pass nor a failure — `summarize` leaves it out of the verdict — so
+// the count has to leave it out too, or the line contradicts the verdict printed
+// directly above it.
+describe("the diagnostics re-check count", () => {
+  function report() {
+    return {
+      v2: true,
+      summary: "ok",
+      checks: [
+        { id: "server_port", ok: true, detail: "listening" },
+        { id: "discovery", ok: true, detail: "active" },
+        { id: "advertising", ok: false, pending: true, detail: "announcing" },
+        { id: "network", ok: true, detail: "private LAN" },
+      ],
+      groups: {},
+      discovery_running: true, server_running: true, connected_count: 0, paired_count: 0,
+      web_companion_running: false, web_port: 0, lan_ip: "10.0.0.2", os: "Windows",
+      version: "test",
+    };
+  }
+
+  it("counts the checks that settled, not the one still coming up", async () => {
+    HTMLDialogElement.prototype.showModal = vi.fn();
+    vi.mocked(bridge.status).mockResolvedValue({
+      version: "test", health: "ready", device_name: "Local", session_id: "s", seq: 0,
+      sync_state: "not_started", capabilities: ["diagnostics.report"],
+    } as any);
+    vi.mocked(bridge.diagnosticsReport).mockResolvedValue(report() as any);
+
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设置"]').trigger("click");
+      await flushPromises();
+      const run = app.findAll("button").find((b) => b.text().includes(t("运行诊断")));
+      expect(run, "the run-diagnostics button was not found").toBeDefined();
+      await run!.trigger("click");
+      await flushPromises();
+      const rerun = app.findAll("button").find((b) => b.text().includes(t("重新检测")));
+      expect(rerun, "the re-check button was not found").toBeDefined();
+      await rerun!.trigger("click");
+      await flushPromises();
+
+      // Three settled checks passed and the fourth has not been decided: 3/3,
+      // not 3/4 — which is what the verdict above it says too.
+      expect(app.text()).toContain(t("已重新检测 · {ok}/{total} 项通过", { ok: 3, total: 3 }));
+    } finally {
+      app.unmount();
     }
   });
 });

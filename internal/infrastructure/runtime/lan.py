@@ -25,7 +25,12 @@ from internal.clipboard.filter import ContentFilter
 from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 from internal.clipboard.source_tracker import is_app_allowed
-from internal.config.config import PeerInfo, config_dir, config_lock
+from internal.config.config import (
+    PeerInfo,
+    chosen_device_name,
+    config_dir,
+    config_lock,
+)
 from internal.data.logs import stage_collected_log, write_share_copy
 from internal.infrastructure.persistence.relay_delivery import RelayDeliveryQueue
 from internal.infrastructure.runtime.internet_pairing import (
@@ -311,6 +316,12 @@ class LanRuntime:
     # connection attempt needs and would keep several in flight at once.
     ENDING_DIAL_RETRY = 1.0
     DEVICE_PING_TIMEOUT = 4.0
+    # The shortest gap between two rounds of "what are you?" asked of one peer.
+    # The entry point is the devices page's refresh button, and the answer it
+    # asks for cannot have changed in less than this — mDNS re-announces on a
+    # sixty-second round, so a shorter floor would only put frames on the wire
+    # for a reader who presses the button twice.
+    FACTS_ASK_INTERVAL = 5.0
     # Legacy waited this long for a chat peer's connection to come up.
     CHAT_CONNECT_TIMEOUT = 15.0
     # Legacy held a pairing notice back for ~1.2s so a chat invite arriving on
@@ -369,6 +380,27 @@ class LanRuntime:
         self._pairing_ops = threading.RLock()
         self._probes = {}
         self._probes_lock = threading.Lock()
+        # What a peer answered when asked directly about itself (see
+        # `_handle_device_probe`): its own account of its version, platform,
+        # architecture, application and name, stamped with when this machine
+        # heard it.  A second source beside the mDNS sighting — the two disagree
+        # exactly when a peer has upgraded and one of the two is lagging — and
+        # the rule between them is "the newer observation wins", never "this
+        # kind beats that kind": a broadcast read ten minutes ago must not
+        # outrank a reply to a question asked ten seconds ago, and a late
+        # announcement from before an upgrade must not outrank either.
+        self._answers = {}
+        # When each peer's sighting was last *heard*, keyed by the resolved id on
+        # the same clock as an answer's own stamp.  The two sources are ranked by
+        # it (`_answer_overlay`), and without it there is no way to say which of
+        # them is the stale one.
+        self._sighted_at = {}
+        # The ping_ids already taken.  A pong that arrives twice (a retransmit)
+        # would otherwise restamp the answer and so outrank a newer sighting.
+        self._answered_pings = set()
+        # When each peer was last asked, so opening the devices page twice in a
+        # row puts one round of frames on the wire rather than two.
+        self._asked_at = {}
         self._dirty = threading.Event()
         self._persist_dirty = False
         # When a progress event was last published (see _progress_ready).
@@ -583,7 +615,7 @@ class LanRuntime:
         # Only ever raised while `chat_open_to_all` is off: both are what turns
         # "somebody wants to talk to you" into a prompt the user can answer.
         self.chat.set_on_incoming_invite(
-            lambda invite: self._publish("chat.invite", invite)
+            lambda invite: self._publish("chat.invite", self._as_named_here(invite))
         )
         self.chat.set_on_invite_response(
             lambda sid, pid, accepted: self._publish(
@@ -2565,10 +2597,31 @@ class LanRuntime:
         # at `await_accept` exists for an instant in both modes, and only the
         # setting says whether the prompt that follows it is real.
         return {
-            "sessions": self.chat.get_sessions(),
+            "sessions": [self._as_named_here(s) for s in self.chat.get_sessions()],
             "muted": sorted(self._chat_muted),
             "open_to_all": self.chat.open_to_all,
         }
+
+    def _as_named_here(self, session):
+        """*session*, with the name **this machine** calls that peer.
+
+        A session's ``peer_name`` is the label the conversation was opened with.
+        A conversation the *peer* started carries the name that peer reports
+        about itself, so the chat list, the invitation prompt and the notice that
+        words an arriving message all named a device the user had renamed by the
+        name its owner publishes — the one family of surfaces the rename did not
+        reach.  The device list resolved it; the chat did not.
+
+        Resolved once, here, because every chat surface on all three fronts reads
+        this field, and each of them resolving it again is the same defect with
+        three more chances to disagree.  A peer this machine has no name for
+        keeps the label the conversation was opened with.
+        """
+        pid = str(session.get("peer_id") or "")
+        resolved = self._peer_name(pid) if pid else ""
+        if not resolved or resolved == session.get("peer_name"):
+            return session
+        return {**session, "peer_name": resolved}
 
     def set_chat_muted(self, peer_id, muted):
         def run():
@@ -2601,11 +2654,15 @@ class LanRuntime:
         or to the id.
         """
         peer = self.chat.session_peer(session_id)
+        named = self._as_named_here(peer)
         return {
             "session_id": session_id,
             "entry": entry,
-            "peer_id": peer.get("peer_id", ""),
-            "peer_name": peer.get("peer_name", ""),
+            "peer_id": named.get("peer_id", ""),
+            # The sender's name for the notice a reader who is not looking at the
+            # window gets: the same resolution every chat surface uses, so a
+            # renamed device is named by that name there too.
+            "peer_name": named.get("peer_name", ""),
         }
 
     def chat_messages(self, session_id):
@@ -2733,58 +2790,111 @@ class LanRuntime:
         return text[:40] if text else (msg_type or "chat")
 
     def chat_invite(self, peer_id, peer_name):
-        # Blocking: the dial below can hold this for CHAT_CONNECT_TIMEOUT.
-        return self._command(self._chat_invite, peer_id, peer_name, blocking=True)
+        """Open a conversation, dialing first when there is no link yet.
+
+        **Never waits for that dial.**  The wait is up to
+        ``CHAT_CONNECT_TIMEOUT``, and this call runs on the sidecar's one request
+        thread: ``RpcServer._serve_requests`` reads, dispatches and answers one
+        frame at a time — its reader thread is held back by ``_read_next``, so it
+        never reads ahead — and it only flushes the event journal when it finds
+        the input queue empty.  A dial waited out inside this call therefore
+        delayed every later request *and* every ``devices.changed`` /
+        ``chat.sessions.changed`` behind it, for as long as the peer took to
+        answer or the timeout to lapse.  That is the whole of "附近聊天按钮有时卡住",
+        including the device list looking frozen around it.
+
+        What the caller gets instead is the answer `rpc.py` and the web API
+        already document ("No session yet means the link is still being dialed,
+        not that the invite was refused"): a session id when the link is already
+        up, and nothing while the dial runs.  The session opens when the dial
+        lands and announces itself through the chat manager's own hook
+        (``set_on_sessions_changed``), which is how the window, the web panel and
+        the phone learn that it arrived.
+        """
+        return self._command(self._chat_invite, peer_id, peer_name)
 
     def _chat_invite(self, peer_id, peer_name):
-        """Open a chat session, dialing the peer first when it is not connected.
+        """The invite's own half: dial if one is owed, otherwise open it now.
 
         Legacy dialed and waited up to 15s for the connection before starting
         the session, and told the user when it never came up; without the wait
         an invite to a discovered-but-idle device would be sent into a link that
-        does not exist yet and silently go nowhere.  An internet-only peer has
-        no LAN address to dial, but its send closure falls back to the relay, so
-        a pairing code alone is enough to open the conversation.
+        does not exist yet and silently go nowhere.  The dial is still made — it
+        is moved off this thread, not dropped; see :meth:`_invite_after_dial`.
+
+        An internet-only peer has no LAN address to dial, but its send closure
+        falls back to the relay, so a pairing code alone is enough to open the
+        conversation.
+        """
+        pid = self._resolve(peer_id)
+        if pid in self.transport.get_connected_peers() or self._address(pid) is None:
+            # Nothing to wait for: either the link is already up, or there is no
+            # address to dial and the relay carries the frames.
+            return self._open_chat(pid, peer_name)
+        # Dialing is what takes the time, so it happens on a thread of its own —
+        # the same way every collected-log request is dialed (see
+        # `request_logs`) — and the answer is "connecting" at once.
+        threading.Thread(
+            target=self._background,
+            args=(self._invite_after_dial, pid, peer_name),
+            name="chat-invite-dial",
+            daemon=True,
+        ).start()
+        return None
+
+    def _open_chat(self, pid, peer_name):
+        """Start the conversation and hand back its id, or None if suppressed."""
+        return self.chat.start_session(
+            pid, peer_name,
+            self.chat.shorten_fingerprint(self.pairing.get_peer_fingerprint(pid)),
+            self._chat_send_fn(pid),
+        )
+
+    def _invite_after_dial(self, pid, peer_name):
+        """Dial *pid*, then open the conversation the invite asked for.
+
+        Runs on its own thread (``chat-invite-dial``), so the wait — the dialer's,
+        up to ``CHAT_CONNECT_TIMEOUT`` — is nobody else's.  ``_connect_and_wait``
+        checks the stop event on every pass, so a shutdown is not held up by a
+        peer that never answers.
 
         The dial suppresses the automatic pairing offer, as legacy's two
         chat-start paths both did: opening a conversation is not a request to
         pair, and the shared code the ordinary dial puts on both screens is
         consent neither side gave.
         """
-        pid = self._resolve(peer_id)
-        if pid not in self.transport.get_connected_peers() and self._address(pid) is not None:
-            # The dial may hand back a different id than the one asked for --
-            # the hash this device is discovered by becomes the real device_id
-            # once the handshake lands -- and the session has to be keyed by the
-            # one the transport delivers to, or every message is sent to an
-            # address nothing is connected at.
-            connected = self._connect_and_wait(pid, no_auto_pairing=True)
-            if connected is None:
-                # A dial that never lands is the end of the conversation only
-                # for a peer the relay cannot carry either.  A dual-paired peer
-                # answers on the relay whatever its LAN link is doing, and the
-                # send closure falls back there per frame -- so returning None
-                # here reported a device as unreachable while the very next
-                # thing the user clicked would have worked.
-                #
-                # The address that just failed is often not the peer's anyway:
-                # ``_address`` falls back to a cached, then a persisted, address
-                # when no live sighting exists, and a dial that fails does not
-                # clear either -- so a device that changed network keeps being
-                # dialed at where it used to be.
-                if not self._peer_is_internet_reachable(pid):
-                    self._publish(
-                        "chat.connect_timeout",
-                        {"peer_id": pid, "name": self._peer_name(pid) or peer_name},
-                    )
-                    return None
-            else:
-                pid = connected
-        return self.chat.start_session(
-            pid, peer_name,
-            self.chat.shorten_fingerprint(self.pairing.get_peer_fingerprint(pid)),
-            self._chat_send_fn(pid),
-        )
+        # The dial may hand back a different id than the one asked for — the hash
+        # this device is discovered by becomes the real device_id once the
+        # handshake lands — and the session has to be keyed by the one the
+        # transport delivers to, or every message is sent to an address nothing
+        # is connected at.
+        connected = self._connect_and_wait(pid, no_auto_pairing=True)
+        if connected is None:
+            # A dial that never lands is the end of the conversation only for a
+            # peer the relay cannot carry either.  A dual-paired peer answers on
+            # the relay whatever its LAN link is doing, and the send closure
+            # falls back there per frame — so giving up here reported a device as
+            # unreachable while the very next thing the user clicked would have
+            # worked.
+            #
+            # The address that just failed is often not the peer's anyway:
+            # ``_address`` falls back to a cached, then a persisted, address when
+            # no live sighting exists, and a dial that fails does not clear
+            # either — so a device that changed network keeps being dialed where
+            # it used to be.  Clearing them is not the answer: the transport's
+            # saved address is the same table ``_schedule_reconnect`` dials from,
+            # and a peer that comes back without answering mDNS has nothing else
+            # (see ``connection.py``'s reconnect ladder).
+            if not self._peer_is_internet_reachable(pid):
+                self._publish(
+                    "chat.connect_timeout",
+                    {"peer_id": pid, "name": self._peer_name(pid) or peer_name},
+                )
+                return
+            real = pid
+        else:
+            real = connected
+        self._open_chat(real, peer_name)
 
     def _connect_and_wait(self, pid, timeout=None, no_auto_pairing=False):
         """Dial one peer and wait for the link; the connected id, or None.
@@ -3554,12 +3664,18 @@ class LanRuntime:
         one that did not keeps whatever name this machine already learned — the
         relay's handshake, or a dial from a build that did publish one — rather
         than being renamed to a truncation of its hostname by the next sighting.
+
+        Read from :meth:`_published_name` and not :meth:`_peer_name`, because
+        this string is handed to the transport as the dial's own label for the
+        peer (see :meth:`_address`), where it is recorded as that peer's name.
+        The user's local alias belongs on this machine's screens, not in that
+        record — the alias is a local-only view the peer never learns.
         """
         with config_lock:
             peer = self.config.peers.get(pid)
             known = getattr(peer, "device_name", "") or ""
         if not known:
-            known = self._peer_name(pid)
+            known = self._published_name(pid)
         return known or fallback
 
     def _sightings(self, grace=None):
@@ -3853,6 +3969,13 @@ class LanRuntime:
             self._lost_sightings.pop(pid, None)
             self._discovered[pid] = row
         real = self._resolve(pid)
+        with self._lock:
+            # When this machine heard it, on the same clock as an answer's own
+            # stamp (`_answer_overlay`).  Kept beside the row rather than inside
+            # it: this row is compared against the previous one to decide whether
+            # a paired peer needs dialing again, and a timestamp that changed on
+            # every announcement would make every announcement look like news.
+            self._sighted_at[real] = time.monotonic()
         if named:
             # The peer's own answer, written into the record every surface falls
             # back to when the peer is not advertising — and the sighting this
@@ -4107,9 +4230,13 @@ class LanRuntime:
             # and a paired one that is currently away keeps the last sighting's
             # answer -- which is the version it will still be running when it
             # comes back.
-            advertised = {
-                self._resolve(pid): info for pid, info in sightings.items()
-            }
+            # A sighting, with a newer direct answer laid over it: the two
+            # sources carry the same five facts and can disagree (see
+            # `_answer_overlay`).
+            advertised = {}
+            for pid, info in sightings.items():
+                real = self._resolve(pid)
+                advertised[real] = self._answer_overlay(real, info)
             # Which row gets which name:
             #
             # 1. The name the peer published about itself.  This is the peer's
@@ -4310,14 +4437,18 @@ class LanRuntime:
                 rows.append(
                     {
                         "id": pid,
-                        # The alias first, exactly as the pairing card reads it:
-                        # it is the name the user chose for this device, and it
-                        # outranks the one the peer published about itself.
-                        "name": net.get("alias") or net.get("name") or pid,
-                        # No note.  Notes live on a saved LAN peer, and there is
-                        # none for a device this machine has never pinned; the
-                        # row's rename writes the alias instead.
-                        "note": "",
+                        # The name the peer goes by, and — separately — the name
+                        # the user gave it, exactly as a LAN row carries them.
+                        # This row is the only one that had no `note` at all
+                        # ("Notes live on a saved LAN peer"), so a front end
+                        # reading `note or name` — which is the rule `deviceLabel`
+                        # states and the rule the web panel's card applies — had
+                        # no way to see a rename made from the pairing card on a
+                        # relay-only row.  For that device the alias *is* the
+                        # note: same fact, and `rename` below keeps the two in
+                        # step so neither can go stale.
+                        "name": net.get("name") or pid,
+                        "note": net.get("alias") or "",
                         "paired": True,
                         # A device with no local route advertises nothing here:
                         # an internet peer has not announced these, and an empty
@@ -4492,6 +4623,20 @@ class LanRuntime:
                 if peer is None:
                     raise ApplicationError("NOT_FOUND", "Device not found")
                 peer.notes = note
+                # One name, written to one place.  The alias is the same fact
+                # under its other spelling, and a reader that consults only one
+                # of the two keeps showing the name the user has just replaced:
+                # the relay row carries the alias, the LAN row the note, and
+                # `chosen_device_name` reads either.  A device paired on this
+                # network and by code at once is renamed from both of its rows,
+                # so both spellings have to move together or which name the user
+                # sees depends on which row they last touched.
+                aliases = getattr(self.config, "netpair_aliases", None)
+                if aliases is not None:
+                    if note:
+                        aliases[pid] = note
+                    else:
+                        aliases.pop(pid, None)
             self._save_config()
             self._refresh()
             return {"ok": True}
@@ -4518,12 +4663,17 @@ class LanRuntime:
         self._refresh()
         return {"accepted": accepted}
 
-    def _peer_name(self, pid):
-        """Best-effort display name for a peer, empty when nothing knows it.
+    def _published_name(self, pid):
+        """The name the **peer** says it goes by, empty when nothing knows it.
 
         The name the peer publishes about itself comes first: it is the peer's
         own answer, and it is the one that changes when its user renames it —
         every other source here is a copy of what that answer used to be.
+
+        Deliberately *not* the name this user gave it; that is :meth:`_peer_name`.
+        This value is the one handed to the transport as a dial's label (see
+        ``_chosen_name``), where it is written down as the peer's own name — so a
+        local alias must not reach it.
         """
         # Resolved outside the lock: _resolve reads the transport and the
         # pairing manager, and holding _lock across those invites the reverse
@@ -4552,6 +4702,25 @@ class LanRuntime:
         except Exception:
             logger.debug("Pairing lookup failed while naming %s", pid[:12], exc_info=True)
             return ""
+
+    def _peer_name(self, pid):
+        """What this machine calls a peer: the user's name for it, else its own.
+
+        The user's own name comes first.  It is the one the rename dialog wrote
+        and the one the device list already shows (its `deviceLabel` is
+        ``note or name``), while this function read the published name alone —
+        so a device renamed here was called one thing on its row and another in
+        every notice, chat header and collected-log filename.  Reported as
+        "设备名有的时候会变成'试试'……历史记录里下面显示的名字不对".
+
+        A name this device has no record of is still empty rather than the id:
+        every caller already decides for itself what to print when nothing knows
+        the peer.
+        """
+        chosen = chosen_device_name(self.config, pid)
+        if chosen:
+            return chosen
+        return self._published_name(pid)
 
     def disconnect_device(self, device_id):
         return self._command(self._disconnect_device, device_id)
@@ -4981,7 +5150,30 @@ class LanRuntime:
         instead of looking like a network with no devices on it.
         """
         self._command(self.discovery.scan, blocking=True)
+        # And then ask every device this machine can reach what it is.  The mDNS
+        # round above answers "who is here"; this answers "what are they
+        # running", now, rather than whenever that peer's next broadcast lands —
+        # which is the wait a refresh is supposed to end.  Off the caller's
+        # thread (see `_ask_for_facts`), so the button still returns at the speed
+        # of the round rather than of the slowest peer.
+        self._ask_for_facts(self._facts_targets())
         return self.discovery_state()
+
+    def _facts_targets(self):
+        """The devices worth asking: the ones a row can show facts about.
+
+        Archived devices are left out — the user took them away — and a device is
+        asked over whichever route this machine has to it, decided per send in
+        `_ask_for_facts`.  Read from the same sighting/peer tables `_refresh`
+        builds rows from, so a device the page lists is a device the page asks.
+        """
+        with config_lock:
+            known = set(self.config.peers)
+        with self._lock:
+            sighted = {self._resolve(pid) for pid in self._discovered}
+        return sorted(
+            (known | sighted) - self._archived_ids() - {self.config.device_id}
+        )
 
     def _toggle_discovery(self, enabled, start, stop, key, code):
         # Deliberately outside ``_command``: the toggle only touches mDNS, and
@@ -5316,15 +5508,91 @@ class LanRuntime:
             logger.debug("Frame decode failed", exc_info=True)
             return None
 
+    def _answer_overlay(self, pid, info):
+        """A sighting, with a directly-answered account of the peer laid over it.
+
+        The same five facts arrive two ways — in the peer's mDNS record, which it
+        broadcasts on its own schedule, and in its answer to a ``device_ping``,
+        which is a reply to a question asked seconds ago — so they disagree
+        exactly when the peer has upgraded and one of the two is behind.  Which
+        one this machine believes is decided by **when it was observed**, not by
+        which kind it is: a broadcast read ten minutes ago must not outrank a
+        reply from ten seconds ago, and a reply must not outrank a sighting that
+        arrived after it.  Both stamps come from this machine's own monotonic
+        clock, so the comparison is well defined, and neither source can install
+        a stale version over a fresh one.
+
+        Only the facts travel.  The address and port stay the sighting's: an
+        answer says what the peer *is*, not where it is, and the address book is
+        the discovery layer's to keep.
+        """
+        answer = self._answers.get(pid)
+        if not answer or answer["at"] <= self._sighted_at.get(pid, 0.0):
+            return info
+        merged = dict(info)
+        for field in ("version", "os", "arch", "app"):
+            if answer.get(field):
+                merged[field] = answer[field]
+        # The name only when the peer gave one: a peer that answers without a
+        # name has not un-named itself, and the sighting's is then the better
+        # answer.
+        if answer.get("name"):
+            merged["name"] = answer["name"]
+            merged["named"] = True
+        return merged
+
+    def _ask_for_facts(self, pids):
+        """Ask each peer in *pids* what it is, off the caller's thread.
+
+        Fired and forgotten on purpose: the answer arrives as its own frame and
+        is recorded by :meth:`_handle_device_probe`, which publishes the device
+        list change the row needs.  Waiting here would put the dial's whole
+        timeout back into the caller — the mistake `chat_invite` used to make.
+
+        Rate-limited per peer, because the entry point is the refresh button and
+        a reader who presses it twice should not put two rounds of frames on the
+        network for one answer.
+        """
+        now = time.monotonic()
+        asked = []
+        with self._probes_lock:
+            for pid in pids:
+                if now - self._asked_at.get(pid, 0.0) < self.FACTS_ASK_INTERVAL:
+                    continue
+                self._asked_at[pid] = now
+                asked.append(pid)
+        for pid in asked:
+            frame = encode_frame(
+                {"msg_type": "device_ping", "ping_id": secrets.token_hex(6), "ts": now},
+                source_device=self.config.device_id,
+            )
+            try:
+                sent = bool(self.transport.send_to_peer(pid, frame))
+            except Exception:
+                logger.debug("Facts probe: LAN send failed", exc_info=True)
+                sent = False
+            if not sent and self._peer_is_internet_reachable(pid):
+                try:
+                    self._relay_publish_to_peer(frame, pid)
+                except Exception:
+                    logger.debug("Facts probe: relay send failed", exc_info=True)
+        return asked
+
     def _handle_device_probe(self, kind, payload, pid, via_relay):
         """Answer a ping, or resolve an in-flight probe with a pong."""
         channel = "relay" if via_relay else "lan"
         if kind == "device_ping":
+            facts = self.discovery.advertised_facts()
             frame = encode_frame(
                 {
                     "msg_type": "device_pong",
                     "ping_id": str(payload.get("ping_id") or ""),
                     "ts": payload.get("ts"),
+                    # What this device is, in the same five strings its mDNS
+                    # record carries (see `Discovery.advertised_facts`): the
+                    # question was "who are you", and a reply that gave only an
+                    # echo left the asker to broadcast-and-wait for the rest.
+                    "facts": facts,
                 },
                 source_device=self.config.device_id,
             )
@@ -5338,6 +5606,7 @@ class LanRuntime:
         ping_id = str(payload.get("ping_id") or "")
         if not ping_id:
             return
+        self._note_answer(pid, payload.get("facts"), ping_id)
         with self._probes_lock:
             entry = self._probes.get(ping_id)
             if entry is None:
@@ -5349,6 +5618,34 @@ class LanRuntime:
             result["latency_ms"] = (time.monotonic() - result["send_ts"]) * 1000.0
             entry["replied"].add(channel)
             entry["event"].set()
+
+    def _note_answer(self, pid, facts, ping_id):
+        """Record what a peer said it is, once, and publish the change.
+
+        Written even when no probe of this machine's is waiting for it: the
+        answer is good whether it arrived for a latency test, for a refresh, or
+        unprompted.  Deduplicated by ``ping_id`` so a retransmitted pong cannot
+        restamp an older answer and outrank a newer sighting.
+        """
+        if not isinstance(facts, dict) or not pid:
+            return
+        with self._probes_lock:
+            if ping_id in self._answered_pings:
+                return
+            self._answered_pings.add(ping_id)
+            # Bounded: the set only has to cover a duplicate of a pong this
+            # machine could still be waiting on.
+            if len(self._answered_pings) > 512:
+                self._answered_pings.pop()
+            self._answers[pid] = {
+                "version": str(facts.get("version") or ""),
+                "os": str(facts.get("os") or ""),
+                "arch": str(facts.get("arch") or ""),
+                "app": str(facts.get("app") or ""),
+                "name": str(facts.get("name") or ""),
+                "at": time.monotonic(),
+            }
+        self._refresh()
 
     def start_pairing(self, device_id):
         return self._command(self._start_pairing, device_id)

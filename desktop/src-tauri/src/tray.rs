@@ -161,6 +161,26 @@ fn is_pairing(status: &str) -> bool {
     matches!(status, "pending" | "peer_confirmed" | "confirmed_waiting")
 }
 
+/// What this machine calls the device, in one line.
+///
+/// The rule the window states once, in
+/// `desktop/src/lib/device-row.ts::deviceLabel` — the name the user gave it
+/// (`note`) outranks the one the peer published about itself (`name`) — spelled
+/// again here because the tray is a native menu and cannot import the TypeScript
+/// module it lives in.  Two spellings of one answer is a real cost, and it is
+/// paid because the alternative was worse: this menu read `name` directly, so a
+/// device the user had renamed on its own row was called one thing there and
+/// another here, and the peers sorted under a name the list no longer showed.
+///
+/// A note of nothing but spaces is not a name, so it falls through.
+fn display_name(device: &Value) -> String {
+    let note = device["note"].as_str().unwrap_or_default().trim();
+    if !note.is_empty() {
+        return note.to_owned();
+    }
+    device["name"].as_str().unwrap_or_default().to_owned()
+}
+
 /// The peer rows in a `devices.list` response (`{"items": [...]}`).
 ///
 /// Removed devices are left out: they carry no live state, the legacy tray had
@@ -172,7 +192,7 @@ fn device_lines(response: &Value) -> Vec<DeviceLine> {
         .flatten()
         .filter(|device| device["archived"] != true)
         .map(|device| DeviceLine {
-            name: device["name"].as_str().unwrap_or_default().to_owned(),
+            name: display_name(device),
             state: classify(device),
         })
         .collect();
@@ -804,6 +824,31 @@ mod tests {
             classify(&json!({"connection_state": "offline", "pairing_status": "rejected"})),
             DeviceState::Found
         );
+    }
+
+    #[test]
+    fn a_peer_the_user_renamed_is_named_by_that_rename_here_too() {
+        // The rule the window's `deviceLabel` states, and the defect it was
+        // reported as: the devices page showed 试试 while this menu showed the
+        // name the peer published about itself, for one and the same device.
+        let renamed = json!({
+            "id": "483fa196a05a",
+            "name": "Kais-MacBook",
+            "note": "试试",
+            "paired": true,
+            "connection_state": "online",
+            "pairing_status": "paired",
+        });
+        assert_eq!(display_name(&renamed), "试试");
+        // And the page's other half: a row the user has not renamed keeps the
+        // peer's own name, and a note of only spaces is not a name.
+        assert_eq!(display_name(&json!({"name": "Kais-MacBook", "note": ""})), "Kais-MacBook");
+        assert_eq!(display_name(&json!({"name": "Kais-MacBook", "note": "   "})), "Kais-MacBook");
+        assert_eq!(display_name(&json!({"name": "Kais-MacBook"})), "Kais-MacBook");
+        // The row this menu draws, end to end.
+        let lines = device_lines(&json!({"items": [renamed]}));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].name, "试试");
     }
 
     #[test]

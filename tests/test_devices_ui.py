@@ -60,6 +60,29 @@ def test_discovered_skips_removed_archive():
     assert any(r["device_id"] == "gone" for r in data["removed"])
 
 
+def test_the_archive_carries_the_name_the_user_gave_the_device():
+    """The web's archive and the desktop's archived row are the same list.
+
+    Measured on the reporting install, a device held `notes = "试试"` while its
+    owner published `Kais-MacBook`: the desktop's archived row showed 试试 (its
+    rows carry `note`) and this payload carried only `device_name`, so the same
+    list named the device differently on the two fronts.
+    """
+    from internal.web.api.devices import get_devices
+
+    cfg = _DevCfg()
+    archived = _removed_peer("gone", "Kais-MacBook")
+    archived.notes = "试试"
+    cfg.removed_peers = {"gone": archived}
+
+    data, _ = get_devices(cfg, lambda: [], get_discovered=lambda: {})
+    entry = next(r for r in data["removed"] if r["device_id"] == "gone")
+    assert entry["note"] == "试试"
+    # And the rule the page applies to it — `note or device_name` — reads it as
+    # the user's name, which is what the desktop's archived row shows.
+    assert (entry["note"] or entry["device_name"]) == "试试"
+
+
 def test_local_device_os_is_friendly_name():
     from internal.web.api.devices import get_devices
 

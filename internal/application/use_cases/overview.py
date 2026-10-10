@@ -8,6 +8,7 @@ import platform
 import time
 
 from internal.application.use_cases.history import row_dto
+from internal.config.config import known_device_names
 from internal.platform import friendly_platform_name
 from internal.platform.network import detect_network_type
 from internal.version import __version__
@@ -19,12 +20,20 @@ logger = logging.getLogger(__name__)
 IMAGE_TYPES = ("IMAGE", "IMAGE_PNG", "IMAGE_EMF", "PICTURE")
 
 
-def _count_connected_sync_peers(runtime) -> tuple[int, list[str]]:
+def _count_connected_sync_peers(runtime, cfg=None) -> tuple[int, list[str]]:
     """Connected peers that are paired — an active *sync session*, not a socket.
 
     A chat-only or mid-pairing connection is live but not a trusted sync peer,
     so counting it would disagree with the frontend's paired-only math.
+
+    Each name is the one **this machine** calls that device — the user's own,
+    when they gave it one — resolved through the same map the history rows use.
+    The transport's own ``device_name`` is only the fallback: it is what the peer
+    says about itself (or the label this machine happened to dial with), so
+    reading it alone put the peer's name on the overview's chips while the device
+    list beside them showed the name the user had typed.
     """
+    names_by_id = known_device_names(cfg)
     try:
         paired_ids = {
             getattr(peer, "device_id", "") for peer in runtime.pairing.get_paired_peers()
@@ -38,7 +47,7 @@ def _count_connected_sync_peers(runtime) -> tuple[int, list[str]]:
     names: list[str] = []
     try:
         names = [
-            name
+            names_by_id.get(pid) or name
             for pid, name in runtime.transport.get_connected_peers_with_names()
             if pid in paired_ids
         ]
@@ -71,7 +80,7 @@ def build_overview(cfg, history, runtime, start_time, lan_ip="", source_label=No
     degrades to a zero instead of failing the page: a locked or partially
     started application still has to render its overview.
     """
-    connected_count, connected_names = _count_connected_sync_peers(runtime)
+    connected_count, connected_names = _count_connected_sync_peers(runtime, cfg)
     try:
         paired_count = len(runtime.pairing.get_paired_peers())
     except Exception:

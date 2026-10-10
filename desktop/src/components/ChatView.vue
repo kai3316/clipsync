@@ -6,7 +6,7 @@ import { t } from "../i18n";
 import { systemText } from "../i18n/chat";
 import { shortTime, size } from "../i18n/format";
 import { openContextMenu } from "../lib/context-menu";
-import { chatReachable } from "../lib/device-row";
+import { chatReachable, deviceLabel } from "../lib/device-row";
 import { announce } from "../lib/status";
 import { copyText } from "../lib/clipboard";
 import { chatReceipt, deliveryIcon, deliveryLabel, type DeliveryStatus } from "../stores/delivery";
@@ -448,9 +448,9 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
         </div>
         <button v-for="device in nearby" :key="`chat-${device.id}`" class="chat-device"
           :disabled="busy || !reachable(device)"
-          :title="reachable(device) ? undefined : t('{name} 当前不在线', { name: device.name })"
-          @click="invite({ peer_id: device.id, peer_name: device.name } as ChatSession)">
-          <MessageCircle :size="16" /><span>{{ device.name }}</span>
+          :title="reachable(device) ? undefined : t('{name} 当前不在线', { name: deviceLabel(device) })"
+          @click="invite({ peer_id: device.id, peer_name: deviceLabel(device) } as ChatSession)">
+          <MessageCircle :size="16" /><span>{{ deviceLabel(device) }}</span>
           <!-- A device paired by code is named as that rather than 已配对: it is
                the one row here whose conversation crosses the internet, and the
                reader should know before the first message which route it takes.

@@ -140,7 +140,7 @@
           <span class="transfer-device-select__label">{{ t('transfer.send_to') }}</span>
           <select class="settings-select" v-model="targetDevice" :aria-label="t('transfer.send_to')">
             <option v-for="d in onlineDevices" :key="d.device_id" :value="d.device_id">
-              {{ d.device_name || d.name || d.device_id }}
+              {{ deviceLabel(d) }}
             </option>
           </select>
         </div>
@@ -398,6 +398,13 @@
       },
       formatSpeed: function (bytesPerSec) {
         return ClipsyncFormat.speed(bytesPerSec);
+      },
+      // The name this machine calls the device — the user's own name for it when
+      // there is one, the same rule the devices page and the phone use.  The
+      // target list read `device_name` alone, so a device the user had renamed
+      // was still offered under the name its owner published.
+      deviceLabel: function (device) {
+        return ClipsyncFormat.deviceName(device);
       },
       formatSize: function (bytes) {
         return ClipsyncFormat.size(bytes);

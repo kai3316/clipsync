@@ -3,7 +3,8 @@
 The payload has two shapes and both are kept:
 
 * ``checks`` — the legacy flat list, each entry carrying an ``ok`` flag and
-  i18n keys for the web panel.
+  i18n keys for the web panel.  An entry may also carry ``pending: true``: see
+  :func:`summarize`.
 * ``groups`` — the round-19 grouped items (``system``, ``network``,
   ``internet``, ``ai_config``, ``chat``, ``transfer``, ``filesystem``).
 
@@ -15,6 +16,16 @@ page cannot disagree about the state of the machine.
 Every probe is defensive. A missing manager or a failed OS probe produces a
 warn/fail item with a hint instead of raising, so a degraded application still
 renders a complete report — that is the whole point of the page.
+
+**"Not yet" is not a failure.**  Some of what this page probes is brought up
+asynchronously behind it, so an early read sees a machine that has not finished
+starting rather than one that is broken — ``advertising`` is the one that bit:
+``Discovery.start()`` opens the browser immediately and publishes its own mDNS
+record from a worker thread "well over a second" later, so the summary read
+"存在警告"/网络需注意 at the top of the first screen and turned 正常 on its own a
+moment later, with nothing having been wrong.  A check whose input is still
+coming up says so with ``pending`` instead of ``ok: False``, and
+:func:`summarize` leaves it out of the verdict.
 """
 
 import os
@@ -433,9 +444,21 @@ def clipboard_tool_probe():
 
 
 def build_checks(
-    cfg, server_running, discovery_running, advertising, web_running, lan_ip, web=None
+    cfg,
+    server_running,
+    discovery_running,
+    advertising,
+    web_running,
+    lan_ip,
+    web=None,
+    registering=False,
 ):
-    """The legacy flat check list (9 items, i18n-keyed)."""
+    """The legacy flat check list (9 items, i18n-keyed).
+
+    ``registering`` says our own mDNS record is still being published (see
+    ``Discovery.is_registering``), which is what keeps the one check that reads
+    it out of the verdict while it is true.
+    """
     port = int(getattr(cfg, "port", 0) or 0)
     web_port = int(getattr(cfg, "web_port", 0) or 0)
     checks = []
@@ -504,6 +527,22 @@ def build_checks(
                 "guidance": None,
             }
         )
+    elif registering:
+        # The record is on its way out, so this is a machine that has not
+        # finished saying where it is — not one that cannot be found.  Reported
+        # as pending, which `summarize` leaves out of the verdict; without it the
+        # first report after every launch read `warn` and the overview said the
+        # network needed attention until the poll a few seconds later.
+        checks.append(
+            {
+                "id": "advertising",
+                "ok": False,
+                "pending": True,
+                "detail": "announcing this device on the network",
+                "detail_key": "diag.advertising.pending.detail",
+                "guidance": None,
+            }
+        )
     else:
         checks.append(
             {
@@ -525,6 +564,28 @@ def build_checks(
                 "detail_key": "diag.web_companion.ok.detail",
                 "detail_params": {"web_port": web_port},
                 "guidance": None,
+            }
+        )
+    elif not bool(getattr(cfg, "web_enabled", False)):
+        # `ok`, not a failure — and it was the one place that rule was missing.
+        # Remote access off is the default state of a working install, which the
+        # network group's own item says in as many words ("a warning for it made
+        # the summary read 存在警告 on a machine with nothing wrong"); this flat
+        # entry kept failing, so the overview's chip read 网络需注意 on an
+        # untouched install for as long as remote access stayed off.  Measured on
+        # the reporting install's own table, it is the only settled check that
+        # reports a fault for a default setting.
+        checks.append(
+            {
+                "id": "web_companion",
+                "ok": True,
+                "detail": "Remote access disabled (optional)",
+                "detail_key": "diag.v2.item.web_service.off.detail",
+                "detail_params": {},
+                "guidance": "Enable remote access in Settings → Remote access to control this "
+                "device from a phone or browser.",
+                "guidance_key": "diag.v2.item.web_service.off.hint",
+                "guidance_params": {},
             }
         )
     else:
@@ -618,10 +679,16 @@ def build_checks(
 
 
 def summarize(checks) -> str:
-    """'fail' when a critical check is down, 'warn' for a non-critical one."""
-    if any(not c["ok"] for c in checks if c["id"] in SUMMARY_CRITICAL_IDS):
+    """'fail' when a critical check is down, 'warn' for a non-critical one.
+
+    A check that has not had its chance yet — ``pending`` — is left out of both
+    readings rather than counted as a fault.  It is still in the list, so a
+    reader can see what it is waiting on; what it is not is a verdict.
+    """
+    settled = [c for c in checks if not c.get("pending")]
+    if any(not c["ok"] for c in settled if c["id"] in SUMMARY_CRITICAL_IDS):
         return "fail"
-    if any(not c["ok"] for c in checks):
+    if any(not c["ok"] for c in settled):
         return "warn"
     return "ok"
 
@@ -1270,10 +1337,15 @@ def build_report(
     server_running = bool(transport is not None and getattr(transport, "_running", False))
     discovery_running = bool(discovery is not None and getattr(discovery, "is_browsing", False))
     advertising = bool(discovery is not None and getattr(discovery, "is_advertising", False))
+    # `is_advertising` is False both for a device that will not advertise and for
+    # one whose record is still going out; only the second is not a fault, and
+    # `Discovery.start()` guarantees the window on every launch.
+    registering = bool(discovery is not None and getattr(discovery, "is_registering", False))
     web_running = bool(web_running)
 
     checks, firewall = build_checks(
-        cfg, server_running, discovery_running, advertising, web_running, lan_ip, web
+        cfg, server_running, discovery_running, advertising, web_running, lan_ip, web,
+        registering=registering,
     )
 
     try:

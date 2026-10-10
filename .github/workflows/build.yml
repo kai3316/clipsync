@@ -81,6 +81,41 @@ jobs:
 
           What is new in this release:
 
+          - **A device's name is one name, on every screen it appears on.**  Reported as "设备名的
+            时候会变成'试试'……历史记录里下面显示的名字不对".  The name was kept in two fields — the
+            alias an internet pairing is renamed through and the note a saved LAN peer is renamed
+            through — and each surface read whichever one it happened to know about.  The device list
+            showed the name the user typed while the history row, the chat list, the tray, the
+            overview's chips and the web panel showed the name its owner publishes about itself.  The
+            rename now reaches all of them, and either rename path writes the same place.
+
+          - **The nearby-chat button no longer hangs.**  Reported as "设备页'附近聊天'按钮有时卡住".
+            Opening a conversation still dials the peer first, but the dial happens off the engine's
+            request thread now: waiting for it used to hold that one thread — and every device-list
+            and chat update queued behind it — for as long as the peer took to answer, up to fifteen
+            seconds.  The row says 正在连接 {name}… at once, refuses a second click while it waits, and
+            gives up after eight seconds with a retry instead of staying disabled.
+
+          - **The overview no longer calls the network a problem while it is still starting.**  The
+            chip read 网络需注意 on the first screen and turned 正常 on its own a moment later: this
+            device's own mDNS record is published a moment after discovery opens, and a check that
+            was merely still coming up was counted as a warning.  It says it is waiting instead and
+            stays out of the verdict.  Remote access switched off — the default state — is no longer
+            a warning either.
+
+          - **Refreshing the device page asks each device what it is.**  A device's version, platform
+            and architecture used to arrive only in that device's own broadcast, on that device's own
+            schedule; the refresh now asks for them directly, and an answer is believed when it is
+            newer than the last broadcast rather than when it is a broadcast.
+
+          - **The log now records the version a peer announces, and names a version change.**  For
+            "某个设备，在线显示的版本是旧版本。我把它重新升级后，打开 B 设备看这个设备，还是显示旧
+            版本": a sighting is written with the version it carried, and a changed version gets its
+            own line — `Peer … re-announced with version … (was …)`.  **Nothing is fixed by this.**
+            It is the evidence the next report needs: the logs kept so far cannot say whether a new
+            version ever arrived, which is the one question left open about a stale version on a
+            device row.
+
           - **When an update cannot be installed, the log now says why.**  Reported as "mac 端可以
             收到更新的压缩包，但只会弹出访达目录，不能自动安装重启", and it could not be diagnosed from
             two rounds of logs: the transfer worked, the signature was carried, the host entered the

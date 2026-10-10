@@ -2935,7 +2935,7 @@ body.light .upload-btn {
         var busy = chatInviteBusy === d.peer_id;
         html += '<div class="chat-device">' +
           '<div class="chat-device__info">' +
-            '<div class="chat-device__name">' + esc(d.name || d.peer_id) + '</div>' +
+            '<div class="chat-device__name">' + esc(ClipsyncFormat.deviceName(d) || d.peer_id) + '</div>' +
             '<div class="chat-device__badge' + (d.paired ? ' chat-device__badge--on' : '') + '">' + esc(d.paired ? T.chatPaired : T.chatUnpaired) + '</div>' +
           '</div>' +
           '<button class="chat-btn chat-btn--accent" data-start-peer="' + esc(d.peer_id) + '"' + (busy ? ' disabled' : '') + '>' + (busy ? '…' : esc(T.chatStart)) + '</button>' +

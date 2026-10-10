@@ -545,6 +545,8 @@ export const EN: Record<string, string> = {
   "重发消息失败": "Could not resend the message",
   "正在等待对方接受邀请…": "Waiting for the other device to accept…",
   "正在连接对方，连接上以后会话会出现在列表里。": "Connecting to the other device; the conversation appears in the list once it is up.",
+  "正在连接 {name}…": "Connecting to {name}…",
+  "连接超时，请重试": "Connection timed out, please try again",
 
   // ── Transfers ────────────────────────────────────────────────────────
   "传输历史": "Transfer history",

@@ -307,6 +307,7 @@
   "diag.advertising.fail.detail": "设备未在网络广播",
   "diag.advertising.fail.guidance": "此设备未在广播——请在概览中开启「可见」。",
   "diag.advertising.ok.detail": "设备已在网络上可见",
+  "diag.advertising.pending.detail": "正在网络上广播此设备",
   "diag.clipboard_tool.fail.detail": "缺少 xclip / wl-paste",
   "diag.clipboard_tool.fail.guidance": "剪贴板捕获需要 xclip（X11）或 wl-paste（Wayland）。请安装其中一个：'sudo apt install xclip' 或 'sudo apt install wl-clipboard'。",
   "diag.clipboard_tool.ok.detail": "剪贴板工具可用",

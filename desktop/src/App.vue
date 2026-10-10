@@ -14,7 +14,7 @@ import { aiCompareState, aiEntryKey, aiDiffCounts, buildAiLocalIndex } from "./l
 import { aiItemCount, aiTreeGroups, type AiGroup, type AiNode, type AiRow } from "./lib/aiconfig-tree";
 import { aiTargets, type AiTarget } from "./lib/aiconfig-targets";
 import { formatPairingCode, isPairingCodeComplete } from "./lib/pairing-code";
-import { PAIRING_LIVE_STATUSES, chatReachable, deviceLabel, deviceRank, deviceStatus, pairingInFlight, platformLabel } from "./lib/device-row";
+import { PAIRING_LIVE_STATUSES, chatReachable, deviceLabel, deviceRank, deviceStatus, pairingInFlight, platformLabel, renameWritesAlias } from "./lib/device-row";
 import { openContextMenu, type ContextMenuItem } from "./lib/context-menu";
 import { copyText } from "./lib/clipboard";
 import { announce, clearStatus, statusMessage } from "./lib/status";
@@ -950,37 +950,79 @@ function renameRelayDevice(device: Device) {
   renameValue.value = device.alias || "";
 }
 
-/** 重命名 on a device row, which is one field or the other depending on which
- *  pairing the row holds.
+/** 重命名 on a device row, which writes one field or the other.
  *
- * A note lives on a saved local peer; a device paired by code has no such peer,
- * so the note call answers NOT_FOUND and the menu entry could only fail.  That
- * device's name is its alias, which is the field the pairing card's own rename
- * writes — one name per device either way, and the dialog is the same one.
- */
+ *  A note lives on a saved local peer; a device paired by code has no such peer,
+ *  so the note call answers NOT_FOUND and the row's name is its alias — the field
+ *  the pairing card's own rename writes.  Which of the two a row uses is
+ *  `renameWritesAlias`, which asks whether the row holds an *internet* pairing
+ *  rather than whether it is paired: a device this machine has dialed but not
+ *  paired is in `config.peers` and can hold a note, and it used to be sent to the
+ *  alias call, where the backend answered NOT_FOUND. */
 function renameDeviceRow(device: Device) {
-  if (device.paired) {
-    renameTarget.value = { kind: "device", id: device.id };
-    renameValue.value = device.note || "";
+  if (renameWritesAlias(device)) {
+    renameRelayDevice(device);
     return;
   }
-  renameRelayDevice(device);
+  renameTarget.value = { kind: "device", id: device.id };
+  renameValue.value = device.note || "";
+}
+
+/** The longest the window waits for an invite's own answer, in ms.
+ *
+ * The sidecar answers an invite at once now — the dial it starts belongs to its
+ * own thread — so this only fires when the engine itself has stopped answering.
+ * It is here so the button cannot stay disabled forever when that happens, which
+ * is what "the button is sometimes stuck" was: nothing in this window ever gave
+ * up waiting. */
+const CHAT_INVITE_ANSWER_MS = 8000;
+
+/** *work*, or a rejection once *ms* have passed.
+ *
+ * The timer is cleared on the way out, so a fast answer leaves nothing pending —
+ * which matters in the component tests, where a stray timer outlives the test. */
+async function withAnswerTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(t("连接超时，请重试"))), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Open a conversation with a device from its own row.
  *
  * Same call the chat page's 附近设备 list makes, and the same answer: a session
- * id means the link was up and the conversation is open, anything else means
- * the invite is still dialing — in which case the chat page is where it will
+ * id means the link was up and the conversation is open, anything else means the
+ * invite is still dialing — in which case the chat page is where it will
  * appear, and it is opened either way so the reader can watch it arrive.
+ *
+ * The row says so at once and blocks its other chat buttons until the answer
+ * comes back.  Before that, the invite was the one row action with no busy state:
+ * clicking it looked like nothing had happened for as long as the sidecar took —
+ * and because the sidecar was waiting out a dial it did not have to wait for, that
+ * could be the whole connect timeout.
  */
 async function chatWith(device: Device) {
+  if (chatConnectingId.value) return;
+  chatConnectingId.value = device.id;
+  announce(t("正在连接 {name}…", { name: deviceLabel(device) }));
   try {
-    const result = await bridge.inviteChat(device.id, device.name);
+    const result = await withAnswerTimeout(
+      bridge.inviteChat(device.id, device.name),
+      CHAT_INVITE_ANSWER_MS,
+    );
     chatSessionToOpen.value = result?.chat_session_id || "";
     openPage("chat");
   } catch (error: any) {
     announce(error?.message || t("发送邀请失败"));
+  } finally {
+    chatConnectingId.value = "";
   }
 }
 
@@ -1864,6 +1906,13 @@ const renameValue = ref("");
  * it has to, since it is the one polling the list — so this is a request rather
  * than a selection. */
 const chatSessionToOpen = ref("");
+/** The device whose 打开聊天 is waiting for its answer, empty when none is.
+ *
+ * The row buttons disable on it and the icon on that row spins, which is the
+ * pattern 测试连接 already uses (`probeBusyId`).  It exists because the invite had
+ * none: the button stayed live and looked dead for as long as the sidecar took to
+ * answer, so a second click sent a second invite. */
+const chatConnectingId = ref("");
 const probeBusyId = ref("");
 /** The device an update offer is being sent to, and what came back. */
 const updateBusyId = ref("");
@@ -3048,9 +3097,13 @@ async function openDiagnostics() {
 async function rerunDiagnostics() {
   await refreshDiagnostics();
   const checks = diagnosticsReport.value?.checks || [];
+  // A pending check has not had its chance yet, so it is neither a pass nor a
+  // failure and is left out of both halves of the count — the same reading
+  // `summarize` gives it, so this line cannot contradict the verdict above it.
+  const settled = checks.filter((check) => !check.pending);
   store.toast("ui.settings", t("已重新检测 · {ok}/{total} 项通过", {
-    ok: checks.filter((check) => check.ok).length,
-    total: checks.length,
+    ok: settled.filter((check) => check.ok).length,
+    total: settled.length,
   }));
 }
 async function repairDiagnostics(kind: DiagnosticAction) {
@@ -5494,7 +5547,7 @@ async function translateText() {
                    uses — whether the device answers — so a relay that is down
                    leaves the entry to the menu, which says why. -->
               <div v-if="device.relay" class="row-actions">
-                <button v-if="chatReachable(device)" class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy" @click="chatWith(device)"><MessageCircle :size="18" /></button>
+                <button v-if="chatReachable(device)" class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy || !!chatConnectingId" @click="chatWith(device)"><MessageCircle :size="18" :class="{ spinning: chatConnectingId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('测试连接')" :title="t('测试连接')" :disabled="busy || !!probeBusyId" @click="testConnection(device)"><Activity :size="18" :class="{ spinning: probeBusyId === device.id }" /></button>
                 <button class="icon-button" :aria-label="t('发送网址')" :title="t('发送网址')" :aria-describedby="sendUrlAvailable ? undefined : 'devices-engine-note'" :disabled="busy || !sendUrlAvailable" @click="openSendUrl(device)"><Globe :size="18" /></button>
                 <!-- The cloud, not the generic broken link the local row's
@@ -5536,7 +5589,7 @@ async function translateText() {
                      device without pairing is what the chat page does; one
                      that is not reachable is left to the menu, which says why
                      (a dimmed icon in a row of live ones says nothing). -->
-                <button v-if="chatReachable(device)" class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy" @click="chatWith(device)"><MessageCircle :size="18" /></button>
+                <button v-if="chatReachable(device)" class="icon-button" :aria-label="t('打开聊天')" :title="t('打开聊天')" :disabled="busy || !!chatConnectingId" @click="chatWith(device)"><MessageCircle :size="18" :class="{ spinning: chatConnectingId === device.id }" /></button>
                 <button v-if="device.paired || relayPairing(device).paired" class="icon-button" :aria-label="t('测试连接')" :title="t('测试连接')" :disabled="busy || !!probeBusyId" @click="testConnection(device)"><Activity :size="18" :class="{ spinning: probeBusyId === device.id }" /></button>
                 <button v-if="device.paired || relayPairing(device).paired" class="icon-button" :aria-label="t('发送网址')" :title="t('发送网址')" :aria-describedby="sendUrlAvailable ? undefined : 'devices-engine-note'" :disabled="busy || !sendUrlAvailable" @click="openSendUrl(device)"><Globe :size="18" /></button>
                 <button v-if="relayPairing(device).paired" class="icon-button" :aria-label="t('解除互联网配对')" :title="t('解除互联网配对')" :disabled="busy" @click="relayUnpairDevice = device"><CloudOff :size="18" /></button>

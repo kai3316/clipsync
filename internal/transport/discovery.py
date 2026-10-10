@@ -718,6 +718,27 @@ class Discovery:
         # instead of a device that advertises.
         return _clip_bytes(_sanitize_peer_str(name), 200)
 
+    def advertised_facts(self) -> dict[str, str]:
+        """What this device says about itself, in the spellings the TXT record uses.
+
+        Five strings that are said twice: in the mDNS record, which a peer reads
+        at its own pace, and in this device's answer to a ``device_ping``, which
+        is a reply to a question asked a moment ago.  One definition so the two
+        cannot be spelled differently — a device list that flips between two
+        spellings of one fact is what the answer feature exists to avoid, not
+        something it may add.
+
+        ``name`` is empty for a device that has not chosen one, which is the case
+        the TXT record leaves the field out for.
+        """
+        return {
+            "version": __version__,
+            "os": platform.system().lower(),
+            "arch": (platform.machine() or "").lower(),
+            "app": running_shell(),
+            "name": self._published_name(),
+        }
+
     def _service_props(self, addresses: list[str] | None = None) -> dict[bytes, bytes]:
         """The TXT record we publish, for both registrations.
 
@@ -731,13 +752,14 @@ class Discovery:
         out, it is enumerated here — which is what a caller with no A records to
         fill in wants.
         """
+        facts = self.advertised_facts()
         # Use the hashed device_id to avoid exposing the real device identity
         # in plaintext mDNS TXT records.
         props = {
             b"device_id_hash": self._device_id_hash.encode("utf-8"),
-            b"v": __version__.encode("utf-8"),
-            b"os": platform.system().lower().encode("utf-8"),
-            b"arch": (platform.machine() or "").lower().encode("utf-8"),
+            b"v": facts["version"].encode("utf-8"),
+            b"os": facts["os"].encode("utf-8"),
+            b"arch": facts["arch"].encode("utf-8"),
             # Which of the two applications published from this repository this
             # device is running.  Both are one release with two assets per
             # platform, so (os, arch) does not say which one a peer can use --
@@ -745,11 +767,10 @@ class Discovery:
             # for one is not installable by the other.  It travels with the
             # same three fields for the same reason: the device list reads it
             # to decide whether an update exchange is even possible.
-            b"app": running_shell().encode("utf-8"),
+            b"app": facts["app"].encode("utf-8"),
         }
-        name = self._published_name()
-        if name:
-            props[b"n"] = name.encode("utf-8")
+        if facts["name"]:
+            props[b"n"] = facts["name"].encode("utf-8")
         if addresses is None:
             addresses = get_all_local_addresses()
         for i, ip in enumerate(addresses):
@@ -1364,6 +1385,21 @@ class Discovery:
         with self._lock:
             return self._zc is not None and self._service_info is not None
 
+    @property
+    def is_registering(self) -> bool:
+        """Whether our own mDNS record is being published right now.
+
+        Set by ``start()`` and cleared by the registration worker once the
+        record is out (see ``_register_soon``).  The window is the one
+        :meth:`start` describes — the browser is open and answering before it,
+        and the conflict probe makes it "well over a second" on a cold start —
+        so a reader that asks "is this device advertising?" and gets ``False``
+        cannot tell "not yet" from "not at all" without this.  The diagnostics
+        report is that reader: it read the window as a fault and told the user
+        the network needed attention.
+        """
+        return self._registering.is_set()
+
     def stop_browsing(self):
         """Stop discovering new peers without affecting advertising."""
         self._close_browser()
@@ -1625,6 +1661,11 @@ class Discovery:
         with self._lock:
             existing = self._known_peers.get(peer_id_hash)
             self._service_to_peer[name] = peer_id_hash
+            # What the record said before this sighting, kept for the log below:
+            # a version that moved is the one fact here a reader cannot recover
+            # afterwards, and it is the fact "the device list still shows the old
+            # version" has to be answered with.
+            was_version = existing.get("version") if existing is not None else None
             if existing is not None:
                 # Refresh on re-announcement: the peer's address may have
                 # changed (DHCP renewal, Wi-Fi reconnect, interface switch).
@@ -1663,13 +1704,36 @@ class Discovery:
                     "app": peer_app,
                 }
 
+        # The version is named here because this line is the only record of a
+        # peer's answer arriving, and it did not carry it: "the device list still
+        # shows the old version" could not be settled from a log that says a
+        # sighting arrived but not what it said.  A peer that publishes no
+        # version at all (a build older than the TXT field) reads "unknown",
+        # which is a different thing from "unchanged".
+        # The version is named here because this line is the only record of a
+        # peer's answer arriving, and it did not carry it: "the device list still
+        # shows the old version" could not be settled from a log that says a
+        # sighting arrived but not what it said.  A peer that publishes no
+        # version at all (a build older than the TXT field) reads "unknown",
+        # which is a different thing from "unchanged".
         logger.info(
-            "Discovered peer: %s at %s:%d (candidates: %s)",
+            "Discovered peer: %s at %s:%d version=%s (candidates: %s)",
             peer_display,
             address,
             port,
+            peer_version or "unknown",
             candidates,
         )
+        if was_version is not None and was_version != peer_version:
+            # Its own line, at its own words, because this is the one transition
+            # an upgrade report is looked for by: the device list showing a stale
+            # version is answered by whether this arrived, and when.
+            logger.info(
+                "Peer %s re-announced with version %s (was %s)",
+                peer_display,
+                peer_version or "unknown",
+                was_version or "unknown",
+            )
 
         with self._lock:
             on_found = self._on_peer_found

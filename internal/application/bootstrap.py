@@ -1508,6 +1508,12 @@ class SidecarApplication:
                 {
                     "id": peer.device_id,
                     "name": peer.device_name,
+                    # The name the user gave it, without which this list named the
+                    # device by what the peer calls itself — the one surface the
+                    # rename is checked on, reading differently depending on
+                    # whether the engine happened to be up.  `deviceLabel` reads
+                    # `note` first, so the field is all it takes.
+                    "note": peer.notes or "",
                     "paired": peer.paired,
                     "connection_state": "unknown",
                 }

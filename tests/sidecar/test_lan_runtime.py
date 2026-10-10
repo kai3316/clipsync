@@ -103,6 +103,20 @@ class Discovery:
     def is_advertising(self):
         return self.advertising
 
+    def advertised_facts(self):
+        """What this device answers a ``device_ping`` with.
+
+        A stand-in for `Discovery.advertised_facts`, which is where the real one
+        lives because it is also what the mDNS record is built from.
+        """
+        return {
+            "version": "0.0.0-test",
+            "os": "windows",
+            "arch": "x86_64",
+            "app": "tauri",
+            "name": "Local",
+        }
+
     def start_browsing(self):
         self.browsing = True
 
@@ -374,7 +388,14 @@ def test_chat_reveal_refuses_a_transfer_that_has_no_saved_file(rig, monkeypatch,
 
 
 def test_chat_invite_dials_an_idle_peer_before_inviting(rig):
-    """An invite into a link that does not exist yet would go nowhere."""
+    """An invite into a link that does not exist yet would go nowhere.
+
+    The dial is still made before the session — it is just made off the caller's
+    thread, because waiting for it here is what held the sidecar's one request
+    thread (and every event behind it) for up to ``CHAT_CONNECT_TIMEOUT``.  Both
+    halves of that contract are asserted: the answer is "connecting" at once, and
+    the conversation arrives afterwards.
+    """
     runtime, pairing, transport, *_ = rig
     pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
     transport.addresses["remote"] = ("Remote", "127.0.0.1", 9999)
@@ -384,13 +405,37 @@ def test_chat_invite_dials_an_idle_peer_before_inviting(rig):
         transport.connected.add(pid)
 
     transport.connect_to_peer = dial
-    session_id = runtime.chat_invite("remote", "Remote")
+    assert runtime.chat_invite("remote", "Remote") is None
 
-    assert transport.dials and session_id
+    assert wait_until(lambda: runtime.chat_sessions()["sessions"])
     session = runtime.chat_sessions()["sessions"][0]
+    assert transport.dials
     assert session["status"] == "active"
     # The invite itself then rides the freshly dialed link.
     assert [message.msg_type for _, message in transport.sent] == ["chat_invite"]
+
+
+def test_chat_invite_answers_before_the_dial_finishes(rig):
+    """The reported defect: the button's own request must not wait on the dial.
+
+    Measured against the old code, where this call did not return until the dial
+    did — and, because ``RpcServer._serve_requests`` dispatches one frame at a
+    time and only flushes events when its input queue is empty, neither did any
+    other request or any ``devices.changed``.  The dial here never completes, so
+    a synchronously-waiting invite would block for the whole timeout; the call
+    has to come back immediately instead.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.addresses["remote"] = ("Remote", "127.0.0.1", 9999)
+    runtime.CHAT_CONNECT_TIMEOUT = 5.0  # the dial never completes in this rig
+
+    started = time.monotonic()
+    assert runtime.chat_invite("remote", "Remote") is None
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0, f"the invite waited {elapsed:.2f}s on a dial it does not own"
+    # And it really did start a dial, rather than dropping the invite.
+    assert wait_until(lambda: transport.dials)
 
 
 def test_chat_invite_to_a_never_handshaked_device_reaches_the_real_id(rig):
@@ -422,9 +467,9 @@ def test_chat_invite_to_a_never_handshaked_device_reaches_the_real_id(rig):
         transport.connected.add("remote")
 
     transport.connect_to_peer = dial
-    session_id = runtime.chat_invite(alias, "Remote")
+    assert runtime.chat_invite(alias, "Remote") is None
 
-    assert session_id
+    assert wait_until(lambda: runtime.chat_sessions()["sessions"])
     # The session, and therefore every frame it sends, uses the real id.
     assert runtime.chat_sessions()["sessions"][0]["peer_id"] == "remote"
     assert [message.msg_type for _, message in transport.sent] == ["chat_invite"]
@@ -445,7 +490,8 @@ def test_a_chat_dial_does_not_offer_to_pair_but_an_ordinary_one_does(rig):
     transport.addresses["remote"] = ("Remote", "127.0.0.1", 9999)
 
     runtime.chat_invite("remote", "Remote")
-    assert transport.dialed_without_pairing == [True]
+    # The chat dial runs on its own thread now, so the flag is read after it.
+    assert wait_until(lambda: transport.dialed_without_pairing == [True])
 
     # ...and the device list's own connect still asks, or a first pairing could
     # never start from the one place a user goes looking for it.
@@ -482,10 +528,14 @@ def test_chat_invite_an_unreachable_peer_is_reported(rig):
     transport.addresses["remote"] = ("Remote", "127.0.0.1", 9999)
     runtime.CHAT_CONNECT_TIMEOUT = 0.2  # the dial never completes in this rig
 
+    # "Connecting" now, and the news that it never connected comes from the dial
+    # thread's own timeout rather than from this call's return.
     assert runtime.chat_invite("remote", "Remote") is None
-    assert events_named(events, "chat.connect_timeout") == [
-        {"peer_id": "remote", "name": "Remote"}
-    ]
+    assert wait_until(
+        lambda: events_named(events, "chat.connect_timeout") == [
+            {"peer_id": "remote", "name": "Remote"}
+        ]
+    ), events_named(events, "chat.connect_timeout")
 
 
 def test_discovery_hash_resolution_and_only_paired_auto_connect(rig):
@@ -699,6 +749,23 @@ def test_the_tick_reports_a_pull_whose_reply_never_came(rig):
 
 def events_named(events, name):
     return [event["data"] for event in events.since(0)[0] if event["name"] == name]
+
+
+def wait_until(condition, timeout=3.0):
+    """Wait for something a background thread owes, and say whether it came.
+
+    An invite that has to dial answers "connecting" and does the dial on its own
+    thread (``chat-invite-dial``), so what the dial leads to — the session, the
+    timeout event — arrives a moment later rather than on the caller's stack.
+    Polled rather than slept through, so a passing test is fast and a failing one
+    says which expectation never held.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return bool(condition())
 
 
 def test_a_changed_certificate_prompts_and_can_be_trusted(rig):
@@ -3814,3 +3881,522 @@ def test_the_automatic_check_announces_an_update_without_downloading_it():
     assert "self._notify_available(result)" in source, (
         "the automatic check must still announce what it found"
     )
+
+
+# ── One name for a device, on every surface ───────────────────────────────────
+#
+# Reported as "设备名有的时候会变成'试试'……历史记录里下面显示的名字不对".  A device's name is
+# stored in two fields -- the `notes` a saved LAN peer is renamed through and the
+# `netpair_aliases` an internet pairing is renamed through -- and the surfaces
+# read them in different orders, so one device had two names at once.  These pin
+# the runtime's half: what it calls a peer, what a row carries, and that the one
+# rename writes the one place.
+
+REPORTED_PEER = "remote"
+REPORTED_OWN_NAME = "Kais-MacBook"
+REPORTED_USER_NAME = "试试"
+
+
+def _reported_peer(runtime):
+    """The peer as the reporting install held it: both names, disagreeing."""
+    runtime.config.peers[REPORTED_PEER] = PeerInfo(
+        device_id=REPORTED_PEER,
+        device_name=REPORTED_OWN_NAME,
+        paired=True,
+    )
+    return runtime.config.peers[REPORTED_PEER]
+
+
+def test_this_machine_calls_a_peer_by_the_name_the_user_gave_it(rig):
+    """The name in every notice, chat header and collected-log filename.
+
+    `_peer_name` read the published name alone while the device list read
+    ``note or name``, so a device renamed here was called one thing on its row and
+    another everywhere the runtime speaks about it.
+    """
+    runtime, *_ = rig
+    _reported_peer(runtime)
+    assert runtime._published_name(REPORTED_PEER) == REPORTED_OWN_NAME
+    assert runtime._peer_name(REPORTED_PEER) == REPORTED_OWN_NAME
+
+    runtime.config.netpair_aliases[REPORTED_PEER] = REPORTED_USER_NAME
+    assert runtime._peer_name(REPORTED_PEER) == REPORTED_USER_NAME
+    # The published name is still what the *peer* is called by, and still what a
+    # device with no user-given name falls back to.
+    assert runtime._published_name(REPORTED_PEER) == REPORTED_OWN_NAME
+    assert runtime._peer_name("nobody") == ""
+
+
+def test_a_dial_label_is_never_the_alias_this_machine_chose(rig):
+    """The alias is a local-only view, and this string becomes the peer's name.
+
+    `_chosen_name` feeds `_address`, whose name is handed to the transport as the
+    dial's own label and written down there as that peer's name -- so routing
+    `_peer_name` through it would have recorded this machine's private alias as
+    the peer's own name.  It reads the published name instead.
+    """
+    runtime, *_ = rig
+    _reported_peer(runtime)
+    runtime.config.netpair_aliases[REPORTED_PEER] = REPORTED_USER_NAME
+    assert runtime._chosen_name(REPORTED_PEER, "fallback") == REPORTED_OWN_NAME
+
+    # And an alias on a peer nothing else knows the name of is still not the
+    # answer: the caller's own fallback is.  This is the case that would have
+    # gone wrong, because there is no published name here to prefer instead.
+    stranger = "9999999999999999"
+    runtime.config.netpair_aliases[stranger] = REPORTED_USER_NAME
+    assert runtime._chosen_name(stranger, "fallback") == "fallback"
+
+
+def test_a_relay_row_carries_the_users_name_and_the_peers_own(rig):
+    """A relay-only row had no `note` at all, so `note or name` could not see it.
+
+    The row is built where the alias is already known, and the LAN row beside it
+    has always carried both facts.  `name` stays the name the peer goes by; the
+    user's name for it is the alias, which is what the rename writes.
+    """
+    runtime, *_ = rig
+    relay_only = "a1b2c3d4e5f6"
+    runtime.config.netpair_secrets[relay_only] = "secret"
+    runtime.config.netpair_names[relay_only] = REPORTED_OWN_NAME
+    runtime.config.netpair_aliases[relay_only] = REPORTED_USER_NAME
+    runtime._refresh()
+
+    rows = {row["id"]: row for row in runtime.devices()["items"]}
+    row = rows[relay_only]
+    assert row["relay"] is True
+    assert row["note"] == REPORTED_USER_NAME
+    assert row["name"] == REPORTED_OWN_NAME
+    assert row["alias"] == REPORTED_USER_NAME
+
+
+def test_a_relay_row_keeps_the_name_the_peer_gave_at_hello_across_a_restart(rig):
+    """`netpair_names` is the persisted half of the hello name; this reader skipped it.
+
+    The name a peer gives at hello lived only in `internet_pairing._names` --
+    memory -- so a restart fell straight from "no name" to the raw peer id on the
+    pairing card.  `netpair_names` was added to keep it on disk; the relay rows
+    were still built from the in-memory map alone.
+    """
+    runtime, *_ = rig
+    relay_only = "a1b2c3d4e5f6"
+    runtime.config.netpair_secrets[relay_only] = "secret"
+    runtime.config.netpair_names[relay_only] = REPORTED_OWN_NAME
+    # The in-memory map is empty, which is what a fresh process looks like.
+    assert runtime.internet_pairing._names == {}
+    runtime._refresh()
+
+    rows = {row["id"]: row for row in runtime.devices()["items"]}
+    assert rows[relay_only]["name"] == REPORTED_OWN_NAME
+
+
+def test_the_row_rename_writes_the_one_name_both_fields_hold(rig):
+    """Renaming from a device's row has to move both spellings of the one fact.
+
+    A device paired on the network and by code at once has two rows, and each
+    reads a different field -- so a rename that wrote only `notes` left the relay
+    row showing the name the user had just replaced.
+    """
+    runtime, *_ = rig
+    _reported_peer(runtime)
+    assert runtime.set_device_note(REPORTED_PEER, REPORTED_USER_NAME) == {"ok": True}
+    assert runtime.config.peers[REPORTED_PEER].notes == REPORTED_USER_NAME
+    assert runtime.config.netpair_aliases[REPORTED_PEER] == REPORTED_USER_NAME
+
+    # Clearing the name clears both, or the alias would outlive the rename that
+    # emptied the note and name the device after a name nobody chose.
+    assert runtime.set_device_note(REPORTED_PEER, "") == {"ok": True}
+    assert runtime.config.peers[REPORTED_PEER].notes == ""
+    assert REPORTED_PEER not in runtime.config.netpair_aliases
+
+
+def test_the_pairing_card_rename_writes_the_lan_note_too(rig):
+    """The other entry point, writing the same one place."""
+    runtime, *_ = rig
+    _reported_peer(runtime)
+    runtime.config.netpair_secrets[REPORTED_PEER] = "secret"
+    assert runtime.internet_pairing.rename(REPORTED_PEER, REPORTED_USER_NAME) == {"ok": True}
+    assert runtime.config.netpair_aliases[REPORTED_PEER] == REPORTED_USER_NAME
+    assert runtime.config.peers[REPORTED_PEER].notes == REPORTED_USER_NAME
+
+    assert runtime.internet_pairing.rename(REPORTED_PEER, "") == {"ok": True}
+    assert REPORTED_PEER not in runtime.config.netpair_aliases
+    assert runtime.config.peers[REPORTED_PEER].notes == ""
+
+
+def test_an_internet_only_peer_is_not_given_a_lan_peer_to_hold_its_name(rig):
+    """No `PeerInfo`, so no note -- and none invented.
+
+    An internet-only pairing has no certificate to pin, so a `PeerInfo` minted
+    for it would claim a LAN pairing this machine does not have: `_persist` and
+    the pairing repository would both be told about a peer that never dialed.
+    """
+    runtime, *_ = rig
+    relay_only = "a1b2c3d4e5f6"
+    runtime.config.netpair_secrets[relay_only] = "secret"
+    assert runtime.internet_pairing.rename(relay_only, REPORTED_USER_NAME) == {"ok": True}
+    assert runtime.config.netpair_aliases[relay_only] == REPORTED_USER_NAME
+    assert relay_only not in runtime.config.peers
+
+
+def test_a_conversation_the_peer_started_is_named_the_way_this_machine_names_it(rig):
+    """The chat's copy of the reported defect, found by auditing the surfaces.
+
+    A conversation the *peer* opens carries that peer's own name for itself, and
+    every chat surface reads the field it lands in — the desktop's list, the web
+    panel, the phone, the invitation prompt, and the notice worded for an
+    arriving message.  So a device the user had renamed was called by the name
+    its owner publishes in all of them, while the device list beside them used the
+    name the user had typed.
+    """
+    runtime, pairing, transport, _, _, _, events, *_ = rig
+    pairing.add_peer(
+        REPORTED_PEER, REPORTED_OWN_NAME, pairing.get_peer_certificate(REPORTED_PEER), paired=True
+    )
+    runtime.config.peers[REPORTED_PEER] = PeerInfo(
+        device_id=REPORTED_PEER,
+        device_name=REPORTED_OWN_NAME,
+        notes=REPORTED_USER_NAME,
+        paired=True,
+    )
+    transport.connected.add(REPORTED_PEER)
+    # Off, so the invitation is a prompt rather than one taken on arrival — the
+    # state the prompt and its event exist for.
+    runtime.chat.set_open_to_all(False)
+
+    runtime._receive(
+        frame(
+            "chat_invite", session_id="abcdef0123456789",
+            from_name=REPORTED_OWN_NAME, fingerprint_short="FP",
+        ),
+        REPORTED_PEER,
+    )
+
+    session = runtime.chat_sessions()["sessions"][0]
+    assert session["peer_name"] == REPORTED_USER_NAME
+    # The conversation itself is not rewritten — only what this machine calls it.
+    assert runtime.chat.get_sessions()[0]["peer_name"] == REPORTED_OWN_NAME
+    # And the invitation the window is shown says the same name.
+    assert events_named(events, "chat.invite")[-1]["peer_name"] == REPORTED_USER_NAME
+
+
+def test_a_peer_this_machine_has_no_name_for_keeps_the_one_it_gave(rig):
+    """The control for the line above: resolving must not blank a label."""
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer(
+        REPORTED_PEER, REPORTED_OWN_NAME, pairing.get_peer_certificate(REPORTED_PEER), paired=True
+    )
+    runtime.config.peers[REPORTED_PEER] = PeerInfo(
+        device_id=REPORTED_PEER, device_name=REPORTED_OWN_NAME, paired=True
+    )
+    transport.connected.add(REPORTED_PEER)
+
+    runtime._receive(
+        frame(
+            "chat_invite", session_id="abcdef0123456789",
+            from_name=REPORTED_OWN_NAME, fingerprint_short="FP",
+        ),
+        REPORTED_PEER,
+    )
+    assert runtime.chat_sessions()["sessions"][0]["peer_name"] == REPORTED_OWN_NAME
+
+
+# ── an upgrade is the version, and only the version ──────────────────────────
+#
+# Reported as "某个设备，在线显示的版本是旧版本。我把它重新升级后，打开 B 设备看这个设备，还是
+# 显示旧版本。"  The handoff's reading was that the chain is complete and the
+# question is whether the announcement arrives at all — a reading, not a test.
+# This is that claim as a test: the sighting carries a new version, the row takes
+# it, and `devices.changed` — the one thing a window redraws from — is published
+# with it.  It is the version and *only* the version that moved, which is the
+# case the discovery layer's own `changed` comparison exists for: a peer that
+# upgrades re-announces from the same address and port.
+
+
+def test_an_upgraded_peer_reaches_the_row_and_is_published(rig):
+    runtime, pairing, transport, discovery, _clipboard, _history, events, *_ = rig
+    hashed = peer_id_hash("remote")
+    # The hash a sighting arrives under resolves to the real id, the way a
+    # handshake leaves it.
+    transport.resolved[hashed] = "remote"
+
+    discovery.found(
+        hashed, "Kais-MacBook", "127.0.0.1", 9999, "1.0.66", "darwin", "arm64", "tauri", True
+    )
+    runtime._refresh()
+    assert _row(runtime, "remote")["version"] == "1.0.66"
+    assert _row(runtime, "remote")["platform"] == "darwin"
+
+    # The upgrade: same name, same address, same port — the version is what moved.
+    discovery.found(
+        hashed, "Kais-MacBook", "127.0.0.1", 9999, "1.0.70", "darwin", "arm64", "tauri", True
+    )
+
+    published = events_named(events, "devices.changed")
+    assert published, "the window was never told the list changed"
+    assert published[-1]["items"][0]["version"] == "1.0.70"
+    assert _row(runtime, "remote")["version"] == "1.0.70"
+
+
+def test_a_re_announcement_of_the_same_version_is_not_a_list_change(rig):
+    """The control: mDNS re-announces constantly, and the list must not churn.
+
+    `_peer_found` is only reached for a record that changed (the discovery layer
+    compares, version included), so a second sighting with the same version is
+    not news — and a list that redrew on every announcement is what the
+    comparison is for.
+    """
+    runtime, pairing, transport, discovery, _clipboard, _history, events, *_ = rig
+    hashed = peer_id_hash("remote")
+    transport.resolved[hashed] = "remote"
+
+    sighting = (
+        hashed, "Kais-MacBook", "127.0.0.1", 9999, "1.0.70", "darwin", "arm64", "tauri", True
+    )
+    discovery.found(*sighting)
+    runtime._refresh()
+    before = len(events_named(events, "devices.changed"))
+
+    discovery.found(*sighting)
+    assert len(events_named(events, "devices.changed")) == before
+
+
+# ── "what are you?" — the answer, beside the broadcast ───────────────────────
+#
+# Reported as a device still showing an old version after it had been upgraded.
+# The device page's refresh asked the LAN *who is here*; what each peer **is**
+# arrived only in that peer's own mDNS record, which it broadcasts on its own
+# schedule.  The probe channel was already there and already identity-bound (a
+# LAN ping is answered only for a pinned peer, a relay one only for its channel's
+# owner) — what it did not carry was the answer.
+
+
+def _sighting(runtime, pid, version):
+    """Put a peer's mDNS sighting on record the way the browser path does."""
+    runtime._discovered[pid] = {
+        "name": "Remote", "named": True, "address": "127.0.0.1", "port": 9999,
+        "version": version, "os": "windows", "arch": "x86_64", "app": "tauri",
+    }
+    # The two halves `_on_peer_found` writes: the row, and when it was heard.
+    runtime._sighted_at[pid] = time.monotonic()
+
+
+def _facts(version="1.0.70", os_name="darwin", arch="arm64"):
+    return {
+        "version": version, "os": os_name, "arch": arch,
+        "app": "tauri", "name": "Remote",
+    }
+
+
+def _row(runtime, pid):
+    return next(row for row in runtime.devices()["items"] if row["id"] == pid)
+
+
+def _answer(runtime, pid, facts, ping_id="p1"):
+    runtime._handle_device_probe(
+        "device_pong", {"ping_id": ping_id, "facts": facts}, pid, False
+    )
+
+
+def test_a_pong_carries_what_the_device_is(rig):
+    """The question is "who are you"; the reply used to be only the echo."""
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+
+    transport.message(frame("device_ping", ping_id="probe", ts=1.0), "remote")
+
+    pong = transport.sent[-1][1]
+    assert pong.msg_type == "device_pong"
+    facts = pong._raw_payload["facts"]
+    # One definition for the two places this device says what it is: the record
+    # and the answer can never be spelled differently.
+    assert facts == runtime.discovery.advertised_facts()
+    assert set(facts) == {"version", "os", "arch", "app", "name"}
+    assert facts["version"], "an empty version would be worse than none"
+
+
+def test_an_answer_updates_the_row_without_waiting_for_a_broadcast(rig):
+    """The reported defect: the version the peer is running, now."""
+    runtime, pairing, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    _sighting(runtime, "remote", "1.0.66")
+    runtime._refresh()
+    assert _row(runtime, "remote")["version"] == "1.0.66"
+
+    _answer(runtime, "remote", _facts("1.0.70"))
+
+    row = _row(runtime, "remote")
+    assert row["version"] == "1.0.70"
+    # The rest of what it said travels with it, so one question answers every
+    # fact the row shows.
+    assert row["platform"] == "darwin"
+    assert row["arch"] == "arm64"
+    # And the address is still the sighting's: an answer says what the peer is,
+    # not where it is.
+    assert row["version"] == "1.0.70"
+
+
+def test_a_later_broadcast_wins_over_an_older_answer(rig):
+    """The rule is symmetric, which is the only way it can be safe.
+
+    "An answer always wins" would let a reply asked for before an upgrade be
+    installed over a broadcast that arrived after it.  The newer *observation*
+    wins, from either source.
+    """
+    runtime, pairing, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    _sighting(runtime, "remote", "1.0.66")
+    runtime._refresh()
+    _answer(runtime, "remote", _facts("1.0.70"))
+    assert _row(runtime, "remote")["version"] == "1.0.70"
+
+    # A broadcast seen after that answer, and it is the newer word.
+    time.sleep(0.01)
+    _sighting(runtime, "remote", "1.0.66")
+    runtime._refresh()
+    assert _row(runtime, "remote")["version"] == "1.0.66"
+
+
+def test_a_repeated_pong_does_not_restamp_the_answer(rig):
+    """A retransmitted answer must not outrank a sighting that came after it."""
+    runtime, pairing, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    _sighting(runtime, "remote", "1.0.66")
+    runtime._refresh()
+    _answer(runtime, "remote", _facts("1.0.70"), ping_id="p1")
+    time.sleep(0.01)
+    _sighting(runtime, "remote", "1.0.66")
+    runtime._refresh()
+    assert _row(runtime, "remote")["version"] == "1.0.66"
+
+    # The same answer arrives again.  Taken, it would be the newest observation
+    # and put the stale version back.
+    _answer(runtime, "remote", _facts("1.0.70"), ping_id="p1")
+    assert _row(runtime, "remote")["version"] == "1.0.66"
+
+
+def test_the_refresh_asks_each_device_once_per_interval(rig):
+    """The refresh button is the entry point, and it is a button."""
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+
+    assert runtime._ask_for_facts(["remote"]) == ["remote"]
+    assert [message.msg_type for _, message in transport.sent] == ["device_ping"]
+    # A second press inside the interval puts nothing on the wire.
+    assert runtime._ask_for_facts(["remote"]) == []
+    assert len(transport.sent) == 1
+
+    # Past it, it asks again — the answer it wants can have changed by then.
+    runtime._asked_at["remote"] = time.monotonic() - runtime.FACTS_ASK_INTERVAL - 1
+    assert runtime._ask_for_facts(["remote"]) == ["remote"]
+    assert len(transport.sent) == 2
+
+
+def test_the_refresh_asks_and_the_answer_lands_on_the_row(rig):
+    """The refresh button's whole path, from its own entry point.
+
+    `scan_devices` is what the window's refresh calls, and the tests above drive
+    `_ask_for_facts` and the handler directly.  This is the seam between them:
+    the button asks, the peer's answer comes back keyed by the ping it answered,
+    and the row the page reads carries it.
+    """
+    runtime, pairing, transport, discovery, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    _sighting(runtime, "remote", "1.0.66")
+    runtime._refresh()
+    assert _row(runtime, "remote")["version"] == "1.0.66"
+
+    runtime.scan_devices()
+
+    assert discovery.scans == 1, "the refresh no longer asks the LAN who is here"
+    pings = [message for _, message in transport.sent if message.msg_type == "device_ping"]
+    assert pings, "the refresh did not ask the peer what it is"
+    _answer(runtime, "remote", _facts("1.0.70"), ping_id=pings[-1]._raw_payload["ping_id"])
+
+    assert _row(runtime, "remote")["version"] == "1.0.70"
+
+
+def test_an_answer_from_an_unpaired_peer_is_ignored(rig):
+    """The handoff's own requirement, from the answering side.
+
+    The ping direction was already gated (`test_device_ping_is_answered_only_for_paired_peers`):
+    a peer this machine has not pinned cannot solicit a pong.  This is the same
+    gate on the way back — a frame from an unpinned peer never reaches the
+    handler — which is what stops a device on the network from claiming to be
+    another one, version and all.
+    """
+    runtime, pairing, transport, *_ = rig
+    transport.connected.add("remote")
+    _sighting(runtime, "remote", "1.0.66")
+    runtime._refresh()
+
+    impostor = _facts("9.9.9", "plan9", "mips")
+    impostor["name"] = "NotRemote"
+    transport.message(frame("device_pong", ping_id="p1", facts=impostor), "remote")
+    assert _row(runtime, "remote")["version"] == "1.0.66", "an unpinned peer's answer was taken"
+
+    # The control: the same frame, once the peer is pinned, is exactly what this
+    # machine asked for.
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.message(frame("device_pong", ping_id="p2", facts=impostor), "remote")
+    assert _row(runtime, "remote")["version"] == "9.9.9"
+
+
+def test_a_relay_answer_sets_the_facts_for_an_internet_peer(rig):
+    """The other route: a peer with no LAN link is asked over the relay.
+
+    `_ask_for_facts` tries the link it has and falls back to the relay, and an
+    internet-only pairing is the case that needs it — there is no LAN address to
+    send to at all.  The answer comes back on the channel the relay bound to that
+    peer, which is the gate the LAN side gets from the certificate.
+    """
+    runtime, pairing, transport, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    runtime.config.internet_sync_enabled = True
+    runtime.config.netpair_secrets["remote"] = "netpair-secret"
+    _sighting(runtime, "remote", "1.0.66")
+    runtime._refresh()
+    published = []
+
+    def publish(frame_bytes, topic, key, qos=0):
+        message = decode_message(frame_bytes)
+        published.append(message.msg_type)
+        if message.msg_type == "device_ping":
+            runtime._receive_relay(encode_frame(
+                {
+                    "msg_type": "device_pong",
+                    "ping_id": message._raw_payload["ping_id"],
+                    "facts": _facts("1.0.70"),
+                },
+                source_device="remote",
+            ))
+        return True
+
+    runtime.relay = type("Relay", (), {"publish": staticmethod(publish)})()
+    try:
+        assert runtime._ask_for_facts(["remote"]) == ["remote"]
+    finally:
+        runtime.relay = None
+
+    assert published == ["device_ping"], "the internet peer was not asked over its own route"
+    assert _row(runtime, "remote")["version"] == "1.0.70"
+
+
+def test_the_facts_targets_are_the_devices_the_page_lists(rig):
+    """Asked of the rows, not of everything this machine has ever heard of."""
+    runtime, pairing, *_ = rig
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    _sighting(runtime, "remote", "1.0.70")
+    _sighting(runtime, "gone", "1.0.70")
+    runtime._discovered["gone"] = {**runtime._discovered["gone"]}
+    runtime.config.removed_peers["gone"] = PeerInfo(device_id="gone", device_name="Gone")
+
+    targets = runtime._facts_targets()
+    assert "remote" in targets
+    # An archived device is one the user took away: the page does not list it, so
+    # the page does not ask it.
+    assert "gone" not in targets
+    assert runtime.config.device_id not in targets

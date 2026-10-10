@@ -291,6 +291,11 @@ def get_devices(
         {
             "device_id": p.device_id,
             "device_name": p.device_name,
+            # The name the user gave it.  Without this the archive named a device
+            # by what its owner calls it, while the desktop's own archived row —
+            # built from the same `PeerInfo` — showed the name the user had
+            # typed.  One list, two names, depending on which front end drew it.
+            "note": getattr(p, "notes", "") or "",
             "removed_at": p.removed_at,
             "paired": p.paired,
             "has_address": bool(p.last_ip and p.last_port),

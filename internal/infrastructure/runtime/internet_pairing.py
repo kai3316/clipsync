@@ -819,6 +819,14 @@ class InternetPairingService:
                 continue
             name = self._names.get(pid, "")
             if not name:
+                # The name this peer gave at hello, which `note_hello` writes to
+                # disk as well as to `_names` — because `_names` is memory, so a
+                # restart or an upgrade forgot it and this card fell straight
+                # from "no name" to the raw peer id.  That is the same defect
+                # `netpair_names` was added for; this reader was the one that
+                # still skipped it.
+                name = (getattr(self.config, "netpair_names", None) or {}).get(pid, "")
+            if not name:
                 peer = (getattr(self.config, "peers", {}) or {}).get(pid)
                 name = getattr(peer, "device_name", "") if peer is not None else ""
             last_seen = self._last_seen.get(pid)
@@ -875,6 +883,19 @@ class InternetPairingService:
             self.config.netpair_aliases[peer_id] = name
         else:
             self.config.netpair_aliases.pop(peer_id, None)
+        # The same fact under its other spelling.  A device paired by code and on
+        # the LAN at once is renamed from either card, and the LAN row reads
+        # `notes` — so writing only the alias left that row showing the name the
+        # user had just replaced, which is the one-name rule failing in the
+        # direction the device list can see.
+        #
+        # Only when a saved peer already exists.  An internet-only pairing has no
+        # `PeerInfo`, and minting one here would claim a LAN pairing this machine
+        # does not have — `_persist` and the pairing repository would both be
+        # told about a peer with no certificate to pin.
+        peer = (getattr(self.config, "peers", None) or {}).get(peer_id)
+        if peer is not None:
+            peer.notes = name
         self._save()
         return {"ok": True}
 

@@ -8,6 +8,7 @@
    Usage:
      ClipsyncFormat.size(1536)        // => "1.5 KB"
      ClipsyncFormat.speed(2048)       // => "2.0 KB/s"
+     ClipsyncFormat.deviceName(dev)   // => the user's name for it, else the peer's
 
    Transfer ETAs are deliberately NOT here: the server formats those, because
    they need localized time units (see transfer.eta_* in internal/i18n).
@@ -54,9 +55,41 @@ var ClipsyncFormat = (function () {
     return (v / MB).toFixed(1) + ' MB/s';
   }
 
+  /**
+   * What this machine calls a device: the name the user gave it, else the one
+   * the peer published about itself.
+   *
+   * The rule the desktop window states once, in `lib/device-row.ts::deviceLabel`
+   * (`note or name`), and the rule this dashboard's own rename writes — see
+   * `context-menu.js::renameDevice`, which saves into `note` because that is the
+   * per-device name the backend persists.  It was spelled six different ways
+   * across this dashboard (`device_name || device_id` in the card, in the
+   * transfer selector, in three toasts) and five of them left `note` out, so a
+   * device renamed here was still listed under the peer's own name on the very
+   * card whose menu performed the rename.  Reported as "设备名有的时候会变成
+   * '试试'……历史记录里下面显示的名字不对"; measured on that install, one device held
+   * `notes = "试试"` and `device_name = "Kais-MacBook"` at the same time.
+   *
+   * A note of nothing but spaces is not a name, so it falls through.  Both key
+   * spellings are accepted because the dashboard's `/api/devices` rows carry
+   * `device_name` while the runtime's own snapshot (`/api/chat/devices`, the
+   * phone page) carries `name`.
+   *
+   * @param {object} device
+   * @returns {string} e.g. "试试", "Kais-MacBook", or ''
+   */
+  function deviceName(device) {
+    if (!device) return '';
+    var note = typeof device.note === 'string' ? device.note.trim() : '';
+    if (note) return note;
+    var published = device.device_name || device.name || device.device_id || device.peer_id || '';
+    return String(published).trim();
+  }
+
   return {
     size: size,
     speed: speed,
+    deviceName: deviceName,
   };
 
 })();

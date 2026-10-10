@@ -389,6 +389,43 @@ def _config_dir() -> Path:
 config_dir = _config_dir
 
 
+def chosen_device_name(cfg, device_id) -> str:
+    """The name **the user** gave this device on this machine, or ``""``.
+
+    One fact, two fields.  A device is renamed from its own row, and which field
+    that writes depends on how the row is paired: the alias an internet pairing
+    is renamed through (``netpair_aliases``) or the note a saved LAN peer is
+    renamed through (``peers[pid].notes``).  So every reader has to consult both,
+    and one that consulted only one of them disagreed with the row the user had
+    just renamed.
+
+    Measured on the reported install, which holds both fields for one device::
+
+        peers["483fa196a05a"].device_name = "Kais-MacBook"   # the peer's own name
+        peers["483fa196a05a"].notes       = "试试"            # the user's name
+        netpair_names["483fa196a05a"]     = "Kais-MacBook"
+
+    The device list read ``note or name`` and showed 试试.  ``known_device_names``
+    applied the self-reported name *after* the note and showed Kais-MacBook, so
+    the same device had two names depending on which surface asked.  Reported as
+    "设备名有的时候会变成'试试'……历史记录里下面显示的名字不对".
+
+    Empty and whitespace-only are not a name, so both fall through to the
+    caller's next source.
+    """
+    if cfg is None:
+        return ""
+    device_id = str(device_id or "")
+    if not device_id:
+        return ""
+    alias = str((getattr(cfg, "netpair_aliases", None) or {}).get(device_id) or "").strip()
+    if alias:
+        return alias
+    with config_lock:
+        peer = (getattr(cfg, "peers", None) or {}).get(device_id)
+    return str(getattr(peer, "notes", "") or "").strip()
+
+
 def known_device_names(cfg) -> dict:
     """Every device this machine can name, as ``device_id -> display name``.
 
@@ -401,12 +438,15 @@ def known_device_names(cfg) -> dict:
         internet-paired, alias set        -> "a1b2c3d4e5f6..." (the id)
         internet-paired, no alias         -> "a1b2c3d4e5f6..." (the id)
 
-    The alias comes first, which is the rule the device list already applies
-    (`lan.py` builds a relay row as ``alias or name or pid``) — it is the name
-    the user chose for that device, and it outranks the one the peer published
-    about itself.  A LAN peer's `notes` is the equivalent user-assigned name and
-    is already what the list shows, so it is honoured here too rather than being
-    the one surface where a note did not apply.
+    **Two sources answer "what is this device called", and the user's answer
+    wins.**  The peer's own name (its stored ``device_name``, or the
+    ``netpair_names`` it gave at hello) is laid down first; the name this user
+    chose for it — :func:`chosen_device_name`, alias or note — is applied last,
+    so it outranks every self-reported one.  That precedence is the point: read
+    in the other order, a peer that had ever said hello under its own name
+    overrode the rename the user had just performed, which is exactly the
+    reported "历史记录里下面显示的名字不对" — the list showed 试试 and the history
+    row showed the peer's Kais-MacBook for one and the same device.
 
     This machine is in the map as well.  The probe written to check the fix is
     what caught it missing: `source_name` falls back to *this* device's name only
@@ -432,26 +472,30 @@ def known_device_names(cfg) -> dict:
     local_name = str(getattr(cfg, "device_name", "") or "")
     if local_id and local_name:
         names[local_id] = local_name
-    aliases = getattr(cfg, "netpair_aliases", None) or {}
     with config_lock:
         peers = list(getattr(cfg, "peers", {}).values())
+    # Lowest precedence first: what each peer published about itself.  A LAN
+    # peer's stored `device_name` is the name frozen when the two last dialed (or
+    # the one its own announcements refreshed); `netpair_names` is the name an
+    # internet peer gave when it said hello.
     for peer in peers:
         device_id = str(getattr(peer, "device_id", "") or "")
-        if not device_id:
-            continue
-        name = str(getattr(peer, "notes", "") or "") or str(
-            getattr(peer, "device_name", "") or ""
-        )
-        if name:
-            names[device_id] = name
-    # What each internet pairing last told us it was called, then the alias last, so a user-chosen
-    # name outranks anything a peer published about itself.
+        published = str(getattr(peer, "device_name", "") or "")
+        if device_id and published:
+            names[device_id] = published
     for device_id, learned_name in (getattr(cfg, "netpair_names", None) or {}).items():
         if learned_name:
             names[str(device_id)] = str(learned_name)
-    for device_id, alias in aliases.items():
-        if alias:
-            names[str(device_id)] = str(alias)
+    # Then the user's own name for the device, last so that it outranks every
+    # self-reported one.  Driven off both stores, because an alias can name a
+    # device that has no `PeerInfo` at all (`lan.py` builds a relay row for it
+    # from the internet pairing alone).
+    user_named = {str(getattr(peer, "device_id", "") or "") for peer in peers}
+    user_named.update(str(key) for key in (getattr(cfg, "netpair_aliases", None) or {}))
+    for device_id in user_named:
+        chosen = chosen_device_name(cfg, device_id)
+        if chosen:
+            names[device_id] = chosen
     return names
 
 

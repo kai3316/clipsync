@@ -380,8 +380,8 @@
         '<div v-else-if="diagChecks.length > 0" class="overview-card glass diagnostics-panel__results">' +
           '<div class="diag-scan">' +
             '<div v-for="(chk, i) in diagChecks" :key="chk.id" class="diag-check"' +
-                 ':class="{ \'diag-check--revealed\': i < diagRevealed, \'diag-check--ok\': chk.ok === true && i < diagRevealed, \'diag-check--fail\': chk.ok === false && i < diagRevealed }">' +
-              '<span class="diag-check__status">{{ i < diagRevealed ? (chk.ok ? \'✓\' : \'✕\') : \'·\' }}</span>' +
+                 ':class="{ \'diag-check--revealed\': i < diagRevealed, \'diag-check--ok\': chk.ok === true && i < diagRevealed, \'diag-check--fail\': chk.ok === false && !chk.pending && i < diagRevealed }">' +
+              '<span class="diag-check__status">{{ i < diagRevealed ? (chk.ok ? \'✓\' : (chk.pending ? \'·\' : \'✕\')) : \'·\' }}</span>' +
               '<div class="diag-check__body">' +
                 '<span class="diag-check__label selectable">{{ diagLabel(chk.id) }}</span>' +
                 '<span v-if="i < diagRevealed && diagDetail(chk)" class="diag-check__detail selectable">{{ diagDetail(chk) }}</span>' +

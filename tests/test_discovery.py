@@ -158,6 +158,34 @@ def test_renaming_to_the_same_name_is_not_a_change(monkeypatch):
     assert registered == []
 
 
+def test_the_record_and_the_answer_say_the_same_thing(monkeypatch):
+    """Two places this device states what it is, and one definition behind both.
+
+    The mDNS record is read by whoever happens to be listening, on that peer's
+    schedule; the answer to a ``device_ping`` is read by a device that asked, at
+    the moment it asked.  A device list that flipped between two spellings of one
+    fact would be the defect the answer feature exists to avoid, so both are
+    built from :meth:`Discovery.advertised_facts` — and this is what holds them
+    to it.
+    """
+    fast_addresses(monkeypatch)
+    subject = service()
+
+    facts = subject.advertised_facts()
+    props = subject._service_props(addresses=[])
+
+    assert props[b"v"].decode() == facts["version"]
+    assert props[b"os"].decode() == facts["os"]
+    assert props[b"arch"].decode() == facts["arch"]
+    assert props[b"app"].decode() == facts["app"]
+    # A device that has chosen no name says so the same way in both: the field is
+    # left out of the record, and empty in the answer.
+    if facts["name"]:
+        assert props[b"n"].decode() == facts["name"]
+    else:
+        assert b"n" not in props
+
+
 # ── what we believe of others ───────────────────────────────────────────
 
 
@@ -242,6 +270,87 @@ def test_a_rename_re_announces_as_a_change(monkeypatch):
     subject._handle_service_added(*after)
 
     assert [call[1] for call in seen] == ["厨房的树莓派", "客厅的树莓派"]
+
+
+# ── what a sighting said, for the log to answer with ─────────────────────
+#
+# Reported as "某个设备，在线显示的版本是旧版本。我把它重新升级后，打开 B 设备看这个设备，还是显示
+# 旧版本。"  The record already treats a new version as a change — see the comparison
+# in `_handle_service_added` — so what could not be settled was which of the two
+# readings it was: the new version never arrived, or it arrived and something
+# downstream kept showing the old one.  The line that reports a sighting named the
+# peer, its address and its port, and not what it said, so neither reading could be
+# answered from a log — the one thing the report needs to be checked against.
+
+
+def test_a_peer_that_upgrades_says_so_in_the_log(caplog, monkeypatch):
+    """A version that moves is the fact an upgrade report is checked by."""
+    import logging
+
+    fast_addresses(monkeypatch)
+    subject, seen = discovered()
+    hashed = Discovery._hash_device_id("peer-2").encode()
+
+    with caplog.at_level(logging.INFO, logger="internal.transport.discovery"):
+        subject._handle_service_added(*sighting({
+            b"device_id_hash": hashed, b"n": b"Kais-MacBook", b"v": b"1.0.66",
+        }))
+    assert "version=1.0.66" in caplog.text
+    # A first sighting is not a re-announcement: there is no "was".
+    assert "re-announced" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="internal.transport.discovery"):
+        subject._handle_service_added(*sighting({
+            b"device_id_hash": hashed, b"n": b"Kais-MacBook", b"v": b"1.0.70",
+        }))
+    assert "re-announced with version 1.0.70 (was 1.0.66)" in caplog.text
+    # And the record really moved, which is what the device list reads.
+    assert seen[-1][4] == "1.0.70"
+
+
+def test_a_re_announcement_of_the_same_version_reports_nothing(caplog, monkeypatch):
+    """The control: mDNS re-announces constantly, and most of it carries no news."""
+    import logging
+
+    fast_addresses(monkeypatch)
+    subject, _seen = discovered()
+    properties = {
+        b"device_id_hash": Discovery._hash_device_id("peer-2").encode(),
+        b"n": b"Kais-MacBook",
+        b"v": b"1.0.70",
+    }
+
+    subject._handle_service_added(*sighting(properties))
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="internal.transport.discovery"):
+        subject._handle_service_added(*sighting(properties))
+    assert caplog.text == "", "an unchanged re-announcement is not a version change"
+
+
+def test_a_peer_that_publishes_no_version_reads_as_unknown(caplog, monkeypatch):
+    """A build older than the TXT field must not read as an empty version.
+
+    "unknown" and "unchanged" are different answers, and only one of them means
+    the peer is running something this machine cannot compare against.
+    """
+    import logging
+
+    fast_addresses(monkeypatch)
+    subject, _seen = discovered()
+    hashed = Discovery._hash_device_id("peer-2").encode()
+
+    with caplog.at_level(logging.INFO, logger="internal.transport.discovery"):
+        subject._handle_service_added(*sighting({b"device_id_hash": hashed}))
+    assert "version=unknown" in caplog.text
+
+    # And a peer that starts publishing one later is a change worth naming.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="internal.transport.discovery"):
+        subject._handle_service_added(*sighting({
+            b"device_id_hash": hashed, b"v": b"1.0.70",
+        }))
+    assert "re-announced with version 1.0.70 (was unknown)" in caplog.text
 
 
 def test_the_same_sighting_twice_is_not_reported_twice(monkeypatch):
