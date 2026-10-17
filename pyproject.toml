@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipsync"
+dynamic = ["version"]
+description = "Cross-platform clipboard sharing over LAN"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [{ name = "kai3316" }]
+keywords = ["clipboard", "sync", "lan", "cross-platform"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+
+dependencies = [
+    "zeroconf>=0.132.0",
+    # Read directly for the adapter list behind every local address
+    # (internal/transport/discovery.py); zeroconf depends on it too.
+    "ifaddr>=0.2.0",
+    "cryptography>=42.0.0",
+    "Pillow>=10.0.0",
+    "qrcode>=7.4",
+    "certifi>=2023.7.22",
+    "paho-mqtt>=2.0; python_version < '4'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+# The sidecar is the only Python entry point left.  It used to be `src.main:main`,
+# the Tk application; that application is gone, and this is what the desktop
+# shell actually launches (see clipsync-sidecar.spec and the Tauri sidecar
+# configuration), so the console script starts the same thing.
+clipsync = "src.sidecar_main:main"
+
+[tool.setuptools]
+# Explicit discovery: the top-level `internal/` package and the `src/` package.
+# Auto-discovery once mis-detected a "src-layout" because of `src/main.py` and
+# dropped `internal` from the wheel entirely.  That file is gone, but the
+# explicit list stays: guessing is what broke it.
+packages = {find = {include = ["internal*", "src*"]}}
+
+[tool.setuptools.package-data]
+# Ship the web UI's static assets in the wheel, mirroring clipsync-sidecar.spec's
+# bundle. `static` is a data dir, not a package (no __init__.py), so glob from
+# the parent `internal.web` package or the wheel serves only the fallback page.
+"internal.web" = ["static/**/*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "internal.version.__version__"}
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+
+# Tests prepend the repo root to sys.path then import the package under test,
+# so their imports legitimately sit after a non-import statement (E402).
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 60
+addopts = "-v --tb=short"

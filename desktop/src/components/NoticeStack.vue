@@ -1,0 +1,103 @@
+<script setup lang="ts">
+import { X } from "@lucide/vue";
+import { t } from "../i18n";
+import { createApplicationStore } from "../stores/application";
+
+// The store keys a notice by its runtime event name (machine-readable and
+// stable across languages); the legacy app toasted a translated title, so the
+// mapping lives here, next to the catalog it translates.
+//
+// The `ui.*` keys are not events: they are the window's own answers to its own
+// buttons — a copy, a refresh, a save — which the store raises for the clicks
+// that change nothing a reader can see. They name the page the click was on,
+// the same way an event names the subsystem it came from.
+const props = defineProps<{ store: ReturnType<typeof createApplicationStore> }>();
+
+function title(name: string): string {
+  switch (name) {
+    case "ui.overview": return t("概览");
+    case "ui.history": return t("剪贴板历史");
+    case "ui.favorites": return t("收藏库");
+    case "ui.transfers": return t("文件传输");
+    case "ui.chat": return t("附近聊天");
+    case "ui.devices": return t("设备");
+    case "ui.ai": return t("AI 配置");
+    case "ui.settings": return t("设置");
+    case "ui.sync": return t("剪贴板同步");
+    case "runtime.error": return t("错误");
+    case "pairing.request": return t("配对请求");
+    case "pairing.failed": return t("配对请求");
+    case "transfer.request": return t("文件传输");
+    case "chat.message": return t("附近聊天");
+    case "chat.connect_timeout": return t("附近聊天");
+    case "url.received": return t("收到网址");
+    case "device.connected": return t("设备已连接");
+    case "device.disconnected": return t("设备已断开");
+    case "device.connection_rejected": return t("连接设备");
+    case "device.connection_unreachable": return t("连接设备");
+    case "sync.redacted": return t("剪贴板同步");
+    // A download this window asked for.  Under 文件传输 rather than 剪贴板历史:
+    // what failed is a transfer, and the row that started it is on another page.
+    case "clip.file.denied": return t("文件传输");
+    case "device.security_alert": return t("设备身份变更");
+    // Raised by the window itself after a repair pass, and named as a key like
+    // every event above: this table is what words a notice, so a title that
+    // arrived already translated could not be re-worded here.
+    case "ui.data_recovery": return t("数据修复");
+    // The two answers to an update this window asked a device for, or that
+    // a peer offered: which device spoke and what it will do.  Both arrive
+    // long after the click, and the title has to name the area rather than
+    // show the wire name `update.peer_unavailable` on screen.
+    case "update.peer_unavailable":
+    case "update.peer_notice": return t("软件更新");
+    // A log this window asked a device for: it arrived, the device keeps
+    // its log to itself, or it could not be filed here.  All three are the
+    // same row's answer, and a notice with no title is a machine string.
+    case "log.collected":
+    case "log.failed":
+    case "log.unavailable": return t("设备日志");
+    // An internet pairing completing on the other device, minutes after the
+    // code was submitted from this one; the card re-reads its peers, and
+    // this is what tells the reader which area moved.
+    case "netpair.peer.changed": return t("互联网配对");
+    // The three ways an internet pairing stops moving: a wait nobody answered,
+    // a generated code that outlived its window, and two devices holding
+    // different encryption passwords.  All are the same card's business, and a
+    // notice that showed `netpair.waiting_failed` would be a wire name.
+    case "netpair.waiting_failed":
+    case "netpair.code.expired":
+    case "netpair.decrypt_failed": return t("互联网配对");
+    // A dial that started and then failed.  Under 连接设备, beside the refusal
+    // it is the other half of: one is the peer saying no, this is the call not
+    // reaching it.
+    case "device.connect_failed": return t("连接设备");
+    // A pairing request that ended without pairing — the row keeps the word for
+    // a minute, and this is the same news said where the reader was looking.
+    case "pairing.resolved": return t("配对请求");
+    // The window's own key for the non-destructive identity alert: the device's
+    // certificate is the pinned one, so there is nothing to trust or unpair and
+    // it must not be titled like the certificate-change dialog.
+    case "ui.device_identity": return t("设备身份未能验证");
+    default: return name;
+  }
+}
+</script>
+
+<template>
+  <!-- The legacy webview showed these as toasts; they expire on their own (the
+       store owns the timers), so this is a polite live region, not a dialog.
+       The group is what fades one in: `appear` covers the first, which is the
+       one that arrives along with the stack itself. -->
+  <TransitionGroup v-if="props.store.state.notices.length" tag="ul" name="notice" appear
+    class="notice-stack" role="status" aria-live="polite">
+    <li v-for="notice in props.store.state.notices" :key="notice.id" class="notice strip">
+      <div>
+        <strong>{{ title(notice.title) }}</strong>
+        <p class="small">{{ notice.message }}</p>
+      </div>
+      <button class="icon-button" :aria-label="t('关闭')" :title="t('关闭')" @click="props.store.dismissNotice(notice.id)">
+        <X :size="16" />
+      </button>
+    </li>
+  </TransitionGroup>
+</template>

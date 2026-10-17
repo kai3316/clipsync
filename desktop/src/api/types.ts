@@ -1,0 +1,679 @@
+export interface AppWarning {
+  /** Machine-readable, so the window can decide how loudly to say it. */
+  code: string;
+  /** The builder's fallback wording, and the key it came from. */
+  detail: string;
+  detail_key?: string;
+  guidance: string;
+  guidance_key?: string;
+  /**
+   * The same two sentences resolved through the i18n table.
+   *
+   * The sidecar localizes them because it already holds the table the
+   * diagnostics report is worded from, and two surfaces describing one problem
+   * must not be able to drift.  The window renders these and keeps the raw
+   * fields as the fallback for a language whose table is incomplete.
+   */
+  detail_text?: string;
+  guidance_text?: string;
+}
+
+export interface AppStatus {
+  version: string;
+  health: "starting" | "locked" | "ready" | "stopped";
+  device_name: string;
+  device_id: string;
+  language: string;
+  sync_state: string;
+  runtime_error?: string;
+  capabilities: string[];
+  /**
+   * What this application cannot do on this machine.
+   *
+   * The case it exists for is Linux without `xclip`/`wl-paste`: ClipSync starts,
+   * pairs and lists devices, and never sees a copy.  That failure is invisible
+   * without this, because a user whose history is simply empty has no reason to
+   * open a diagnostics page.
+   */
+  warnings?: AppWarning[];
+  session_id: string;
+  seq: number;
+}
+
+export interface Settings {
+  settings: Record<string, unknown>;
+}
+
+export interface BackupItem {
+  path: string;
+  filename?: string;
+  date?: string;
+  size?: number;
+}
+
+export interface Transfer {
+  id: string;
+  filename: string;
+  size: number;
+  direction: string;
+  status: string;
+  progress?: number;
+  speed?: number;
+  eta?: string;
+  reason?: string;
+  path?: string;
+  peer_id?: string;
+  timestamp?: number;
+  /** Whether an inbound offer was cut for the internet relay rather than for
+   *  the LAN.  Read off the offer's own chunk size by the sidecar, and what
+   *  lets the pending row warn the reader before they accept. */
+  relay?: boolean;
+}
+
+export interface TransfersPage {
+  active: Transfer[];
+  history: Transfer[];
+  speed_test?: Record<string, unknown>;
+}
+
+/**
+ * What a history row's hover card can add about it.
+ *
+ * The card over a text row repeats the preview the row had to clamp.  An image
+ * and a file row have no words to repeat, so their card is this instead: a
+ * picture for the image, a list for the files, and `kind: ""` for every row
+ * there is nothing to add about — which is answered rather than raised, because
+ * a pointer crossing a row is not a request anybody made.
+ */
+export interface HistoryPreview {
+  /** `"image"`, `"files"`, or `""` for a row with nothing more to show. */
+  kind: string;
+  /** A `data:` URL, already downscaled to a card's width.  `""` when there is none. */
+  image: string;
+  /** The *source* picture's size, so a card can caption a 4000 px screenshot as one. */
+  width: number;
+  height: number;
+  files: HistoryPreviewFile[];
+  /** How many files the clip holds, which can exceed the ones listed here. */
+  total: number;
+}
+
+export interface HistoryPreviewFile {
+  name: string;
+  /** In bytes; `0` for a folder. */
+  size: number;
+  kind: "file" | "dir";
+  /**
+   * Whether the file is still on this machine.  Always true for a file that
+   * lives on another device: it never was here, and the card must not read
+   * that as a file that has gone missing.
+   */
+  exists: boolean;
+}
+
+export interface HistoryItem {
+  id: string;
+  timestamp: number;
+  preview: string;
+  content_type: string;
+  pinned: boolean;
+  /** Name of the device the clip synced from — this one, a peer, or the phone. */
+  source_name: string;
+  /**
+   * The device id that name stands for, which is what a download request has to
+   * name.  Empty for a clip captured on this machine.  Optional because the
+   * sidecar only started sending it alongside `FILE_REMOTE` rows.
+   */
+  source_device?: string;
+  /**
+   * What to ask that device for: the id of the history entry *on the device
+   * that published it*, read out of the file offer this row arrived as.
+   *
+   * Not the same number as `id`.  Every device numbers its own rows, so the
+   * peer's row for a clip and this machine's row for it are two unrelated
+   * integers that drift apart by however many clips each captured by itself —
+   * and a request names an entry belonging to the peer's history.  Only a row
+   * with a file on another device has one; empty for every other row, and for
+   * an offer this build cannot read, where the download is refused rather than
+   * attempted with the wrong number.
+   */
+  offer_entry?: string;
+  /**
+   * Which link a remote clip arrived on: `"lan"` for a peer on a direct
+   * connection, `"relay"` for one that came through the internet relay, and
+   * `""` for a clip captured here or a row written before the route was
+   * recorded.  `source_name` cannot answer this — a peer paired both ways sends
+   * over whichever is up.
+   *
+   * Optional because the sidecar only started sending it with the route: a
+   * window running against an older one gets no key at all, and a row with no
+   * route shows no chip rather than a guess.
+   */
+  transport?: string;
+  /** The application it was copied in, when source tracking is on. */
+  source_app: string;
+  /** That application's window title, when source tracking is on. */
+  source_title: string;
+  /** How many times the clip has been pasted back. */
+  paste_count: number;
+}
+
+export interface HistoryPage {
+  session_id: string;
+  seq: number;
+  total: number;
+  offset: number;
+  items: HistoryItem[];
+  /** How many rows each kind chip would show under the current search. */
+  counts?: Record<string, number>;
+  /** Whether any history exists at all, ignoring the search and the filter. */
+  has_history?: boolean;
+}
+
+export interface Device {
+  id: string;
+  name: string;
+  note?: string;
+  paired: boolean;
+  connection_state: string;
+  /**
+   * Whether this machine sends what it copies to this device.
+   *
+   * Off means the clipboard does not leave for it on *either* route — the local
+   * link and the relay both consult the same switch.  Absent from the config
+   * means on, so this is true for anything paired before the setting existed and
+   * for a device just paired.
+   */
+  syncs_to?: boolean;
+  /** Whether a click can place a call to this device — the answer the row's
+   *  配对 and 连接 buttons are drawn on.  Not `connection_state`: that field
+   *  describes the connection that exists, and a device that went quiet but
+   *  left an address behind (a saved address, or one its own call to us
+   *  taught the transport) is 离线 and dialable at the same time.  Gating the
+   *  button on the state instead left it disabled on exactly the devices the
+   *  user needed it for — the ones this machine cannot currently see, whose
+   *  only way back was to be called. */
+  dialable?: boolean;
+  pairing_status: string;
+  pairing_code: string | null;
+  sas: string | null;
+  archived?: boolean;
+  removed_at?: number;
+  /** Set while the transport is working through its reconnect attempts at an
+   *  offline paired peer, with the count the row's chip reports.  Absent on a
+   *  connected row and on one the transport is not retrying. */
+  reconnecting?: boolean;
+  reconnect_attempt?: number;
+  reconnect_max?: number;
+  /** What the peer advertises about itself in its mDNS records.  All three are
+   *  empty for a device this build has never seen announce them — a peer older
+   *  than those fields, or a row with no live sighting — so an empty version
+   *  means unknown, never "up to date". */
+  version?: string;
+  platform?: string;
+  arch?: string;
+  /** Whether this build could update that device — same platform, and a
+   *  version this one is ahead of.  The sidecar decides it: the comparison and
+   *  the platform spelling are both its, and a second implementation of either
+   *  would be a second answer to the same question. */
+  update_available?: boolean;
+  /** Whether this machine has an installer to offer.  It keeps the one its own
+   *  upgrade downloaded, so a machine that has not been upgraded here since
+   *  that feature exists has none, and an offer is a click that cannot be
+   *  kept — the row disables it and says why. */
+  update_cached?: boolean;
+  /** The mirror of `update_available`, and the direction the feature is meant
+   *  to run in: that device is newer, so this one can ask it for the installer.
+   *  Both flags are the same comparison read from opposite ends — at most one is
+   *  ever set — and neither is set when the two builds are level. */
+  update_fetchable?: boolean;
+  /** Why neither of the two flags above is set, as a code the shell renders —
+   *  `<direction>:<cause>`, where direction is the entry to dim (`send` for a
+   *  device this build is ahead of, `fetch` for one it is behind) and cause is
+   *  `too_old` (a build from before this machine may dial it) or
+   *  `other_platform`.  `level` is the whole value for a pair that is level,
+   *  and the empty string means nothing is being withheld: an action is
+   *  offered, or the device advertised no version for the question to have an
+   *  answer.  Decided by the sidecar, like the flags — the shell only says it
+   *  in words. */
+  update_blocked?: string;
+  /** Set on a device paired by internet pairing code, whose only route is the
+   *  public relay.  There is no pinned LAN certificate behind such a device, so
+   *  every LAN-only action — dialing it, pairing it, offering it an update,
+   *  naming it a file-transfer target — is one the card must not offer.
+   *
+   *  On such a row `connection_state` is the relay's own view of the peer,
+   *  because that link is the only one this device has: there is no second
+   *  route for the field to describe.  `relay` is what marks that reading.
+   *
+   *  It marks the row, not the pairing: a device can hold both routes at once,
+   *  and the row it gets is whichever producer drew it — see `relay_paired`,
+   *  which is on every row. */
+  relay?: boolean;
+  /** Whether this device holds an internet pairing, on *every* row and not only
+   *  on the ones the relay pairing drew.  A device paired by code can also be
+   *  paired over the LAN (and the reverse), and one row has to answer for both:
+   *  without this, a device paired by code that appeared on this network kept
+   *  the LAN card, whose chat, test and send-URL actions are each gated on the
+   *  LAN pairing it does not have. */
+  relay_paired?: boolean;
+  /** Whether the relay itself sees that device up.  The same reading
+   *  `connection_state` carries on a relay-only row, and the relay's answer on
+   *  a row that has a local route of its own. */
+  relay_online?: boolean;
+  /** The name the user gave an internet-paired device.  Empty when there is
+   *  none, which `name` cannot say: it falls back to the peer's own name. */
+  alias?: string;
+  /** When the relay last heard from an internet-paired device. */
+  last_seen?: number;
+}
+
+export interface DeviceProbeChannel {
+  channel: "lan" | "relay";
+  ok: boolean;
+  latency_ms: number | null;
+  error: string | null;
+}
+
+export interface DeviceProbeResult {
+  ok: boolean;
+  results: DeviceProbeChannel[];
+  error?: string;
+}
+
+export interface DeviceCertificate {
+  device_id: string;
+  device_name: string;
+  fingerprint_short: string;
+  fingerprint: string;
+  paired: boolean;
+}
+
+export interface InternetPairingPeer {
+  peer_id: string;
+  name: string;
+  alias: string;
+  online: boolean;
+  last_seen?: number;
+  paired: boolean;
+}
+
+export interface InternetPairingStatus {
+  generated_code?: string | null;
+  peers: InternetPairingPeer[];
+  /** Whether internet sync is on, which is what decides whether the relay is
+   *  up at all.  Optional because a sidecar older than the switch sends no
+   *  key, and the page reads that as "off" rather than as "unknown". */
+  enabled?: boolean;
+  /**
+   * How many seconds the generated code above still has left, when the sidecar
+   * knows.  A code is only worth showing while it can still be typed; the card
+   * says so beside it rather than letting it vanish on the next poll with no
+   * hint that there was a deadline.  Optional: an older sidecar sends no key.
+   */
+  pending_ttl?: number | null;
+  /**
+   * Codes entered on this machine that the other side has not answered yet.
+   *
+   * The other direction from `generated_code`: that is a code *we* made and are
+   * waiting for somebody to type, this is a code somebody made and we typed.
+   * Distinct from `peers` because it is not a device — the entry is keyed by the
+   * 4-char tag the code carried, which cannot be reached, sent to, or renamed
+   * until the partner's reply supplies their real device id.  It is what the
+   * page shows between submitting a code and the pairing completing, which is
+   * the only thing the reader has to go on in that window.
+   *
+   * Optional: a sidecar that predates it sends no key at all.
+   */
+  waiting?: InternetPairingWait[];
+}
+
+export interface InternetPairingWait {
+  peer_id: string;
+  /** Learned from the partner's hello, empty until it arrives. */
+  name?: string;
+  /** When the code was entered, as a unix timestamp; null after a restart,
+   * which loses the clock but not the wait. */
+  since?: number | null;
+  /**
+   * When this wait gives up, as a unix timestamp — the sidecar answers the
+   * confirmation with a timeout and says when, so the card can show the reader
+   * how long is left instead of only "waiting".  Optional like `since`.
+   */
+  deadline?: number | null;
+}
+
+/**
+ * The payload of a `device.security_alert` event.
+ *
+ * `changed` is the half the certificate dialog must not guess at: `true` means
+ * the device presented a certificate that really is not the pinned one (the
+ * reinstall/reset case, where trust can be re-established), while `false` means
+ * the certificate is exactly the one already pinned and the connection failed a
+ * different check (an unproven identity claim — see the audit's 严重-8).  A
+ * `false` alert is non-destructive news and must not offer to re-pin or unpair.
+ * Absent on a sidecar older than the field, where the alert only ever meant the
+ * destructive case.
+ */
+export interface DeviceSecurityAlert {
+  device_id: string;
+  name: string;
+  code: string;
+  can_trust: boolean;
+  changed?: boolean;
+}
+
+/** The payload of a `device.connect_failed` event.
+ *
+ * A dial that started and then failed, which is not the same refusal as
+ * `device.connection_rejected` (the peer answering "no") or
+ * `device.connection_unreachable` (nowhere to dial at all).  `reason` is the
+ * transport's code; the shell words it per code. */
+export interface DeviceConnectFailed {
+  device_id: string;
+  name?: string;
+  reason: string;
+}
+
+/**
+ * What a relay broker test found, one row per broker tried.
+ *
+ * The rows come back sorted by the sidecar — reachable first, then by ascending
+ * latency — which is the order the old panel rendered and the reason this type
+ * carries no ordering of its own for the view to re-apply.
+ *
+ * `summary` is deliberately absent: the sidecar returns the two counts and each
+ * front words its own sentence, because the old panel's English "2/3 reachable"
+ * is not a sentence this window can show in Chinese.
+ */
+export interface RelayTestResult {
+  results: RelayProbeRow[];
+  reachable: number;
+  total: number;
+}
+
+export interface RelayProbeRow {
+  endpoint: string;
+  ok: boolean;
+  /** Milliseconds to a completed handshake; null where the probe never got one. */
+  latency_ms?: number | null;
+  /** Why it failed, in the probe's own words — shown as received. */
+  detail?: string;
+}
+
+export interface SidecarEvent {
+  type: "event" | "resync";
+  name?: string;
+  session_id: string;
+  seq?: number;
+  data?: Record<string, unknown>;
+}
+
+export interface BridgeError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface FavoriteSummary {
+  id: string;
+  title: string;
+  preview: string;
+  group: string;
+  position: number;
+  created: number;
+  updated: number;
+}
+
+export interface Favorite extends Omit<FavoriteSummary, "preview"> {
+  content: string;
+}
+
+export interface FavoritesPage {
+  items: FavoriteSummary[];
+  /** How many favourites match the search and group filter, not the page. */
+  total: number;
+  offset: number;
+  groups: string[];
+  /** Every group's size, counted over the whole library rather than the
+   * search, so the sidebar does not renumber itself while the reader types.
+   * A group with nothing in it yet is present and counts zero. */
+  group_counts?: Record<string, number>;
+  /** The whole library's size, for the "all groups" row. */
+  library_total?: number;
+  session_id: string;
+  seq: number;
+}
+
+export interface ChatSession {
+  session_id: string;
+  peer_id: string;
+  peer_name: string;
+  fingerprint_short: string;
+  status: string;
+  created_ts: number;
+  last_activity_ts: number;
+  unread: number;
+  online: boolean;
+  last_preview: string;
+  peer_typing?: boolean;
+}
+
+export interface ChatEntry {
+  entry_id: string;
+  kind: string;
+  outgoing: boolean;
+  ts: number;
+  text: string;
+  text_key: string;
+  fmt: Record<string, unknown>;
+  file_name: string;
+  file_size: number;
+  mime: string;
+  status: string;
+  fraction: number;
+  saved_path: string;
+  transfer_id: string;
+  msg_id: string;
+}
+
+export interface ChatSessionsPage {
+  sessions: ChatSession[];
+  muted?: string[];
+  // Whether nearby devices may send without asking.  An entry sits at
+  // `await_accept` for an instant in both modes, so this is what says whether
+  // the Accept button under it is one the user is actually expected to press.
+  open_to_all?: boolean;
+}
+
+export interface ChatMessagesPage {
+  messages: ChatEntry[];
+}
+
+export type DiagnosticStatus = "ok" | "warn" | "fail";
+
+// The sidecar resolves the report's i18n keys for the language the app is set
+// to, attaching `*_text` fields; the `*_key`/`*_params` pairs it resolved from
+// stay, because they are what the report is built out of -- `report.py` writes
+// keys and a raw fallback, never prose -- so a payload someone else has to
+// render in another language is still all there.
+export interface DiagnosticCheck {
+  id: string;
+  ok: boolean;
+  /** Not a pass and not a failure: what this check reads is still coming up.
+   *
+   * Only the ones the application brings up asynchronously behind the report
+   * set it — `advertising` is the one today, false for as long as our own mDNS
+   * record is still being published.  `summary` leaves these out of the
+   * verdict, so a surface that reads `ok` alone must do the same. */
+  pending?: boolean;
+  detail: string;
+  guidance?: string | null;
+  detail_key?: string;
+  detail_params?: Record<string, unknown>;
+  guidance_key?: string | null;
+  guidance_params?: Record<string, unknown>;
+  label_text?: string;
+  detail_text?: string;
+  guidance_text?: string;
+}
+
+export interface DiagnosticItem {
+  id: string;
+  status: DiagnosticStatus;
+  detail: string;
+  hint?: string | null;
+  detail_key?: string;
+  hint_key?: string;
+  label_text?: string;
+  detail_text?: string;
+  hint_text?: string;
+}
+
+export interface DiagnosticGroup {
+  label_key: string;
+  label_text?: string;
+  items: DiagnosticItem[];
+}
+
+export interface DiagnosticsReport {
+  v2: boolean;
+  summary: DiagnosticStatus;
+  checks: DiagnosticCheck[];
+  groups: Record<string, DiagnosticGroup>;
+  discovery_running: boolean;
+  server_running: boolean;
+  connected_count: number;
+  paired_count: number;
+  web_companion_running: boolean;
+  web_port: number;
+  lan_ip: string;
+  os: string;
+  version: string;
+}
+
+export type DiagnosticAction = "firewall" | "local_network";
+
+// The update lifecycle is owned by the sidecar; this client only mirrors it.
+// `fraction` is 0–1 and `downloaded`/`total` are bytes (0 when unknown).
+// `installing` is the one phase the sidecar never emits: replacing the running
+// installation is the host's job, and it publishes that phase itself.
+export type UpdatePhase = "idle" | "downloading" | "ready" | "installing" | "failed";
+
+export interface UpdateState {
+  phase: UpdatePhase;
+  fraction: number;
+  downloaded: number;
+  total: number;
+  error: string;
+  version: string;
+  path: string;
+  /** Which digest settled the staged archive: "release" for the published
+   *  asset's, "peer_verified" for the sending device's own when the release
+   *  server could not be reached.  Empty while nothing is staged, and on a
+   *  sidecar older than the field — both of which read as "nothing to say",
+   *  which is what the card does with it. */
+  verified?: string;
+}
+
+export interface UpdateStatusResult {
+  state: UpdateState;
+}
+
+export interface UpdateCheckResult {
+  available: boolean;
+  latest: string;
+  current: string;
+  url: string;
+  /** Whether this build can install what it finds in place, which only the
+   *  host knows: it is the updater plugin matching this machine's bundle
+   *  against the release manifest.  Absent when the plugin could not read the
+   *  manifest at all, which is not the same answer as `false` — the card offers
+   *  the in-place install for everything but a definite no, so an absent field
+   *  reads as "try it" rather than "replace the files by hand". */
+  installable?: boolean;
+  /** Why the check has no answer, when it has none — a sentence to show a
+   *  reader, in this window's language.  Empty when `latest` is a real answer.
+   *  Optional for the same reason as `installable` — an older host does not
+   *  send it, and the panel falls back to the sentence it used before. */
+  error?: string;
+  /** The same failure as a code: `rate_limited`, `unreachable`, `refused`,
+   *  `malformed`, or empty when it has no name here. */
+  reason?: string;
+  /** The failure as the server or the OS worded it, for a bug report rather
+   *  than for a status bar. */
+  detail?: string;
+}
+
+export interface UpdateInstallResult {
+  ok: boolean;
+  /** False only when there was nothing to install — a reply at all means the
+   *  install did not happen, because a successful one replaces this process. */
+  installed: boolean;
+  /** `up_to_date` when the manifest had nothing newer than what is running, and
+   *  `manual` when the archive is staged but this build cannot replace itself
+   *  with that kind of file — a `.dmg`, a `.deb`, an AppImage.  Optional
+   *  because an older host sends neither. */
+  reason?: string | null;
+}
+
+export interface UpdateDownloadResult {
+  ok: boolean;
+  started: boolean;
+  error?: string | null;
+}
+
+export interface UpdateOpenFolderResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** One artifact a repair moved aside: `artifact` is `config` or `history`, and
+ * `reason` is a stable code (`unreadable`, `identity`, `history_corrupt`,
+ * `history_identityless`, `history_identity_lost`) the UI turns into text. */
+export interface RecoveryItem {
+  artifact: string;
+  reason: string;
+  /** The archived names, `config.json.corrupt-<stamp>` style. */
+  files: string[];
+}
+
+export interface RecoveryResult {
+  /** Empty when the data directory was already usable. */
+  items: RecoveryItem[];
+}
+
+/** One clip in the overview's activity feed.
+ *
+ * The same row the history page lists, only with a shorter preview — the feed
+ * is the newest few of that list.  It used to be a shape of its own (`text` /
+ * `type` / `time`), which named nothing and so could do nothing: the row could
+ * only jump to the page that owns the real ones. */
+export type OverviewRecentItem = HistoryItem;
+
+/** The dashboard counters the phone Companion and the legacy web dashboard
+ * both render, now read by the window's own overview page. */
+export interface Overview {
+  connected_count: number;
+  paired_count: number;
+  discovered_count: number;
+  connected_names: string[];
+  history_count: number;
+  history_today: number;
+  history_pinned: number;
+  history_images: number;
+  active_transfers: number;
+  transfer_completed: number;
+  discovering: boolean;
+  visible: boolean;
+  sync_enabled: boolean;
+  web_enabled: boolean;
+  uptime_seconds: number;
+  local_ip: string;
+  port: number;
+  platform: string;
+  version: string;
+  network_type: string;
+  network_detail: string;
+  recent_items: OverviewRecentItem[];
+}

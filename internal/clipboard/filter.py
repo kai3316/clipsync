@@ -1,0 +1,398 @@
+"""Sensitive content filtering for clipboard data."""
+
+import logging
+import re
+from dataclasses import replace
+
+from internal.clipboard import file_ref
+from internal.clipboard.format import HISTORY_ONLY_TYPES, ClipboardContent, ContentType
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Compiled regex patterns, grouped by sensitivity category.
+# ---------------------------------------------------------------------------
+
+_CREDIT_CARD_RE = re.compile(
+    r"\b"
+    r"(?:"
+    # Visa: 13 or 16 digits, starts with 4
+    r"4\d{3}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"  # 16 digits
+    r"|4\d{3}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1}"  # 13 digits
+    # MasterCard: 16 digits, starts with 51-55 or 2221-2720
+    r"|5[1-5]\d{2}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"
+    r"|2(?:2[2-9]\d|[3-6]\d{2}|7[01]\d|720)"
+    r"[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"
+    # Amex: 15 digits, starts with 34 or 37
+    r"|3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}"
+    # Discover: 16-19 digits, starts with 6011, 65, or 644-649
+    r"|6(?:011|5\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}"  # 16 digits
+    r"|6(?:011|5\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1,3}"  # 17-19
+    r")\b"
+)
+
+_SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+
+_API_KEY_RE = re.compile(
+    r"(?:"
+    # OpenAI / Stripe style: sk-...
+    r"sk-[a-zA-Z0-9_\-]{16,}"
+    # GitHub tokens
+    r"|gh[pousr]_[a-zA-Z0-9]{16,}"
+    r"|github_pat_[a-zA-Z0-9_]{16,}"
+    # Slack tokens
+    r"|xox[baprs]-[a-zA-Z0-9\-]{16,}"
+    # AWS access key id
+    r"|AKIA[0-9A-Z]{16}"
+    # JWT / session tokens (three base64url segments)
+    r"|eyJ[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}\.[a-zA-Z0-9_\-]{8,}"
+    # name=value / name:value secret assignments
+    r'|(?:api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|\bsecret|\btoken|\bkey)\s*[=:]\s*["\']?\s*[a-zA-Z0-9_\-\.]{16,}["\']?'
+    # Authorization / Bearer headers
+    r"|authorization\s*[=:]\s*(?:Bearer\s+)?[a-zA-Z0-9_\-\.]{16,}"
+    r"|Bearer\s+[a-zA-Z0-9_\-\.]{16,}"
+    # Generic key- prefix (e.g. key-...)
+    r"|key-[a-zA-Z0-9_\-]{16,}"
+    r")",
+    re.IGNORECASE,
+)
+
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----"
+    r"[\s\S]*?"
+    r"-----END\s+(?:RSA\s+)?PRIVATE\s+KEY-----",
+)
+
+_PASSWORD_RE = re.compile(
+    r'\b(?:password|passwd|pwd)\s*[=:]\s*["\']?\s*\S+["\']?',
+    re.IGNORECASE,
+)
+
+# Bare email addresses (PII caught even without a key= prefix).
+_EMAIL_RE = re.compile(
+    r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b",
+)
+
+
+# ---------------------------------------------------------------------------
+# RTF → visible-text extraction (best effort, for detection only)
+# ---------------------------------------------------------------------------
+
+# \'hh byte escapes (codepage-dependent — dropped rather than mis-decoded).
+_RTF_HEX_ESCAPE_RE = re.compile(r"\\'[0-9a-fA-F]{2}")
+# Line/paragraph-ish control words must leave a space behind so digits on
+# either side do not fuse into a fake match.
+_RTF_BREAK_RE = re.compile(r"\\(?:par|line|tab|page|sect|row|cell)\d* ?")
+# Remaining control words (\pard, \f0, \fs20, \bin1234, ...).  Note \bin's
+# raw data bytes are NOT removed — they may inject junk into the extracted
+# text; that is acceptable for best-effort detection.
+_RTF_CONTROL_WORD_RE = re.compile(r"\\[a-zA-Z]+-?\d* ?")
+# Control symbols (\{, \}, \\, \*, ...) not caught by the replacements below.
+_RTF_CONTROL_SYMBOL_RE = re.compile(r"\\")
+
+
+def _rtf_to_text(data: bytes) -> str:
+    """Reduce an RTF payload to its visible text (best effort).
+
+    Detection aid only — the result feeds the same regex patterns as TEXT,
+    it is never displayed or stored.  Group braces, control words and hex
+    escapes are dropped; literal runs (card numbers, tokens, e-mail
+    addresses) survive intact.
+    """
+    text = data.decode("ascii", errors="replace")
+    # Optional-destination groups ({\*\generator ...}) are never displayed.
+    text = re.sub(r"\{\\\*[^{}]*\}", " ", text)
+    # Escaped literals first (sentineled) so the generic passes cannot eat
+    # their backslashes the wrong way.
+    text = text.replace("\\\\", "\x00").replace("\\{", "\x01").replace("\\}", "\x02")
+    text = _RTF_HEX_ESCAPE_RE.sub(" ", text)
+    text = _RTF_BREAK_RE.sub(" ", text)
+    text = _RTF_CONTROL_WORD_RE.sub(" ", text)
+    text = _RTF_CONTROL_SYMBOL_RE.sub(" ", text)
+    text = text.replace("{", " ").replace("}", " ")
+    text = text.replace("\x00", "\\").replace("\x01", "{").replace("\x02", "}")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+ALL_CATEGORIES = ["credit_card", "ssn", "api_key", "private_key", "password"]
+
+# The literal placeholder that replaces redacted sensitive content in
+# synced clipboard text.  Keep the string in sync with the sub pattern in
+# ``ContentFilter.filter_content`` below.
+FILTERED_MARKER = "[FILTERED]"
+
+
+def _luhn_valid(number: str) -> bool:
+    """Return True if *number* passes the Luhn checksum.
+
+    A credit-card-shaped digit string is only a real card if it also passes
+    Luhn — a 16-digit order/invoice number must not be redacted as a card.
+    """
+    digits = [int(c) for c in number if c.isdigit()]
+    if len(digits) < 13:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+class ContentFilter:
+    """Detect and optionally strip sensitive content from clipboard data.
+
+    The filter operates on text-based clipboard formats (TEXT, HTML and
+    RTF — the latter via a best-effort text extraction).  Binary formats
+    (IMAGE_PNG) are left untouched.  An RTF payload that matches a pattern
+    cannot be rewritten in place meaningfully, so it is dropped entirely
+    rather than shipped unredacted next to a ``[FILTERED]`` TEXT payload.
+    """
+
+    def __init__(self, enabled_categories: list[str] | None = None) -> None:
+        self._all_patterns: list[tuple[str, re.Pattern]] = [
+            ("credit_card", _CREDIT_CARD_RE),
+            ("ssn", _SSN_RE),
+            ("api_key", _API_KEY_RE),
+            # Bare emails are their own category, and the noisiest one:
+            # everyday text (signatures, pasted correspondence) is full of
+            # addresses, so redacting them corrupted far more legitimate clips
+            # on the receiving end than it protected anything.  It has never
+            # been part of any default set, and no more is any other category
+            # (see the constructor); "email" is a deliberate opt-in.
+            ("email", _EMAIL_RE),
+            ("private_key", _PRIVATE_KEY_RE),
+            ("password", _PASSWORD_RE),
+        ]
+        # Redaction is OFF by default: None (unconfigured) and [] (an explicit
+        # empty selection) both enable nothing, and only a named category is
+        # ever redacted.  Rewriting what a user copies on its way to another
+        # device is a decision for that user, not a default to opt out of --
+        # and a pattern that fires on an everyday clip is read, on the
+        # receiving end, as the clipboard having lost the text.
+        self._enabled = list(enabled_categories or [])
+
+    @property
+    def enabled_categories(self) -> list[str]:
+        return list(self._enabled)
+
+    @enabled_categories.setter
+    def enabled_categories(self, categories: list[str] | None) -> None:
+        # Same rule as the constructor: unconfigured is off, and [] is off.
+        self._enabled = list(categories or [])
+
+    @property
+    def is_active(self) -> bool:
+        return len(self._enabled) > 0
+
+    def _active_patterns(self) -> list[tuple[str, re.Pattern]]:
+        return [(c, p) for c, p in self._all_patterns if c in self._enabled]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _bytes_to_str(data: bytes) -> str:
+        """Decode bytes to string, falling back to latin-1 on failure."""
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode("latin-1")
+
+    @staticmethod
+    def _textual_types() -> tuple[ContentType, ...]:
+        """Return the content types that carry text (filterable).
+
+        RTF counts too: its markup is never pattern-matched, so a secret
+        pasted only into the RTF body would otherwise ride to peers
+        unredacted alongside a redacted TEXT payload.  RTF is inspected
+        through ``_rtf_to_text`` instead of a raw decode.
+
+        URL counts for the same reason as RTF: since links cross devices it is
+        a payload that leaves this machine, and a link can carry the thing the
+        filter is for — a password in a query string, an internal host, a
+        signed download address.  A hidden offer's *names* are checked too, but
+        separately: see `_offered_names_sensitive`.
+        """
+        return (ContentType.TEXT, ContentType.HTML, ContentType.RTF, ContentType.URL)
+
+    def _matches_text(self, text: str) -> bool:
+        """True if any active pattern matches *text*.
+
+        One place, because the same loop answers for a plain text payload, for
+        RTF's extracted body, for a URL and for the names in a file offer — and
+        a rule kept in four copies is four rules, three of which drift.
+        """
+        for category, pattern in self._active_patterns():
+            if category == "credit_card":
+                # The bare shape matches order numbers and timestamps; only the
+                # checksum makes it a card number.
+                if any(_luhn_valid(m.group(0)) for m in pattern.finditer(text)):
+                    return True
+            elif pattern.search(text):
+                return True
+        return False
+
+    def _offered_names_sensitive(self, content: ClipboardContent) -> bool:
+        """True if a remote-file offer's names match an active pattern.
+
+        A name cannot be redacted into something useful — the file arrives
+        under its real name, so an edited name would only hide the problem from
+        the person who set the filter — which is why a match here takes the
+        whole offer off the wire rather than rewriting it.
+        """
+        names = self._offered_names(content)
+        return bool(names) and self._matches_text(names)
+
+    @staticmethod
+    def _inspectable_text(ct: ContentType, data: bytes) -> str:
+        """Return the pattern-matching text for one content type."""
+        if ct == ContentType.RTF:
+            return _rtf_to_text(data)
+        return ContentFilter._bytes_to_str(data)
+
+    def _payload_texts(self, content: ClipboardContent) -> list[str]:
+        """Every string in *content* the patterns are run against.
+
+        Detection walks this list rather than the content types directly, so
+        that "what counts as inspectable" is answered once.  The file offer's
+        names are the last entry and the odd one out: an offer carries no text
+        payload, but its names are the only part of a file that crosses the
+        wire, and a name can be the sensitive part — "裁员名单.xlsx" is exactly
+        what this filter is for.
+        """
+        texts = [
+            self._inspectable_text(ct, data)
+            for ct in self._textual_types()
+            if (data := content.types.get(ct)) is not None
+        ]
+        names = self._offered_names(content)
+        if names:
+            texts.append(names)
+        return texts
+
+    def _offered_names(self, content: ClipboardContent) -> str:
+        """The names in a file offer, space-joined — "" when there is no offer."""
+        data = content.types.get(ContentType.FILE_REMOTE)
+        if data is None:
+            return ""
+        parsed = file_ref.parse(data)
+        if not parsed:
+            return ""
+        return " ".join(item["name"] for item in parsed["files"])
+
+    def _rtf_is_sensitive(self, data: bytes) -> bool:
+        """True if the RTF payload's visible text matches an active pattern."""
+        if not self._enabled:
+            return False
+        return self._matches_text(_rtf_to_text(data))
+
+    # ------------------------------------------------------------------
+    # Detection
+    # ------------------------------------------------------------------
+
+    def is_sensitive(self, content: ClipboardContent) -> bool:
+        """Check if clipboard content contains sensitive data.
+
+        TEXT, HTML, RTF (extracted) and URL are inspected, and so are the names
+        in a file offer — including them here matters as much as it does in
+        `filter_content`, because this is what decides whether a clip is
+        redacted at all.  Only enabled categories are checked.  Returns True as
+        soon as any pattern matches.
+        """
+        if not self._enabled:
+            return False
+        return any(self._matches_text(text) for text in self._payload_texts(content))
+
+    def describe_sensitivity(self, content: ClipboardContent) -> list[str]:
+        """Return a deduplicated list of matched sensitivity category names."""
+        texts = self._payload_texts(content) if self._enabled else []
+        matched: list[str] = []
+        for text in texts:
+            for category, pattern in self._active_patterns():
+                if category in matched:
+                    continue
+                if category == "credit_card":
+                    if any(_luhn_valid(m.group(0)) for m in pattern.finditer(text)):
+                        matched.append(category)
+                elif pattern.search(text):
+                    matched.append(category)
+        return matched
+
+    # ------------------------------------------------------------------
+    # Sanitisation
+    # ------------------------------------------------------------------
+
+    def _redact(self, text: str) -> str:
+        """Replace every active-pattern match in *text* with ``[FILTERED]``."""
+        for _category, pattern in self._active_patterns():
+            if _category == "credit_card":
+                text = pattern.sub(
+                    lambda m: FILTERED_MARKER if _luhn_valid(m.group(0)) else m.group(0),
+                    text,
+                )
+            else:
+                text = pattern.sub(FILTERED_MARKER, text)
+        return text
+
+    def filter_content(self, content: ClipboardContent) -> ClipboardContent:
+        """Return a sanitized copy of *content*.
+
+        Every match of every enabled pattern in TEXT and HTML content is
+        replaced with ``[FILTERED]``.  A matching RTF payload is dropped
+        instead of rewritten — the redaction ran over extracted visible
+        text, so splicing ``[FILTERED]`` back into RTF markup is not
+        meaningful.  An RTF-only clip that loses its payload keeps its
+        redacted plain text as a TEXT format so it still syncs.
+        """
+        filtered_types: dict[ContentType, bytes] = {}
+
+        for ct in self._textual_types():
+            data = content.types.get(ct)
+            if data is None:
+                continue
+            if ct == ContentType.RTF:
+                if not self._rtf_is_sensitive(data):
+                    filtered_types[ct] = data  # clean RTF passes through
+                continue
+            filtered_types[ct] = self._redact(self._inspectable_text(ct, data)).encode("utf-8")
+
+        for ct, data in content.types.items():
+            if ct in self._textual_types():
+                continue
+            if ct in HISTORY_ONLY_TYPES and self._offered_names_sensitive(content):
+                # Nothing in this payload can be edited into something safe —
+                # the file arrives under its real name whatever the offer says
+                # — so an offer whose names match takes the whole offer off the
+                # wire instead of going out unredacted beside a [FILTERED] text.
+                logger.debug("Dropping a file offer whose names match the filter")
+                continue
+            filtered_types[ct] = data
+
+        if (
+            ContentType.RTF in content.types
+            and ContentType.RTF not in filtered_types
+            and ContentType.TEXT not in filtered_types
+            and ContentType.HTML not in filtered_types
+        ):
+            plain = self._redact(_rtf_to_text(content.types[ContentType.RTF]))
+            if plain:
+                filtered_types[ContentType.TEXT] = plain.encode("utf-8")
+
+        # ``replace`` rather than a field-by-field rebuild, for the reasons the
+        # old version spelled out per field: the image format hint has to
+        # survive or a BMP/TIFF copy is re-labelled PNG (and zlib-compressed)
+        # on the wire, the transport has to survive because it is stamped
+        # before filtering runs — and the entry id has to survive because it is
+        # what a file offer names.  Copying the fields by hand meant every
+        # field added later had to remember to add itself here; ``replace``
+        # cannot forget one.
+        return replace(content, types=filtered_types)

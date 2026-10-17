@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-internet-pairing-rename"
+description = "Enables the internet_pairing_rename command without any pre-configured scope."
+commands.allow = ["internet_pairing_rename"]
+
+[[permission]]
+identifier = "deny-internet-pairing-rename"
+description = "Denies the internet_pairing_rename command without any pre-configured scope."
+commands.deny = ["internet_pairing_rename"]

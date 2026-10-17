@@ -1,0 +1,1569 @@
+"""The Python side of the web panel's wire and its file/multipart handling.
+
+  * the frames the server writes to a browser: the PING a keepalive sends, the
+    delivered count broadcast() reports, the history_item_deleted payload, and
+    which clients the heartbeat collects;
+  * a queued dialog's response window starting at the flush that showed it;
+  * DELETE /api/files: name confinement (traversal, directories, absolute
+    paths) and exact-name deletion;
+  * the multipart parser and the declared-length check behind uploads;
+  * GET /api/logs (tail semantics and token redaction) and the favourites
+    export endpoint's file output;
+  * two request-path/field-type hardening cases that decide the status a
+    client sees;
+  * that starting the companion resolves no names -- binding its socket must
+    not make the OS look this machine up.
+"""
+
+import contextlib
+import http.client
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from internal.clipboard.format import ClipboardContent, ContentType
+from internal.clipboard.history_db import ClipboardHistoryDB
+from internal.web import server as web_server
+from internal.web.dialog import DialogManager
+from internal.web.routes import dispatch
+from internal.web.ws import WebSocketClient, WebSocketManager
+
+# ── Helpers ────────────────────────────────────────────────────────────
+
+
+def _body(obj) -> bytes:
+    return json.dumps(obj).encode("utf-8")
+
+
+def _make_db(tmp_path) -> ClipboardHistoryDB:
+    db = ClipboardHistoryDB(
+        storage_path=str(tmp_path / "history.db"),
+        max_entries=50,
+    )
+    db.add(
+        ClipboardContent(types={ContentType.TEXT: b"hello"}, timestamp=1000.0),
+        source_app=None,
+    )
+    return db
+
+
+def _read_frame(sock):
+    """Read one server→client WS frame: returns (opcode, payload_bytes)."""
+    header = sock.recv(2)
+    if len(header) < 2:
+        return None
+    opcode = header[0] & 0x0F
+    length = header[1] & 0x7F
+    if length == 126:
+        ext = sock.recv(2)
+        length = struct.unpack("!H", ext)[0]
+    elif length == 127:
+        ext = sock.recv(8)
+        length = struct.unpack("!Q", ext)[0]
+    payload = b""
+    while len(payload) < length:
+        chunk = sock.recv(length - len(payload))
+        if not chunk:
+            break
+        payload += chunk
+    return opcode, payload
+
+
+# ── WS keepalive + delivery counts ─────────────────────────────────────
+
+
+def test_ws_send_ping_writes_ping_frame():
+    a, b = socket.socketpair()
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        assert client.send_ping() is True
+        opcode, payload = _read_frame(b)
+        assert opcode == 0x9  # PING
+        assert payload == b""
+    finally:
+        a.close()
+        b.close()
+
+
+def test_ws_broadcast_returns_delivered_count():
+    a, b = socket.socketpair()
+    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        with mgr._lock:
+            mgr._clients.append(client)
+        assert mgr.broadcast("toast", {"message": "hi"}) == 1
+        opcode, payload = _read_frame(b)
+        assert opcode == 0x1
+        assert json.loads(payload)["type"] == "toast"
+        # A closed client does not count as delivered.
+        client._closed = True
+        assert mgr.broadcast("toast", {"message": "hi"}) == 0
+    finally:
+        mgr.shutdown()
+        a.close()
+        b.close()
+
+
+def _masked_frame(opcode: int, payload: bytes, *, final: bool = True) -> bytes:
+    """One client-to-server frame, masked as RFC 6455 §5.1 requires."""
+    mask = b"\x11\x22\x33\x44"
+    head = bytes([(0x80 if final else 0x00) | opcode])
+    length = len(payload)
+    if length < 126:
+        head += bytes([0x80 | length])
+    elif length < 65536:
+        head += bytes([0x80 | 126]) + struct.pack("!H", length)
+    else:
+        head += bytes([0x80 | 127]) + struct.pack("!Q", length)
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return head + mask + masked
+
+
+def _read_frame(sock):
+    """Read one server-to-client frame; returns (opcode, payload)."""
+    head = sock.recv(2)
+    opcode = head[0] & 0x0F
+    length = head[1] & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", sock.recv(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", sock.recv(8))[0]
+    payload = b""
+    while len(payload) < length:
+        chunk = sock.recv(length - len(payload))
+        if not chunk:
+            break
+        payload += chunk
+    return opcode, payload
+
+
+def _read_frame(sock):
+    """Read one server-to-client frame; returns (opcode, payload)."""
+    head = sock.recv(2)
+    opcode = head[0] & 0x0F
+    length = head[1] & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", sock.recv(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", sock.recv(8))[0]
+    payload = b""
+    while len(payload) < length:
+        chunk = sock.recv(length - len(payload))
+        if not chunk:
+            break
+        payload += chunk
+    return opcode, payload
+
+
+def test_ws_reassembles_a_fragmented_message():
+    """A message split across frames arrives whole (RFC 6455 §5.4).
+
+    The FIN bit used to be read and never consulted, and a continuation frame
+    fell into the unknown-opcode branch, so a client that fragmented got only the
+    first piece — silently truncated, with no error to notice.  Our own page
+    always sends one frame, which is why nothing caught it.
+    """
+    a, b = socket.socketpair()
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        b.sendall(_masked_frame(0x1, b'{"first":', final=False))
+        b.sendall(_masked_frame(0x0, b'"second"}'))
+        assert client.recv_frame(timeout=1.0) == b'{"first":"second"}'
+    finally:
+        a.close()
+        b.close()
+
+
+def test_ws_ignores_a_ping_that_arrives_mid_message():
+    """A keepalive between fragments must not end the message."""
+    a, b = socket.socketpair()
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        b.sendall(_masked_frame(0x1, b"one", final=False))
+        b.sendall(_masked_frame(0x9, b"keepalive"))
+        b.sendall(_masked_frame(0x0, b"two"))
+        assert client.recv_frame(timeout=1.0) == b"onetwo"
+        # The ping was answered, as §5.5.2 requires.
+        opcode, payload = _read_frame(b)
+        assert opcode == 0xA
+        assert payload == b"keepalive"
+    finally:
+        a.close()
+        b.close()
+
+
+def test_ws_closes_on_an_unmasked_client_frame():
+    """§5.1: every client-to-server frame must be masked.
+
+    The old code used an unmasked payload as if it were text, which is what a
+    naive non-browser client would send and what the spec says must fail the
+    connection with 1002.
+    """
+    a, b = socket.socketpair()
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        b.sendall(bytes([0x81, 0x02]) + b"hi")  # text, unmasked
+        assert client.recv_frame(timeout=1.0) is None
+        assert client._closed is True
+        opcode, payload = _read_frame(b)
+        assert opcode == 0x8  # CLOSE
+        assert struct.unpack("!H", payload[:2])[0] == 1002
+    finally:
+        a.close()
+        b.close()
+
+
+def test_ws_refuses_a_message_that_grows_past_the_ceiling():
+    """Reassembly is bounded, one legal frame at a time.
+
+    A single oversized frame was already refused; a message assembled from many
+    small ones was not, which is the same memory ceiling reached the long way.
+    The writer runs on its own thread because the socketpair's buffer is smaller
+    than the message: the client stops reading once it refuses, and a blocking
+    send would deadlock the test rather than the client.
+    """
+    a, b = socket.socketpair()
+    client = WebSocketClient(a, ("127.0.0.1", 0))
+    piece = b"x" * 65535
+
+    def write_forever():
+        with contextlib.suppress(OSError):
+            b.sendall(_masked_frame(0x1, piece, final=False))
+            for _ in range(40):  # 40 * 65535 > 1 MB
+                b.sendall(_masked_frame(0x0, piece, final=False))
+
+    writer = threading.Thread(target=write_forever, daemon=True)
+    writer.start()
+    try:
+        assert client.recv_frame(timeout=5.0) is None
+        assert client._closed is True
+    finally:
+        a.close()
+        b.close()
+        writer.join(timeout=5)
+
+
+def test_ws_broadcast_history_deleted_payload():
+    a, b = socket.socketpair()
+    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
+    try:
+        client = WebSocketClient(a, ("127.0.0.1", 0))
+        with mgr._lock:
+            mgr._clients.append(client)
+        mgr.broadcast_history_deleted([101, 202])
+        opcode, payload = _read_frame(b)
+        assert opcode == 0x1
+        msg = json.loads(payload)
+        assert msg["type"] == "history_item_deleted"
+        assert msg["data"]["entry_ids"] == [101, 202]
+    finally:
+        mgr.shutdown()
+        a.close()
+        b.close()
+
+
+def test_ws_heartbeat_drops_dead_and_silent_clients():
+    a1, b1 = socket.socketpair()
+    a2, b2 = socket.socketpair()
+    a3, b3 = socket.socketpair()
+    mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
+    try:
+        dead = WebSocketClient(a1, ("127.0.0.1", 0))
+        dead._closed = True  # connection already gone
+        silent = WebSocketClient(a2, ("127.0.0.1", 0))
+        silent.last_recv = time.monotonic() - 9999  # way past 3×30s
+        fresh = WebSocketClient(a3, ("127.0.0.1", 0))
+        with mgr._lock:
+            mgr._clients.extend([dead, silent, fresh])
+
+        stale = mgr._ping_and_collect_stale()
+        assert dead in stale
+        assert silent in stale
+        assert fresh not in stale
+
+        mgr._drop_clients(stale)
+        with mgr._lock:
+            assert dead not in mgr._clients
+            assert silent not in mgr._clients
+            assert fresh in mgr._clients
+    finally:
+        mgr.shutdown()
+        for s in (a1, a2, a3, b1, b2, b3):
+            with contextlib.suppress(OSError):
+                s.close()
+
+
+# ── dialog delivery-based broadcast + queued-window timing ─────────────
+
+
+def test_dialog_show_times_out_when_never_shown():
+    class ZeroMgr:
+        def broadcast(self, msg_type, data):
+            return 0
+
+    dm = DialogManager()
+    dm.ws_manager = ZeroMgr()
+    result = dm.show("alert", title="t", message="m", timeout=0.15)
+    assert result is None
+    with dm._lock:
+        assert dm._pending == {}
+        assert dm._queued_dialogs == []
+
+
+def test_dialog_queued_flushed_response_window_starts_at_flush(monkeypatch):
+    """A queued dialog's response window starts when it is flushed (shown),
+    not when it was created.
+
+    This is asserted without wall-clock sleeps.  ``show()`` waits twice: once
+    for the dialog to be shown (the creation budget) and once for the response
+    (the post-flush budget).  The regression this pins is the second wait being
+    reduced by however long the dialog sat queued, so the test records the
+    timeout of both waits and requires the response one to be the full budget
+    *after* the flush, rather than whatever was left of the creation one.
+    """
+    from internal.web import dialog as dialog_mod
+
+    waits: list[float | None] = []
+    real_event = threading.Event
+
+    class RecordingEvent:
+        """A threading.Event that records the timeout it was waited with."""
+
+        def __init__(self):
+            self._event = real_event()
+
+        def set(self):
+            self._event.set()
+
+        def is_set(self):
+            return self._event.is_set()
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return self._event.wait(timeout)
+
+    # dialog.py reaches for Event and Lock only through its own `threading`
+    # binding, so a namespace keeps the substitution local to that module
+    # instead of patching the global threading module the test itself uses.
+    monkeypatch.setattr(
+        dialog_mod,
+        "threading",
+        SimpleNamespace(Event=RecordingEvent, Lock=threading.Lock),
+    )
+
+    state = {"deliver": False}
+
+    class FlakyMgr:
+        def broadcast(self, msg_type, data):
+            return 1 if state["deliver"] else 0
+
+    dm = DialogManager()
+    dm.ws_manager = FlakyMgr()
+    holder = {}
+
+    def run():
+        holder["result"] = dm.show("alert", title="t", message="m", timeout=3.0)
+
+    t = threading.Thread(target=run)
+    t.start()
+
+    # Wait until show() has queued the dialog and is blocked on its creation
+    # budget -- the first Event.wait call.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and len(waits) < 1:
+        time.sleep(0.001)
+    assert waits == [3.0], "show() never waited on its creation budget"
+    with dm._lock:
+        dialog_id = next(iter(dm._pending))
+
+    state["deliver"] = True
+    dm.flush_pending()
+
+    # The response wait must be a fresh full budget, not what is left of the
+    # creation one.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and len(waits) < 2:
+        time.sleep(0.001)
+    assert waits == [3.0, 3.0], f"post-flush wait was {waits!r}, not the full budget"
+
+    ok = dm.handle_response(dialog_id, "ok")
+    t.join(timeout=5.0)
+
+    assert not t.is_alive(), "show() should have returned by now"
+    assert ok is True
+    assert holder["result"] == {"action": "ok"}
+
+
+# ── DELETE /api/files (mobile file delete) ─────────────────────────────
+
+
+def _dispatch_delete(path, body_bytes, upload_dir):
+    return dispatch(
+        "DELETE",
+        path,
+        {},
+        body_bytes,
+        cfg=object(),
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        on_nav_url=None,
+        on_forward_file=None,
+        upload_dir=upload_dir,
+    )
+
+
+def test_dispatch_delete_file_removes_uploaded_file(tmp_path):
+    f = tmp_path / "photo.jpg"
+    f.write_bytes(b"jpg-bytes")
+    status, _ct, body_b = _dispatch_delete(
+        "/api/files",
+        _body({"name": "photo.jpg"}),
+        str(tmp_path),
+    )
+    assert status == 200
+    assert json.loads(body_b)["ok"] is True
+    assert not f.exists(), "the uploaded file should be deleted"
+
+
+def test_dispatch_delete_file_rejects_traversal(tmp_path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    evil = tmp_path / "evil.txt"  # sibling of uploads — outside the upload dir
+    evil.write_bytes(b"evil")
+    status, _ct, body_b = _dispatch_delete(
+        "/api/files",
+        _body({"name": "../evil.txt"}),
+        str(uploads),
+    )
+    # basename strips the traversal, so the request can only ever target an
+    # in-dir name (missing here -> 404) — never the outside file.  Either a
+    # 400 rejection or a 404 not-found is safe; the outside file must survive.
+    assert status in (400, 404)
+    assert evil.exists(), "traversal must never delete outside the upload dir"
+
+
+def test_dispatch_delete_file_rejects_directory(tmp_path):
+    d = tmp_path / "subdir"
+    d.mkdir()
+    status, _ct, body_b = _dispatch_delete(
+        "/api/files",
+        _body({"name": "subdir"}),
+        str(tmp_path),
+    )
+    assert status == 400
+    assert d.is_dir(), "a directory must not be deleted"
+
+
+def test_dispatch_delete_file_preserves_leading_trailing_spaces(tmp_path):
+    """#5: DELETE /api/files must match GET's raw filename semantics.  A file
+    whose name has leading/trailing spaces (legal on macOS/Linux) is deleted
+    by its exact name — stripping the name would fail to match or hit a
+    different file."""
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    for name in (" lead.jpg", "trail .jpg"):
+        f = uploads / name
+        f.write_bytes(b"jpg-bytes")
+        status, _ct, body_b = _dispatch_delete(
+            "/api/files",
+            _body({"name": name}),
+            str(uploads),
+        )
+        assert status == 200
+        assert json.loads(body_b)["ok"] is True
+        assert not f.exists(), f"{name!r} should be deleted by its exact name"
+
+
+def test_chat_stale_transfer_sweep_defers_fire_outside_lock():
+    """#8: the stall sweeper collects the done callbacks and fires none of them
+    itself.  The heartbeat calls it while holding the chat lock, so a slow
+    WS/UI callback running inline here would freeze every other chat thread."""
+    import tempfile
+    from pathlib import Path
+
+    from internal.sync.nearby_chat import ChatManager
+
+    mgr = ChatManager("x", "X")
+    tmp = tempfile.TemporaryDirectory()
+    try:
+        src = Path(tmp.name) / "x.bin"
+        src.write_bytes(b"payload")
+        mgr.handle_message(
+            "chat_invite",
+            {"session_id": "f" * 16, "from_name": "A", "fingerprint_short": "A1"},
+            "peer-a",
+            "A1",
+            lambda data: True,
+        )
+        sid = mgr.get_sessions()[0]["session_id"]
+        done_events = []
+        mgr.set_on_file_done(
+            lambda s, tid, ok, path, st: done_events.append((tid, ok, st)),
+        )
+        # A send the peer never answers, aged past the stall window.
+        tid = mgr.send_file(sid, str(src), lambda data: True)
+        assert tid
+        mgr._sends[tid]["last_progress_mono"] = time.monotonic() - (
+            ChatManager.TRANSFER_STALL_TIMEOUT + 10
+        )
+        fired: list = []
+        with mgr._lock:
+            done = mgr._expire_stale_transfers(fired)
+        assert any(d[1] == tid for d in done), "the stalled send was not collected"
+        assert fired, "the UI notice was not queued"
+        assert done_events == [], "the sweep must not fire callbacks inline"
+    finally:
+        mgr.shutdown()
+        tmp.cleanup()
+
+
+def test_history_api_limit_total_returns_authoritative_list(tmp_path):
+    """#2: the frontend full-calibration depends on `limit=total` returning
+    every remaining history item — the authoritative list that replaces ghost
+    rows when the client has loaded past the true count."""
+    from internal.web.api.history import get_history
+
+    db = _make_db(tmp_path)
+    for i in range(5):
+        db.add(
+            ClipboardContent(types={ContentType.TEXT: ("t%d" % i).encode()}, timestamp=2000.0 + i),  # noqa: UP031
+            source_app=None,
+        )
+
+    class Cfg:
+        device_id = "dev1"
+        device_name = "Dev"
+        web_history_limit = 30
+        peers = {}
+
+    items = db.get_all()
+    total = len(items)
+    data, status = get_history(db, Cfg(), str(total), None)
+    assert status == 200
+    assert data["total"] == total
+    assert len(data["items"]) == total
+# merged from test_round7_web.py
+
+
+from internal.web.server import (
+    _check_declared_length,
+    _MultipartError,
+    _parse_content_disposition,
+    _parse_multipart,
+)
+
+# ── Helpers ────────────────────────────────────────────────────────────
+
+
+def _mp_body(fields, boundary="testboundary123"):
+    """Build a browser-style multipart/form-data body.
+
+    fields: list of (name, filename_or_None, bytes).
+    """
+    out = bytearray()
+    for name, filename, data in fields:
+        out += b"--" + boundary.encode() + b"\r\n"
+        if filename is not None:
+            disp = f'form-data; name="{name}"; filename="{filename}"'
+        else:
+            disp = f'form-data; name="{name}"'
+        out += b"Content-Disposition: " + disp.encode() + b"\r\n"
+        out += b"Content-Type: application/octet-stream\r\n"
+        out += b"\r\n"
+        out += data
+        out += b"\r\n"
+    out += b"--" + boundary.encode() + b"--\r\n"
+    return bytes(out)
+
+
+def _ct(boundary="testboundary123"):
+    return f"multipart/form-data; boundary={boundary}"
+
+
+# ── 1. Multipart parsing ───────────────────────────────────────────────
+
+
+def test_parse_multipart_roundtrip_preserves_trailing_crlf():
+    """A file whose content ends with newlines must arrive byte-for-byte:
+    the old parser rstripped the part after cutting at the closing boundary
+    and silently corrupted every text file ending in \\r\\n."""
+    content = b"line1\r\nline2\r\n\r\n"
+    body = _mp_body([("file", "notes.txt", content)])
+    fields = _parse_multipart(body, _ct())
+    assert fields["file"][0] == "notes.txt"
+    assert fields["file"][1] == content, "file bytes must be preserved exactly"
+
+
+def test_parse_multipart_rejects_truncated_body():
+    """A body cut off mid-upload has no closing --boundary-- — it must raise
+    (the endpoint answers 400) instead of silently accepting garbage."""
+    full = _mp_body([("file", "big.bin", b"A" * 500)])
+    truncated = full[: len(full) // 2]  # cut before the closing delimiter
+    with pytest.raises(_MultipartError):
+        _parse_multipart(truncated, _ct())
+
+
+def test_parse_multipart_filename_with_semicolon():
+    """Quote-aware Content-Disposition parsing: a filename containing ';'
+    (legal on every OS) survives intact."""
+    line = 'form-data; name="file"; filename="report;final=v2.pdf"'
+    name, filename = _parse_content_disposition(line)
+    assert name == "file"
+    assert filename == "report;final=v2.pdf"
+
+
+def test_parse_multipart_boundary_like_bytes_inside_file_survive():
+    """File content that happens to contain a near-boundary sequence must
+    not be cut — only the exact standalone delimiter line splits parts."""
+    boundary = "abc123"
+    content = b"before\r\n--" + boundary.encode() + b"XYZ-after\r\ntail"
+    body = _mp_body([("file", "f.bin", content)], boundary=boundary)
+    fields = _parse_multipart(body, _ct(boundary))
+    assert fields["file"][1] == content
+
+
+def test_parse_multipart_extra_text_fields_decoded():
+    body = _mp_body(
+        [
+            ("file", "photo.jpg", b"JPGDATA"),
+            ("device_id", None, b"peer-42"),
+            ("purpose", None, b"chat"),
+        ]
+    )
+    fields = _parse_multipart(body, _ct())
+    assert fields["device_id"] == ("", b"peer-42")
+    assert fields["purpose"] == ("", b"chat")
+    assert fields["file"] == ("photo.jpg", b"JPGDATA")
+
+
+def test_check_declared_length_flags_short_read():
+    err = _check_declared_length(b"partial", 100)
+    assert err is not None
+    assert "incomplete upload" in err
+    # Exact match and no-declared-length cases pass.
+    assert _check_declared_length(b"x" * 100, 100) is None
+    assert _check_declared_length(b"", 0) is None
+
+
+# ── 2. GET /api/logs tail semantics ───────────────────────────────────
+
+
+class _Cfg:
+    device_id = "dev1"
+    device_name = "Dev"
+    web_token = "sekret-token"
+
+
+def _write_log(tmp_path, n_lines):
+    lines = [f"2026-08-25 10:00:{i:02d} INFO log line {i}" for i in range(n_lines)]
+    (tmp_path / "clipsync.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines
+
+
+def _get_logs(query_params):
+    return dispatch(
+        "GET",
+        "/api/logs",
+        query_params,
+        b"",
+        cfg=_Cfg(),
+        history=None,
+        sync_mgr=None,
+        get_connected_ids=lambda: [],
+        on_nav_url=None,
+        on_forward_file=None,
+        upload_dir=".",
+    )
+
+
+def test_api_logs_returns_last_n_lines(monkeypatch, tmp_path):
+    from internal.config import config as config_module
+
+    monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
+    _write_log(tmp_path, 300)
+
+    status, _ct_, body_b = _get_logs({"lines": ["5"]})
+    assert status == 200
+    logs = json.loads(body_b)["logs"]
+    assert len(logs) == 5
+    assert logs[-1].endswith("log line 299"), "must be the LAST lines of the file"
+    assert logs[0].endswith("log line 295")
+
+
+def test_api_logs_redacts_web_token(monkeypatch, tmp_path):
+    from internal.config import config as config_module
+
+    monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
+    (tmp_path / "clipsync.log").write_text(
+        "INFO request used token sekret-token ok\n", encoding="utf-8"
+    )
+
+    _status, _ct_, body_b = _get_logs({"lines": ["10"]})
+    logs = json.loads(body_b)["logs"]
+    assert len(logs) == 1
+    assert "sekret-token" not in logs[0]
+    assert "[redacted]" in logs[0]
+
+
+def test_api_logs_missing_file_returns_empty(monkeypatch, tmp_path):
+    from internal.config import config as config_module
+
+    monkeypatch.setattr(config_module, "_log_dir", lambda: tmp_path)
+
+    status, _ct_, body_b = _get_logs({})
+    assert status == 200
+    assert json.loads(body_b)["logs"] == []
+
+
+# ── 3. Favorites export (new feature) ────────────────────────────────
+
+
+@pytest.fixture()
+
+
+def fav_db(tmp_path, monkeypatch):
+    from internal.web.api import favorites as favorites_api
+
+    monkeypatch.setattr(favorites_api, "_FAV_DB_PATH", str(tmp_path / "favorites.db"))
+    # Keep a legacy JSON on this machine from migrating into the test DB.
+    monkeypatch.setattr(favorites_api, "_get_json_path", lambda: str(tmp_path / "no_legacy.json"))
+    return favorites_api
+
+
+def _seed_two_favorites(favorites_api):
+    favorites_api.add_favorite(
+        json.dumps({"title": "Alpha note", "content": "alpha-content", "group": "Work"}).encode()
+    )
+    favorites_api.add_favorite(
+        json.dumps({"title": "", "content": "ungrouped-content", "group": ""}).encode()
+    )
+
+
+def test_export_favorites_markdown_groups_and_content(fav_db, tmp_path):
+    api = fav_db
+    _seed_two_favorites(api)
+    body = json.dumps({"format": "markdown"}).encode("utf-8")
+    data, status = api.export_favorites(body, dest_dir=str(tmp_path))
+    assert status == 200 and data["ok"] is True
+    assert data["count"] == 2
+    assert data["filename"].endswith(".md")
+    text = open(data["filepath"], encoding="utf-8").read()  # noqa: SIM115
+    assert "# ClipSync Favorites" in text
+    assert "## Work" in text
+    assert "**Alpha note**" in text
+    assert "alpha-content" in text
+    assert "## Ungrouped" in text
+    assert "ungrouped-content" in text
+    # Stored order preserved (position ASC): Alpha first.
+    assert text.index("**Alpha note**") < text.index("ungrouped-content")
+
+
+def test_export_favorites_fence_grows_past_backticks(fav_db, tmp_path):
+    api = fav_db
+    api.add_favorite(
+        json.dumps({"title": "code", "content": "```python\nprint(1)\n```", "group": ""}).encode()
+    )
+    body = json.dumps({"format": "markdown"}).encode("utf-8")
+    data, _status = api.export_favorites(body, dest_dir=str(tmp_path))
+    text = open(data["filepath"], encoding="utf-8").read()  # noqa: SIM115
+    # The fence around the content must be LONGER than any backtick run in
+    # the content itself so the block cannot be broken open.
+    assert "\n````\n```python\nprint(1)\n```\n````\n" in text
+
+
+def test_export_favorites_invalid_format_400(fav_db, tmp_path):
+    data, status = fav_db.export_favorites(
+        json.dumps({"format": "pdf"}).encode("utf-8"), dest_dir=str(tmp_path)
+    )
+    assert status == 400
+    assert data["ok"] is False
+
+
+# ── Localized subprocess output must not crash the reader thread (GBK) ──
+
+
+def test_decode_console_output_handles_both_codepages():
+    """The same message must come out right whether netsh spoke UTF-8 or GBK."""
+    from internal.platform import decode_console_output
+
+    msg = "请求的操作需要提升(作为管理员运行)。"
+    # The bug that started this: netsh spoke UTF-8, we read GBK.
+    assert decode_console_output(msg.encode("utf-8")) == msg
+    # The reverse case only has a right answer where the platform owns a
+    # codepage that can represent these bytes (Chinese Windows).  Anywhere
+    # else no decoder could recover them, so all we require is no raise —
+    # this helper runs on a failure path and must never add a second failure.
+    gbk = msg.encode("gbk")
+    try:
+        recoverable = gbk.decode("oem") == msg or gbk.decode("mbcs") == msg
+    except (UnicodeDecodeError, LookupError):
+        recoverable = False
+    if recoverable:
+        assert decode_console_output(gbk) == msg
+    else:
+        assert decode_console_output(gbk)
+    # Degenerate inputs must never raise — this runs on a failure path.
+    assert decode_console_output(b"") == ""
+    assert decode_console_output(None) == ""
+    assert decode_console_output("already text") == "already text"
+    assert decode_console_output(b"\xff\xfe\x00garbage")
+
+
+# ── The firewall rule must be read in any language netsh prints in ─────
+#
+# netsh localizes its field LABELS.  Reading the rule by matching the literal
+# `LocalPort:` therefore worked only on an English Windows: on a Chinese one
+# the line is `本地端口:`, nothing matched, and a rule that allowed both ports
+# was reported as allowing none.  The diagnostics said "wrong port", the
+# repair deleted the rule and re-created it identically, and the warning could
+# never clear -- the rule was correct before the repair and after it.
+
+# A correct rule as netsh prints it on a Chinese Windows, with the port line
+# this used to look for in English.
+CN_RULE = (
+    "\r\n规则名称:                             ClipSync Web Companion\r\n"
+    "----------------------------------------------------------------------\r\n"
+    "已启用:                               是\r\n"
+    "方向:                                 入\r\n"
+    "协议:                                 TCP\r\n"
+    "本地端口:                             19990,19991\r\n"
+    "操作:                                 允许\r\n"
+    "Ok.\r\n"
+)
+
+# The same rule on an English Windows.
+EN_RULE = (
+    "\r\nRule Name:                            ClipSync Web Companion\r\n"
+    "----------------------------------------------------------------------\r\n"
+    "Enabled:                              Yes\r\n"
+    "Direction:                            In\r\n"
+    "Protocol:                             TCP\r\n"
+    "LocalPort:                            19990,19991\r\n"
+    "Action:                               Allow\r\n"
+    "Ok.\r\n"
+)
+
+# What the PowerShell fallback prints: a sentinel, then one line per rule.
+CIM_PORTS = "CLIPSYNC-RULE\r\n19990,19991\r\n"
+# A rule that was read successfully and allows the wrong port -- readable, and
+# therefore safe to replace, unlike the unreadable rule below.
+CIM_OTHER_PORT = "CLIPSYNC-RULE\r\n1234\r\n"
+# The sentinel with no rules under it -- the rule is genuinely absent.
+CIM_NONE = "CLIPSYNC-RULE\r\n"
+# netsh's answer when the rule is gone.
+NO_RULES = "No rules match the specified criteria.\r\n"
+
+
+@pytest.fixture
+def on_windows(monkeypatch):
+    """The rule reader is a Windows-only path; the suite runs on every OS.
+
+    `sys.platform` is not the only thing that path assumes.  It also passes
+    `subprocess.CREATE_NO_WINDOW`, which exists only on Windows and is read
+    while the probe is built -- so on a host that is not Windows the probe
+    raises before it can run, and the broad `except` that keeps a missing
+    netsh from being fatal turns that into "unreadable".  That is a true
+    answer about a real machine and not the one this simulation is asking
+    about, which is why the attribute is supplied here rather than dropped
+    from the implementation: on Windows it is always there.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    if not hasattr(subprocess, "CREATE_NO_WINDOW"):
+        monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+
+@pytest.fixture
+def off_windows(monkeypatch):
+    """The complement, pinned rather than taken from the host."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
+def _wire(value):
+    """The bytes the OS hands back, from what a test wrote.
+
+    These fixtures read as the text a console would show, which is the whole
+    point of them; encoding is what the pipe does, so it happens here.
+    """
+    return value.encode("utf-8") if isinstance(value, str) else value
+
+
+def _fake_commands(monkeypatch, netsh, powershell):
+    """Answer both probes out of the given output; return the programs asked.
+
+    Passing None for either makes that program fail to start, which is how a
+    test can assert a probe was never reached.
+
+    The registry reader is switched off here: it answers the question the
+    probes below are being asked, in a few milliseconds and without starting
+    anything, so on a Windows host it would answer first and these tests would
+    never see the output they are written around.  It has its own test class.
+    """
+    monkeypatch.setattr(
+        web_server.WebServer, "_firewall_rule_ports_registry", staticmethod(lambda: None)
+    )
+    asked = []
+
+    def run(argv, **kwargs):
+        asked.append(argv[0])
+        if argv[0] == "netsh":
+            if netsh is None:
+                raise FileNotFoundError("netsh")
+            return SimpleNamespace(returncode=0, stdout=_wire(netsh), stderr=b"")
+        if argv[0] == "powershell.exe":
+            if powershell is None:
+                raise FileNotFoundError("powershell.exe")
+            return SimpleNamespace(returncode=0, stdout=_wire(powershell), stderr=b"")
+        raise AssertionError(f"unexpected program: {argv[0]}")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return asked
+
+
+class TestTheFirewallRuleIsReadInAnyLanguage:
+    @pytest.fixture(autouse=True)
+    def _fresh_firewall_cache(self):
+        """Each case starts with no remembered answer.
+
+        The cached read is per process by design (the startup path asks the
+        same question every launch), so one case's answer would otherwise be
+        the next one's starting state.
+        """
+        web_server.WebServer._fw_read_cache.clear()
+        yield
+        web_server.WebServer._fw_read_cache.clear()
+
+    def test_a_localized_rule_that_allows_the_ports_is_read_as_allowing_them(
+        self, monkeypatch, on_windows
+    ):
+        asked = _fake_commands(monkeypatch, netsh=CN_RULE, powershell=CIM_PORTS)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "OK")
+        # netsh could not be understood, so the cmdlet answered instead.
+        assert asked == ["netsh", "powershell.exe"]
+
+    def test_an_english_rule_is_read_without_starting_powershell(self, monkeypatch, on_windows):
+        # The fast path stays fast: loading the NetSecurity module costs a
+        # couple of seconds, and ordinary diagnostics must not pay it.
+        asked = _fake_commands(monkeypatch, netsh=EN_RULE, powershell=None)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "OK")
+        assert asked == ["netsh"]
+
+    def test_every_rule_of_that_name_is_read_and_not_just_the_first(
+        self, monkeypatch, on_windows
+    ):
+        # Repairs could leave more than one rule under this name, and taking
+        # whichever port line came first let a stale rule answer for the live
+        # one.
+        stale_then_live = (
+            EN_RULE.replace("19990,19991", "1234")
+            + "\r\nRule Name:                            ClipSync Web Companion\r\n"
+            + "LocalPort:                            19990,19991\r\n"
+        )
+        _fake_commands(monkeypatch, netsh=stale_then_live, powershell=None)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "OK")
+
+    def test_a_rule_open_to_every_port_covers_the_ones_we_need(self, monkeypatch, on_windows):
+        _fake_commands(monkeypatch, netsh=EN_RULE.replace("19990,19991", "Any"), powershell=None)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "OK")
+
+    def test_a_rule_missing_a_port_still_says_which_one(self, monkeypatch, on_windows):
+        one_port = EN_RULE.replace("19990,19991", "19990")
+        _fake_commands(monkeypatch, netsh=one_port, powershell=None)
+        ok, detail = web_server.WebServer.check_firewall_rule([19990, 19991])
+        # Names the ports actually allowed and the one that is not -- and the
+        # value is the real list, not the "none" the broken parse produced.
+        assert (ok, detail) == (False, "Wrong port (got 19990, needs 19991)")
+
+    def test_no_rule_at_all_is_reported_as_blocked(self, monkeypatch, on_windows):
+        _fake_commands(monkeypatch, netsh=NO_RULES, powershell=CIM_NONE)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (False, "Blocked")
+
+    def test_an_unreadable_rule_says_unknown_rather_than_blaming_a_port(
+        self, monkeypatch, on_windows
+    ):
+        # Neither probe could be understood.  Claiming a wrong port here is what
+        # made the warning permanent, so this must not guess: "Unknown" is a
+        # different answer from "no".
+        asked = _fake_commands(monkeypatch, netsh=CN_RULE, powershell="")
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (False, "Unknown")
+        assert asked == ["netsh", "powershell.exe"]
+
+    def test_a_platform_without_the_rule_is_never_asked(self, monkeypatch, off_windows):
+        # Not a Windows path at all: no subprocess may be started.
+        asked = _fake_commands(monkeypatch, netsh=None, powershell=None)
+        assert web_server.WebServer.check_firewall_rule([19990, 19991]) == (True, "")
+        assert asked == []
+
+    @staticmethod
+    def _recording_run(commands, powershell_output, show_output):
+        def run(argv, **kwargs):
+            commands.append(list(argv))
+            if argv[0] == "powershell.exe":
+                return SimpleNamespace(returncode=0, stdout=_wire(powershell_output), stderr=b"")
+            if "show" in argv:
+                return SimpleNamespace(returncode=0, stdout=_wire(show_output), stderr=b"")
+            return SimpleNamespace(returncode=0, stdout=b"Ok.", stderr=b"")
+
+        return run
+
+    @staticmethod
+    def _no_registry(monkeypatch):
+        """Keep the fast registry read out of the way of the probes under test."""
+        monkeypatch.setattr(
+            web_server.WebServer, "_firewall_rule_ports_registry", staticmethod(lambda: None)
+        )
+
+    def test_a_rule_read_as_wrong_is_replaced_instead_of_stacked(
+        self, monkeypatch, on_windows
+    ):
+        self._no_registry(monkeypatch)
+        # netsh creates a SECOND rule under the same name rather than updating
+        # one, so a repair that only adds leaves a duplicate behind every time.
+        # A rule whose ports were read and found wrong is the one case where
+        # deleting first costs nothing: it is not serving the ports we need.
+        commands = []
+        monkeypatch.setattr(
+            subprocess, "run", self._recording_run(commands, CIM_OTHER_PORT, CN_RULE)
+        )
+        monkeypatch.setattr(
+            web_server.WebServer, "_firewall_repair_is_safe", staticmethod(lambda: True)
+        )
+        assert web_server.WebServer._open_firewall(19990, 19991) is True
+        assert [argv[3] for argv in commands if argv[0] == "netsh"] == [
+            "show",
+            "delete",
+            "add",
+        ]
+
+    def test_a_repair_that_cannot_be_undone_is_not_attempted(
+        self, monkeypatch, on_windows
+    ):
+        """Unelevated, the delete is the one step that cannot be taken back.
+
+        netsh needs elevation to add a rule, so a refused add after a
+        successful delete leaves the machine with no rule where it had a
+        working one — strictly worse than the mismatch the repair set out to
+        fix, and it used to be attempted on every launch.
+        """
+        self._no_registry(monkeypatch)
+        commands = []
+        monkeypatch.setattr(
+            subprocess, "run", self._recording_run(commands, CIM_OTHER_PORT, CN_RULE)
+        )
+        monkeypatch.setattr(
+            web_server.WebServer, "_firewall_repair_is_safe", staticmethod(lambda: False)
+        )
+        assert web_server.WebServer._open_firewall(19990, 19991) is False
+        # The read still happened — "is it wrong?" has to be answered before
+        # "may I repair it?" — but nothing was removed and nothing added.
+        assert [argv[3] for argv in commands if argv[0] == "netsh"] == ["show"]
+
+    def test_a_rule_that_could_not_be_read_is_never_deleted(
+        self, monkeypatch, on_windows
+    ):
+        self._no_registry(monkeypatch)
+        # Unreadable is not the same answer as wrong, and this delete is the
+        # one that cannot be taken back: netsh needs elevation to add a rule,
+        # so a refused add after a successful delete leaves the machine with no
+        # rule at all.  That is not hypothetical -- the localized-label misread
+        # deleted a correct rule on every launch and then failed to put it back
+        # with "the requested operation requires elevation".
+        #
+        # Adding beside a rule we could not read is the recoverable mistake:
+        # duplicates allow the port twice, which is a blemish, where a delete
+        # that cannot be undone is a loss.
+        commands = []
+        monkeypatch.setattr(
+            subprocess, "run", self._recording_run(commands, "", CN_RULE)
+        )
+        monkeypatch.setattr(
+            web_server.WebServer, "_firewall_repair_is_safe", staticmethod(lambda: True)
+        )
+        assert web_server.WebServer._open_firewall(19990, 19991) is True
+        assert [argv[3] for argv in commands if argv[0] == "netsh"] == ["show", "add"]
+
+    def test_an_already_correct_rule_is_not_repaired(self, monkeypatch, on_windows):
+        self._no_registry(monkeypatch)
+        # The other half of the same contract: nothing to fix must mean no UAC
+        # prompt, so the repair may not touch a rule that is already right.
+        commands = []
+        monkeypatch.setattr(
+            subprocess, "run", self._recording_run(commands, CIM_PORTS, CN_RULE)
+        )
+        assert web_server.WebServer._open_firewall(19990, 19991) is True
+        assert [argv[3] for argv in commands if argv[0] == "netsh"] == ["show"]
+
+
+# ── Stage 4: web backend hardening ─────────────────────────────────────
+
+
+class TestRequestPathAliasesRoute:
+    """``//api/push`` must reach the same handler as ``/api/push``.
+
+    ``posixpath.normpath`` preserves exactly two leading slashes by design
+    (POSIX reserves ``//foo``), so the old canonicalisation left the alias
+    untouched and it fell through to a 404 — while every browser, proxy and
+    naive ``base + "/" + path`` join produces exactly that form.
+    """
+
+    def test_double_leading_slash_collapses(self):
+        from internal.web.server import _canonical_request_path as canon
+
+        assert canon("//api/push") == "/api/push"
+        assert canon("///api/push") == "/api/push"
+        assert canon("//") == "/"
+
+
+class TestBadFieldTypesAre400NotCrash:
+    """``req.get("peer_id", "").strip()`` raised AttributeError on a non-string.
+
+    The outer safety net turned that into a 500 + traceback, which reads like
+    a server fault when it is really bad client input.
+    """
+    def test_numeric_peer_id_answers_400(self):
+        from internal.web.routes import dispatch
+
+        status, _ctype, raw = dispatch(
+            "POST",
+            "/api/device/forget",
+            {},
+            _body({"peer_id": 123}),
+            cfg=None,
+            history=None,
+            sync_mgr=None,
+            get_connected_ids=lambda: [],
+            on_nav_url=None,
+            on_forward_file=None,
+            upload_dir="",
+            on_device_action=lambda *a, **k: True,
+        )
+        assert status == 400
+        assert json.loads(raw)["error"] == "peer_id required"
+
+
+class TestWebSocketCloseActuallyCloses:
+    """``close()`` returned early whenever ``_closed`` was already True — and
+    the normal disconnect path sets it before close() is ever called, so the
+    socket was never released."""
+
+    def test_close_releases_socket_even_when_already_marked_closed(self):
+        a, b = socket.socketpair()
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            client._closed = True  # what recv_frame does on EOF
+            client.close()
+            assert client._sock_closed is True
+            with pytest.raises(OSError):
+                a.send(b"x")
+        finally:
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+    def test_close_sends_a_close_frame_while_peer_is_live(self):
+        a, b = socket.socketpair()
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            client.close()
+            opcode, _payload = _read_frame(b)
+            assert opcode == 0x8  # CLOSE
+            assert client.closed is True
+        finally:
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+
+class TestKeepaliveDropsOnFailedPing:
+    """``send_ping()`` swallows OSError and returns False rather than raising,
+    so the old bare ``try/except`` around it never fired."""
+
+    def test_failed_ping_is_collected_immediately(self):
+        a, b = socket.socketpair()
+        mgr = WebSocketManager(cfg=None, history=None, sync_mgr=None, get_connected_ids=lambda: [])
+        try:
+            client = WebSocketClient(a, ("127.0.0.1", 0))
+            # Fresh client: it would survive the 90s silence window.
+            client.last_recv = time.monotonic()
+            a.close()  # sending now fails -> send_ping() returns False
+            with mgr._lock:
+                mgr._clients.append(client)
+            stale = mgr._ping_and_collect_stale()
+            assert client in stale
+        finally:
+            mgr.shutdown()
+            for s in (a, b):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+
+# ── Starting the companion ─────────────────────────────────────────────
+
+
+def test_starting_the_companion_resolves_no_names(monkeypatch):
+    """Binding the socket must not make the OS look this machine up.
+
+    ``ThreadingHTTPServer`` inherits ``HTTPServer.server_bind()``, which fills
+    ``server_name`` with ``socket.getfqdn(bound_address)`` -- and ``getfqdn``
+    turns the wildcard into ``gethostbyaddr(gethostname())``, a reverse lookup
+    of this machine's own name.  That call is on the thread the user waits on
+    while the companion starts, and where the name is in no zone (a macOS CI
+    runner, a laptop that has just joined a guest network, anything behind a VPN
+    that took the name server away) it does not fail fast: the resolver's own
+    timeout is tens of seconds, and the app sits there for all of it.  macOS is
+    where it is reliably fatal -- Linux answers its own name from /etc/hosts and
+    Windows from the local DNS client, while macOS delegates to mDNSResponder,
+    which waits out its full timeout.
+
+    The fake resolver raises instead of sleeping, so this measures the call and
+    not the clock: a bind that does the lookup fails here at once, and one that
+    does not cannot be slow.  ``_get_lan_ip`` is stubbed for the same reason --
+    it reaches the resolver through ``discovery.get_all_local_addresses``, which
+    has its own bound and its own case in test_transport_recovery.py.
+    """
+
+    def _no_reverse_lookup(*args, **kwargs):
+        raise AssertionError("the companion resolved a name while binding its socket")
+
+    monkeypatch.setattr(socket, "getfqdn", _no_reverse_lookup)
+    monkeypatch.setattr(web_server.WebServer, "_open_firewall", staticmethod(lambda *a, **k: True))
+    monkeypatch.setattr(web_server.WebServer, "_get_lan_ip", staticmethod(lambda: "127.0.0.1"))
+
+    # Port 0 asks the OS for a free port, so this can never collide with a real
+    # companion on the developer's machine or with another test.
+    cfg = SimpleNamespace(port=0, web_port=0, file_receive_dir=".")
+    server = web_server.WebServer(cfg, None, None)
+    try:
+        assert server.start() is True
+    finally:
+        server.stop()
+
+
+# ── Same-origin gate on state-changing requests ──────────────────────────────
+
+
+class _WriteCfg:
+    """The handler fields these tests read on the paths they take."""
+
+    def __init__(self, token):
+        self.web_enabled = True
+        self.web_token = token
+        self.web_port = 0
+        self.port = 0
+        self.language = "en"
+        self.device_id = "dev1"
+        self.device_name = "Dev"
+        self.file_receive_dir = "."
+        self.web_history_limit = 30
+        self.peers = {}
+
+
+@contextlib.contextmanager
+def _write_server(tmp_path, monkeypatch, token):
+    """A real companion on a loopback port, with the OS side effects stubbed."""
+    monkeypatch.setattr(web_server.WebServer, "_open_firewall", staticmethod(lambda *a, **k: True))
+    monkeypatch.setattr(web_server.WebServer, "_get_lan_ip", staticmethod(lambda: "127.0.0.1"))
+    cfg = _WriteCfg(token)
+    server = web_server.WebServer(cfg, _make_db(tmp_path), None)
+    try:
+        assert server.start() is True
+        cfg.web_port = server._httpd.server_address[1]
+        yield cfg
+    finally:
+        server.stop()
+
+
+def _http(port, method, path, body=None, headers=None):
+    """One request over a fresh connection; returns (status, headers, body)."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
+def test_cross_site_write_is_refused_when_the_token_was_cleared(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        status, headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Origin": "http://evil.example"},
+        )
+        assert status == 403
+        assert "Access-Control-Allow-Origin" not in headers
+
+
+def test_cross_site_write_is_refused_even_with_a_valid_token(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window?token=sekret",
+            body=_body({"action": "close"}),
+            headers={"Origin": "http://evil.example"},
+        )
+        assert status == 403
+
+
+def test_same_origin_write_still_works(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        origin = f"http://127.0.0.1:{cfg.web_port}"
+        status, headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window?token=sekret",
+            body=_body({"action": "close"}),
+            headers={"Origin": origin},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        # Same-origin reflection, never a wildcard: another site can never
+        # read a token-authenticated answer through this header.
+        assert headers.get("Access-Control-Allow-Origin") == origin
+
+
+def test_write_without_any_origin_signal_needs_the_token(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(
+            cfg.web_port, "POST", "/api/window?token=sekret", body=_body({"action": "close"})
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        status, _headers, _payload = _http(
+            cfg.web_port, "POST", "/api/window", body=_body({"action": "close"})
+        )
+        assert status == 403
+
+
+def test_sec_fetch_site_alone_cannot_authorise_a_tokenless_write(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        # Cross-site is refused, and so is same-origin: a rebound page's
+        # Sec-Fetch-Site also reads same-origin, so on its own it licenses
+        # nothing when there is no token to check.
+        for site in ("cross-site", "same-origin"):
+            status, _headers, _payload = _http(
+                cfg.web_port,
+                "POST",
+                "/api/window",
+                body=_body({"action": "close"}),
+                headers={"Sec-Fetch-Site": site},
+            )
+            assert status == 403
+
+
+def test_sec_fetch_site_still_decides_when_a_token_is_armed(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window?token=sekret",
+            body=_body({"action": "close"}),
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+
+
+def test_tokenless_referer_must_name_a_local_ip(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        # Same host:port in the Referer and Host is not enough: a rebinding
+        # host name has to be refused even when the two agree.
+        rebinding = f"evil.example:{cfg.web_port}"
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Host": rebinding, "Referer": f"http://{rebinding}/index.html"},
+        )
+        assert status == 403
+        # The QR code's own address is an IP literal, and it still works.
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Referer": f"http://127.0.0.1:{cfg.web_port}/index.html"},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+
+
+def test_tokenless_write_rejects_a_rebinding_hostname(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        # DNS rebinding produces exactly this: the attacker's name resolves
+        # to this machine, so Origin and Host agree on host:port.  The host
+        # name is the tell.
+        rebinding = f"evil.example:{cfg.web_port}"
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Host": rebinding, "Origin": f"http://{rebinding}"},
+        )
+        assert status == 403
+
+
+def test_tokenless_write_allows_ip_and_localhost_origins(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        origin = f"http://127.0.0.1:{cfg.web_port}"
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Origin": origin},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        # `localhost` is a name, but it always resolves to the loopback the
+        # connection arrived on, so it is accepted as well.
+        local = f"localhost:{cfg.web_port}"
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Host": local, "Origin": f"http://{local}"},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+
+
+def test_tokenless_write_without_a_browser_origin_is_refused(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        status, _headers, _payload = _http(
+            cfg.web_port, "POST", "/api/window", body=_body({"action": "close"})
+        )
+        assert status == 403
+
+def test_cross_site_delete_is_refused(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "DELETE",
+            "/api/files?name=notes.txt&token=sekret",
+            headers={"Origin": "http://evil.example"},
+        )
+        assert status == 403
+
+
+def test_get_and_static_assets_are_not_origin_gated(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(
+            cfg.web_port, "GET", "/?token=sekret", headers={"Origin": "http://evil.example"}
+        )
+        assert status == 200
+        assert b"<" in payload
+        status, _headers, _payload = _http(
+            cfg.web_port, "GET", "/icon-192.png", headers={"Origin": "http://evil.example"}
+        )
+        assert status == 200
+
+
+def test_cross_site_preflight_gets_no_permission(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        status, headers, _payload = _http(
+            cfg.web_port,
+            "OPTIONS",
+            "/api/window",
+            headers={
+                "Origin": "http://evil.example",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert status == 403
+        assert "Access-Control-Allow-Origin" not in headers
+
+
+def test_same_origin_preflight_echoes_its_own_origin(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "") as cfg:
+        origin = f"http://127.0.0.1:{cfg.web_port}"
+        status, headers, _payload = _http(
+            cfg.web_port, "OPTIONS", "/api/window", headers={"Origin": origin}
+        )
+        assert status == 204
+        assert headers.get("Access-Control-Allow-Origin") == origin
+
+
+def test_query_token_still_authenticates(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(cfg.web_port, "GET", "/api/history?token=sekret")
+        assert status == 200
+        assert json.loads(payload)["total"] == 1
+
+
+def test_bearer_token_authenticates_reads(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "GET",
+            "/api/history",
+            headers={"Authorization": "Bearer sekret"},
+        )
+        assert status == 200
+        assert json.loads(payload)["total"] == 1
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "GET",
+            "/api/history",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        assert status == 403
+
+
+def test_bearer_token_authenticates_writes_but_origin_still_applies(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        origin = f"http://127.0.0.1:{cfg.web_port}"
+        status, _headers, payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Authorization": "Bearer sekret", "Origin": origin},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        status, _headers, _payload = _http(
+            cfg.web_port,
+            "POST",
+            "/api/window",
+            body=_body({"action": "close"}),
+            headers={"Authorization": "Bearer sekret", "Origin": "http://evil.example"},
+        )
+        assert status == 403
+
+
+def test_ws_handshake_accepts_a_bearer_token(tmp_path, monkeypatch):
+    with _write_server(tmp_path, monkeypatch, "sekret") as cfg:
+        # Without an Upgrade header a passing token reaches the 426 branch
+        # and a failing one is refused at the gate -- enough to prove /ws
+        # reads the Authorization header and not only the query string.
+        status, _headers, _payload = _http(
+            cfg.web_port, "GET", "/ws", headers={"Authorization": "Bearer sekret"}
+        )
+        assert status == 426
+        status, _headers, _payload = _http(
+            cfg.web_port, "GET", "/ws", headers={"Authorization": "Bearer wrong"}
+        )
+        assert status == 403
+        status, _headers, _payload = _http(cfg.web_port, "GET", "/ws")
+        assert status == 403
+        status, _headers, _payload = _http(cfg.web_port, "GET", "/ws?token=sekret")
+        assert status == 426

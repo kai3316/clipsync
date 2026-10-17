@@ -1,0 +1,2600 @@
+"""mDNS service discovery for finding ClipSync peers on the LAN.
+
+Registers this device as a _clipsync._tcp service and discovers
+other devices running ClipSync on the same local network.
+"""
+
+import contextlib
+import ipaddress
+import logging
+import platform
+import random
+import re
+import socket
+import threading
+import time
+from collections.abc import Callable
+
+import ifaddr
+from zeroconf import (
+    DNSOutgoing,
+    DNSQuestion,
+    RecordUpdateListener,
+    ServiceBrowser,
+    ServiceInfo,
+    Zeroconf,
+)
+
+# The wire numbers for a PTR question.  Not exported at the top level -- the
+# protocol constants have no public names -- and the alternative is writing
+# 12 and 1 into a query nobody can check.
+from zeroconf.const import _CLASS_IN, _FLAGS_QR_QUERY, _TYPE_PTR
+
+from internal.system.updater import running_shell
+from internal.transport.ids import peer_id_hash
+from internal.transport.ids import sanitize_peer_str as _sanitize_peer_str
+from internal.version import __version__
+
+logger = logging.getLogger(__name__)
+
+# The presence round: how often this machine asks the network who is here, and
+# how long a name may go unheard before it is reported lost.
+#
+# The pair is the whole latency budget for "a device left": it is reported at
+# the first round after PRESENCE_TIMEOUT, so between 60 and 70 seconds, and a
+# device has to miss six consecutive answers to get there.  Twenty seconds was
+# two consecutive answers, and the field logs showed what that cost: a Wi-Fi
+# multicast drop of a round or two turned into a stream of Peer lost/Discovered
+# pairs while both devices were up -- pc-zhao lost zzz MacBook 26 times in one
+# session, zzz lost pc-zhao 18, and one hash was lost and rediscovered 0.3 s
+# later.  The line is a departure notice, and one that fires before a device
+# could plausibly have left is worse than one that arrives a minute later.
+PRESENCE_INTERVAL_SECONDS = 10.0
+# One state line per this many presence rounds, which at a 10s cadence is about a minute.  The
+# line answers "can this machine be found, and can it find anyone" from a log alone, which is
+# what a fault that a restart cures needs.
+DISCOVERY_STATE_EVERY_ROUNDS = 6
+PRESENCE_TIMEOUT_SECONDS = 60.0
+
+# A browse that asks and hears nobody at all for this many consecutive rounds is
+# a broken socket, not a quiet network: see _repair_deaf_browse.
+BROWSE_REBUILD_AFTER_EMPTY_ROUNDS = 6
+# The rebuild is a repair, not a poll: a rebuild that did not help waits this
+# long before the next one, so a genuinely empty network cannot be rebuilt in a
+# tight loop.
+BROWSE_REBUILD_COOLDOWN_SECONDS = 300.0
+# ... and a repair that keeps not helping doubles its wait up to this, so a fault
+# neither side can fix does not rebuild the sockets every five minutes forever.
+# The field logs showed the cost of the flat cooldown: one Mac's five-day log
+# held 332 rebuilds of an idle network at the cooldown's own interval.
+BROWSE_REBUILD_MAX_BACKOFF_SECONDS = 1800.0
+# How long "this machine has had a peer to miss" survives with no peer seen.
+# After this the network really has emptied -- the peers did not go deaf, there
+# is nobody to hear -- and there is nothing left for a rebuild to repair.
+PEER_MEMORY_SECONDS = 600.0
+# A peer that has gone unheard for a full PRESENCE_TIMEOUT is reported lost only
+# when this machine can demonstrate that its listening path works: another peer
+# answered, the browser no longer lists the peer, or the peer's TCP link is
+# still up.  When the round heard nobody at all *and* the browser cache still
+# holds the peer's service, the silence says more about this machine than about
+# that peer (see _repair_deaf_browse), so the peer is marked stale instead and
+# given this much longer to speak before the loss is believed.
+PRESENCE_STALE_TIMEOUT_SECONDS = 3 * PRESENCE_TIMEOUT_SECONDS
+# A service Removed event within this long of the peer's last answer is not
+# proof that it left -- the browser reports Removed while the peer is still
+# answering the presence query (see _handle_service_removed).  The sweep is the
+# one arbiter that reads the answers, so this path defers to it inside the
+# window.
+REMOVED_GRACE_SECONDS = PRESENCE_TIMEOUT_SECONDS * 1.5
+
+# Announce on every Nth round -- 60 seconds, deliberately half of the 120 s TTL
+# a peer caches our A records for.  A peer running this build re-hears us every
+# round anyway (it asks, we answer); a peer running an older build asks nothing
+# after its four startup queries, and this is the only thing keeping our address
+# from expiring in its cache.
+ANNOUNCE_EVERY_ROUNDS = 6
+
+# How long to wait for the answers to one query.  A peer that is there answers
+# in 20-120 ms (the library's own jitter), so this is generous for the normal
+# case and covers the one path that is slower: a record multicast in the last
+# second is held back for another second by the library's flood protection
+# (RFC 6762 section 14).  It has to cover that one -- the reader below is what
+# puts a peer that was just swept back on the list, because the browser fires
+# nothing for a record it already holds and a swept peer re-answers with exactly
+# the record it was holding -- so the window is a second of deferral plus
+# delivery, not six tenths of the deferral it names.  An answer that lands late
+# anyway is still an answer: the listener stamps it when it lands, and the round
+# after this one reads back everything heard since this one stopped reading
+# (see _answered_since).
+SCAN_SETTLE_SECONDS = 1.5
+
+# A delivered record counts as "a peer spoke" only if its packet arrived just
+# now.  This is what separates that from "the cache handed back a record it has
+# held since the peer last spoke": the cache replay on listener registration and
+# the ten-second expiry sweep both deliver records whose ``created`` is old.
+PRESENCE_STALE_MILLIS = 2 * PRESENCE_INTERVAL_SECONDS * 1000
+
+# How long ``get_service_info`` may take when a peer's record is not in the
+# cache.  The library's own default is 3000 ms, and the presence round must not
+# be able to spend that per peer: a responder that sends a PTR without its
+# SRV/TXT additionals turns each re-read into a stall, and the round runs on a
+# thread the runtime is waiting on.
+_SERVICE_INFO_TIMEOUT_MS = 1000
+
+# How long the host-name and FQDN lookups may hold up address enumeration.  A
+# ceiling on a working-but-slow resolver, not a target: a name that resolves at
+# all resolves in single-digit milliseconds.  A name that is in no zone has
+# held callers of ``get_all_local_addresses`` for the better part of a minute,
+# and those callers include the app's startup path (the companion logs the URL
+# it is reachable at) and the pairing QR -- both of which are on the thread the
+# user is waiting on.
+HOSTNAME_LOOKUP_TIMEOUT = 2.0
+
+# Whether the skipped-name line has been written.  Module state rather than a flag on the caller:
+# the skip is a property of what `getfqdn()` returns on this machine, so it is the same fact every
+# time and there is one log to hold it.
+_skipped_names_said = False
+
+# ── The service type: a shape, not a string ──────────────────────────────────
+#
+# `service_type` is a settings-page text field and was validated only by length,
+# which made a mistyped value able to take the whole LAN engine down: zeroconf
+# raises ``BadTypeInNameException`` for anything that is not a DNS-SD service
+# type, ``Discovery.start()`` did not catch it, and ``LanRuntime.start()``
+# turned it into ``LAN_START_FAILED`` -- discovery, pairing and sync all gone
+# because one text field was missing ``._tcp.local.``.  The shape is checked
+# here so the settings layer can reject it at save time (see
+# ``is_valid_service_type``) and so this module never has to build a browser
+# with a type the library will refuse.
+DEFAULT_SERVICE_TYPE = "_clipsync._tcp.local."
+
+# DNS-SD service instance types: an optional subtype chain (``_sub._printer``)
+# followed by the service label, the transport and ``local.``.  Underscores are
+# part of the service label, hyphens and digits are allowed by RFC 6763, and
+# the trailing dot is required by zeroconf (its own error message says
+# "must end with '._tcp.local.'").
+_SERVICE_TYPE_PATTERN = re.compile(
+    r"^(?:_[A-Za-z0-9_-]+\.)+_(?:tcp|udp)\.local\.$"
+)
+# A DNS-SD type label is at most 63 bytes, and the whole name is bounded by the
+# DNS wire format; anything longer is not a type zeroconf can pack.
+_MAX_SERVICE_TYPE_LENGTH = 255
+
+
+def is_valid_service_type(value) -> bool:
+    """Whether *value* is a DNS-SD service type this module can browse.
+
+    The shape zeroconf accepts for a service type: one or more ``_label``
+    components, then ``_tcp`` or ``_udp``, then ``local.``.  ``_clipsync._tcp.local.``
+    is valid; ``_clipsync._tcp.local`` (no trailing dot), ``clipsync._tcp.local.``
+    (label does not start with ``_``) and ``myclipsync`` are not.
+
+    Exposed rather than private because the settings layer has to reject the
+    same values this module refuses: a value accepted there but rejected here is
+    a LAN engine that will not start.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if text != value or not text or len(text) > _MAX_SERVICE_TYPE_LENGTH:
+        return False
+    if "\0" in text or "\r" in text or "\n" in text:
+        return False
+    if not _SERVICE_TYPE_PATTERN.match(text):
+        return False
+    # Per-label length, which the pattern cannot express.
+    return all(len(label) <= 63 for label in text.rstrip(".").split("."))
+
+
+def _usable_service_type(value) -> str:
+    """*value* as a browsable service type, or the built-in default.
+
+    A value that is right but for the conventional trailing dot is completed
+    rather than replaced: the config validator accepts both spellings (a
+    hand-written config that predates the dot rule keeps loading), and the
+    discovery layer has to agree with it or a value the settings page saved
+    would be silently swapped for the default.
+
+    Anything else is the fallback, and it is a repair rather than a silent
+    change of what the user asked for: it is logged at WARNING with the value
+    that was rejected, so a mistyped setting produces a working LAN engine and
+    a line that says why the type being browsed is not the one in the setting.
+    """
+    if is_valid_service_type(value):
+        return value
+    stripped = value.strip() if isinstance(value, str) else value
+    if isinstance(stripped, str) and is_valid_service_type(stripped + "."):
+        dotted = stripped + "."
+        logger.info("mDNS service type %r completed to %r", value, dotted)
+        return dotted
+    logger.warning(
+        "mDNS service type %r is not a valid DNS-SD type (expected one like %r) "
+        "-- using the default",
+        value,
+        DEFAULT_SERVICE_TYPE,
+    )
+    return DEFAULT_SERVICE_TYPE
+
+
+def _is_resolvable_name(name: str) -> bool:
+    """Whether a host name is worth handing to the resolver.
+
+    Two shapes are not, and both are things `socket.getfqdn()` really returns:
+
+    * a **reverse-DNS name** (``...ip6.arpa``, ``...in-addr.arpa``).  macOS answers
+      `getfqdn()` with the reverse form of the host's own ``::`` on some configurations,
+      and that name has no forward record anywhere: the resolver can only say no.
+    * ``localhost`` and its variants, which resolve to a loopback address these callers
+      discard anyway -- they want LAN addresses.
+
+    Measured cost of not doing this, from one machine's log: **408** identical failures at
+    a 30-second interval, each naming a 70-character string.
+    """
+    if not name or not name.strip():
+        return False
+    lowered = name.strip().lower().rstrip(".")
+    if not lowered:
+        return False
+    if lowered == "localhost" or lowered.endswith(".localhost"):
+        return False
+    # An ordinary host may contain "arpa" (a company name, say); only a reverse name has it
+    # as the final label.
+    return not lowered.endswith(".arpa") and lowered != "arpa"
+
+
+def _resolved_host_addresses(timeout: float) -> list[str]:
+    """Every IPv4 address the host name and the FQDN resolve to, bounded.
+
+    Both lookups share one worker thread and one deadline: the thread that
+    called us must never be the one sitting in the resolver.  ``getfqdn()`` is
+    in here rather than in the caller for the same reason -- it is a reverse
+    lookup of the host name, and on the machines this bound exists for it is
+    the slowest of the three.
+
+    The worker is a daemon and may outlive the wait, so what is returned is a
+    snapshot: an address it appends after the deadline is one this call does
+    not see, which is the same outcome as a lookup that failed.
+    """
+    found: list[str] = []
+
+    def _worker() -> None:
+        skipped: list[str] = []
+        for name in (socket.gethostname(), socket.getfqdn()):
+            if not _is_resolvable_name(name):
+                skipped.append(name)
+                continue
+            try:
+                for info in socket.getaddrinfo(name, None, family=socket.AF_INET):
+                    found.append(info[4][0])
+            except Exception as exc:
+                # One line, not a traceback: this runs on every enumeration -- the network
+                # watcher alone calls it twice a minute -- and a four-frame traceback per
+                # minute said nothing the name and the errno do not, and buried the lines
+                # that mattered in a log the user is asked to send.  The macOS reverse-name
+                # case that used to arrive here no longer does: `_is_resolvable_name`
+                # filters it before the call, because a name no resolver can answer is not
+                # worth asking about 408 times in one log.
+                logger.debug("Address lookup for %r failed: %s", name, exc)
+        if skipped:
+            # Once per *process*, not once per enumeration.  It was written once per
+            # enumeration, which the network watcher runs twice a minute -- measured, 1078 lines in
+            # one Mac's log for a name that cannot change while the process lives.  The fact is
+            # about the machine, so it is learned once.
+            global _skipped_names_said
+            if not _skipped_names_said:
+                _skipped_names_said = True
+                logger.debug(
+                    "Skipped unresolvable names: %s",
+                    ", ".join(repr(n) for n in skipped),
+                )
+
+    worker = threading.Thread(target=_worker, daemon=True, name="lan-address-lookup")
+    worker.start()
+    worker.join(timeout)
+    return list(found)
+
+
+def _primary_routable_address() -> str | None:
+    """The address the default route would leave from, or None.
+
+    A UDP socket that is connected and never written to sends nothing: this asks
+    the routing table a question and reads the answer off ``getsockname()``.  It
+    is the address a peer on this subnet would most likely reach us at, and it is
+    the first source ``get_all_local_addresses`` combines.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def get_all_local_addresses():
+    """Enumerate every usable non-loopback IPv4 address on this host.
+
+    ``socket.gethostname()`` alone is unreliable: on macOS/Linux it can
+    resolve to only the loopback address (or a single adapter), which made
+    us advertise an unreachable IP and caused peers on the same network to
+    fail to discover us. We combine three sources and deduplicate:
+
+      1. the primary routable address (UDP connect trick — no packets sent),
+      2. every address the hostname resolves to,
+      3. every address the FQDN resolves to.
+
+    This is the *enumeration* half, and it deliberately keeps more than it
+    broadcasts: any unicast IPv4 address that is not loopback, link-local or
+    otherwise unusable is returned, including CGNAT (``100.64.0.0/10``) and
+    public-numbered addresses.  Which of them go into the A records is the
+    policy half (see ``_advertisable``), because the two questions are not the
+    same one.  The old filter was the policy: it dropped every address outside
+    RFC1918, so a campus/enterprise LAN numbered with public addresses, or a
+    carrier-grade NAT, enumerated to nothing and this device advertised
+    ``127.0.0.1`` -- which every peer discards.  The user saw the network one
+    way only: they could list other devices, and no device could list them.
+
+    A tunnel's address is private by range and survives this, and is dropped in
+    ``_advertisable`` for broadcast where a physical adapter exists.
+    """
+    addresses: list[str] = []
+    seen: set[str] = set()
+
+    def _add(ip: str) -> None:
+        ip = (ip or "").strip()
+        if not _is_usable_ipv4(ip):
+            return
+        if ip not in seen:
+            seen.add(ip)
+            addresses.append(ip)
+
+    # 1. Primary routable address — this is what a peer on the same subnet
+    #    would actually use to reach us.
+    with contextlib.suppress(Exception):
+        _add(_primary_routable_address() or "")
+
+    # 2+3. Hostname-resolved addresses (Windows usually returns all adapters)
+    #    plus the FQDN's, which covers the bare-hostname /etc/hosts gap.
+    #    Bounded, and for a reason worth naming: these are the only two calls
+    #    in this function that can take arbitrarily long.  On a host whose own
+    #    name no resolver knows -- a CI runner, a laptop that just joined a
+    #    guest network, anything behind a VPN that took the name server with it
+    #    -- they block for the resolver's own timeout, which is tens of
+    #    seconds, and this function is on the app's startup path.
+    #
+    #    The bound costs no correctness: step 1 resolves no names at all, so
+    #    the primary routable address is already in hand by the time it
+    #    applies, and a lookup that misses the deadline contributes exactly
+    #    what one that fails contributes.
+    for ip in _resolved_host_addresses(HOSTNAME_LOOKUP_TIMEOUT):
+        _add(ip)
+
+    addresses = _advertisable(addresses, _adapter_kinds())
+
+    # Cap the advertised set: more IPs than this means unusual network
+    # topology (many adapters) — advertising them all only broadens exposure.
+    MAX_ADVERTISED_IPS = 10  # noqa: N806
+    if len(addresses) > MAX_ADVERTISED_IPS:
+        addresses = addresses[:MAX_ADVERTISED_IPS]
+
+    if not addresses:
+        # Said in the terms the fault is actually experienced: this device can
+        # listen and cannot be listed.  It used to read "failed to enumerate",
+        # which sounds like a probe that broke rather than like the fact that
+        # there is no address a peer could dial.
+        logger.warning(
+            "No usable local IPv4 address found -- this device cannot be listed "
+            "on the LAN (loopback is never advertised)"
+        )
+    return addresses
+
+
+# How good an address is to advertise, and to dial from, lowest first.
+#
+# ``virtual`` ranks worse than ``other`` deliberately.  ``other`` is the bucket
+# every real adapter lands in when its name says nothing this code recognises —
+# a Linux bridge, an unusual vendor string — and a tunnel that outranked one of
+# those would be preferred over the very wire a peer is plugged into.  A virtual
+# adapter is chosen only when it is the only address there is, which is the
+# machine reachable through nothing else.
+_ADAPTER_PRIORITY = {"ethernet": 0, "wifi": 1, "other": 2, "virtual": 3}
+
+# Substrings naming a tunnel or a virtual adapter rather than a piece of wire.
+# Matched against the adapter's *description* as well as its name, which is what
+# makes this independent of the interface language: Windows localizes the
+# friendly name and never the description.  Matching the friendly name alone
+# read a live tunnel as an ordinary adapter -- "VirtualNet" and "Heysocks" match
+# nothing in a keyword list built from "vpn"/"tunnel"/"tap" -- and then handed
+# its address to every peer on the LAN, which dialled it and found nothing.
+_VIRTUAL_MARKERS = (
+    "vpn",
+    "tunnel",
+    "tap",
+    "tun",
+    "wintun",
+    "wireguard",
+    "openvpn",
+    "nordlynx",
+    "tailscale",
+    "zerotier",
+    "clash",
+    "mihomo",
+    "singbox",
+    "sing-box",
+    "v2ray",
+    "xray",
+    "shadowsocks",
+    "socks",
+    "proxy",
+    "warp",
+    "teredo",
+    "ppp",
+    "bridge",
+    "br-",
+    "virtual",
+    "hyper-v",
+    "vethernet",
+    "vmware",
+    "virtualbox",
+    "vmnet",
+    "vbox",
+    "docker",
+    "wsl",
+    "veth",
+    "awdl",
+    "ipsec",
+    "loopback",
+    "bluetooth",
+)
+_WIFI_MARKERS = ("wi-fi", "wifi", "wlan", "wireless", "802.11", "airport")
+_ETHERNET_MARKERS = ("ethernet", "local area")
+
+# The interface's own name, where that is all a platform offers: macOS's ``en0``
+# and ``utun3``, Linux's ``eth0``/``enp3s0``/``wlp2s0``.  Prefixes rather than
+# substrings, because a name is short and a stray match inside one is not a hint.
+_WIRE_NAME_PREFIXES = ("en", "eth")
+_WIFI_NAME_PREFIXES = ("wl", "ww")
+
+
+def _kind_of(text: str, name: str = "") -> str:
+    """Which sort of adapter *text* describes: ethernet, wifi, virtual or other.
+
+    The tunnel test runs first, and that order is the point: "vEthernet (WSL)"
+    and "Hyper-V Virtual Ethernet Adapter" both contain "eth", and a virtual
+    adapter classified as a cable would be preferred over the real one beside it.
+
+    *name* is the interface's own name, which is all an ``ip``/``ifconfig``
+    world offers — ``en0``, ``eth0``, ``wlp2s0``, ``utun3``.  It carries the
+    same distinction the description does, and it is the *only* thing that does
+    where no description exists, so it is matched both ways round: as a prefix,
+    to tell a wire from a wireless one, and as text, where the markers above
+    catch the tunnels.  ``utun3`` is a tunnel because it holds "tun", not
+    because it does not hold "en".
+    """
+    haystack = (text or "").lower()
+    if any(marker in haystack for marker in _VIRTUAL_MARKERS):
+        return "virtual"
+    if any(marker in haystack for marker in _WIFI_MARKERS):
+        return "wifi"
+    if (name or "").lower().startswith(_WIRE_NAME_PREFIXES):
+        return "ethernet"
+    if (name or "").lower().startswith(_WIFI_NAME_PREFIXES):
+        return "wifi"
+    if any(marker in haystack for marker in _ETHERNET_MARKERS):
+        return "ethernet"
+    return "other"
+
+
+def _adapter_kinds() -> dict[str, str]:
+    """Every local IPv4 address, mapped to the kind of adapter carrying it.
+
+    One enumeration, three readers: ``get_all_local_addresses`` drops what must
+    not be advertised, ``_get_interface_priorities`` ranks the rest, and the
+    candidates a peer offers are ranked against our own tunnels.
+
+    Read from ``ifaddr`` — the same interface list zeroconf itself binds its
+    sockets to — rather than from the platform's own tooling.  It reports each
+    adapter's description ("VirtualNet Tunnel", "TAP-Windows Adapter V9",
+    "Intel(R) Ethernet Controller I226-V") next to its address, needs no process
+    spawn and no console codepage, and reads the same way on all three
+    platforms.  An enumeration that fails yields no kinds, which is the
+    behaviour every caller had before kinds existed.
+    """
+    kinds: dict[str, str] = {}
+    try:
+        for adapter in ifaddr.get_adapters():
+            # ``name`` is the interface's own name (``en0``, ``eth0``) and
+            # ``nice_name`` its description; on Windows the first is a GUID and
+            # the second is the vendor's words, and on POSIX it is the other way
+            # round.  Both go in, and the name half is offered to the prefix
+            # rules as well.
+            name = adapter.name or ""
+            text = f"{adapter.nice_name or ''} {name}"
+            for entry in adapter.ips:
+                if not getattr(entry, "is_IPv4", False):
+                    continue
+                kinds[entry.ip] = _kind_of(text, name)
+    except Exception as exc:
+        logger.debug("Could not classify the local adapters: %s", exc)
+    return kinds
+
+
+def _advertisable(addresses: list[str], kinds: dict[str, str]) -> list[str]:
+    """The addresses to put in the A records, chosen from what was enumerated.
+
+    The rule, in order, because a peer that dials an address this machine is not
+    reachable at lists a device it cannot talk to:
+
+    1. **A tunnel's address is dropped when a physical adapter has one.**  A
+       tunnel's address is private by range -- WireGuard's 10.x, OpenVPN's
+       172.16-31.x -- so it survives every other filter, and it is still not
+       somewhere a peer on *this* network can reach us: it dials a black hole.
+       The deliberate cost, stated so it is not rediscovered as a bug: a peer
+       reachable only through the same VPN is not discovered this way, because
+       mDNS would have to cross the tunnel anyway and this side does not know
+       whether it does.  A machine whose only way to be reached IS the tunnel
+       does advertise it -- the alternative is advertising nothing at all.
+    2. **Addresses numbered as private (RFC1918) or CGNAT (100.64/10) are
+       preferred over public-numbered ones.**  Where a machine has both, the
+       public one is its route to the internet, not the address its neighbours
+       can use, and broadcasting it would expose more topology than discovery
+       needs.
+    3. **A public-numbered address is still advertised when it is all there
+       is.**  A campus or enterprise network numbered with public addresses, and
+       CGNAT, are both real LANs; refusing them was how such a machine ended up
+       broadcasting `127.0.0.1` -- which every peer drops -- and being invisible
+       to everyone while it could still list everyone.  Advertising nothing is
+       not the privacy-friendly choice there; it is the broken one.
+    """
+    reachable = [ip for ip in addresses if kinds.get(ip) != "virtual"]
+    pool = reachable or addresses
+    private_numbered = [ip for ip in pool if _is_private_numbered(ip)]
+    return private_numbered or pool
+
+
+def _get_interface_priorities() -> dict[str, int]:
+    """Sort key per local address, lowest wins (see ``_ADAPTER_PRIORITY``)."""
+    fallback = _ADAPTER_PRIORITY["other"]
+    return {ip: _ADAPTER_PRIORITY.get(kind, fallback) for ip, kind in _adapter_kinds().items()}
+
+
+def _virtual_addresses() -> set[str]:
+    """Addresses carried by a tunnel or a virtual adapter on this machine."""
+    return {ip for ip, kind in _adapter_kinds().items() if kind == "virtual"}
+
+
+def _local_network_prefixes() -> dict[str, int]:
+    """The netmask length of each local IPv4 address, from the interface list.
+
+    ``/24`` was assumed wherever a peer's address was compared with ours, which
+    is right on a home network and wrong on the /16 and /8 networks that
+    campuses and enterprises actually use: on those, two addresses on the same
+    wire can differ in the third octet, so a peer's *other*, unreachable
+    interface was ranked as "not local" exactly like its reachable one and the
+    tie was broken by the address string -- a device that was discovered and
+    could not be dialled, at the same wrong address on every retry.
+
+    ``ifaddr`` knows the real prefix (``entry.network_prefix``), which is the
+    number the kernel routes on.  An entry that does not carry one is left out,
+    and callers fall back to the /24 guess.
+    """
+    prefixes: dict[str, int] = {}
+    try:
+        for adapter in ifaddr.get_adapters():
+            for entry in adapter.ips:
+                if not getattr(entry, "is_IPv4", False):
+                    continue
+                try:
+                    prefix = int(entry.network_prefix)
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if 0 <= prefix <= 32:
+                    prefixes[entry.ip] = prefix
+    except Exception as exc:
+        logger.debug("Could not read the local netmasks: %s", exc)
+    return prefixes
+
+
+def _get_local_address():
+    all_ips = get_all_local_addresses()
+    if not all_ips:
+        # Kept as the placeholder for the ranking code, which needs *something*
+        # to compare a peer's candidates against.  It is never advertised: the
+        # registration path leaves the A records out rather than hand a peer an
+        # address it discards on sight (see _register_service).
+        logger.warning(
+            "No usable local IPv4 address -- this device can listen on the LAN "
+            "but cannot be listed on it"
+        )
+        return "127.0.0.1"
+    priorities = _get_interface_priorities()
+    sorted_ips = sorted(all_ips, key=lambda ip: priorities.get(ip, 99))
+    best = sorted_ips[0]
+    logger.info("Local IPs: %s (selected %s)", all_ips, best)
+    return best
+
+
+def _clip_bytes(value: str, limit: int) -> str:
+    """Trim *value* to at most *limit* UTF-8 bytes, whole characters only.
+
+    Trimming by characters is not the same bound: the wire caps a TXT string
+    by bytes, and a name of emoji reaches it at half the character count.
+    """
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def _is_private_ip(ip: str) -> bool:
+    """True if *ip* is an RFC1918 private LAN address."""
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31)
+
+
+def _is_cgnat_ip(ip: str) -> bool:
+    """True if *ip* is in the carrier-grade NAT range, ``100.64.0.0/10``.
+
+    Not RFC1918, and still a LAN: 100.64/10 is what a carrier or a large
+    campus puts on its own internal links, and a device numbered there is as
+    discoverable as one on 192.168 / 10 / 172.16.  It was rejected by every
+    filter that only knew RFC1918, which made such a network enumerate to
+    nothing.
+    """
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return a == 100 and 64 <= b <= 127
+
+
+def _is_private_numbered(ip: str) -> bool:
+    """True for the address ranges a LAN uses: RFC1918 or CGNAT."""
+    return _is_private_ip(ip) or _is_cgnat_ip(ip)
+
+
+def _is_usable_ipv4(ip: str) -> bool:
+    """True if *ip* is a unicast IPv4 address another host could dial.
+
+    The one definition of "usable" behind the announcement filters, so an
+    address is never broadcast by one path and refused by another: loopback,
+    unspecified, link-local (169.254/16, an APIPA adapter that a peer cannot
+    route to), multicast and the broadcast address are all out.  Everything
+    else -- private, CGNAT and public alike -- is in, and the advertising
+    policy decides which of those it is worth putting in a record.
+    """
+    try:
+        address = ipaddress.IPv4Address(ip)
+    except (ipaddress.AddressValueError, ValueError, TypeError):
+        return False
+    return not (
+        address.is_loopback
+        or address.is_unspecified
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address == ipaddress.IPv4Address("255.255.255.255")
+    )
+
+
+def _usable_ipv6(ip: str) -> bool:
+    """True if *ip* is an IPv6 address another host could plausibly dial.
+
+    Loopback (``::1``) and the unspecified address (``::``) are not.  Link-local
+    IPv6 is kept -- an IPv6-only peer may have nothing else, and the candidate
+    ranking puts it behind a routable address -- with the caveat that dialling
+    it needs the interface's scope, which this layer does not carry.
+    """
+    try:
+        address = ipaddress.IPv6Address(ip)
+    except (ipaddress.AddressValueError, ValueError, TypeError):
+        return False
+    return not (address.is_loopback or address.is_unspecified)
+
+
+def _address_text(raw) -> str | None:
+    """One address from a service record, as text, or None if it is unusable.
+
+    ``ServiceInfo.addresses`` holds the bytes of the A and AAAA records: 4
+    bytes for IPv4 and 16 for IPv6.  ``socket.inet_ntoa`` was the only decoder
+    here, and it raises on anything but 4 bytes -- so an IPv6-only peer's
+    address was silently skipped, its candidate list came out empty, and the
+    device was reported (with a WARNING every ten seconds) as "discovered with
+    no usable address" and never listed.  A 16-byte address now decodes through
+    ``inet_ntop`` and is kept as a candidate.
+    """
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8", errors="ignore")
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    if len(raw) == 4:
+        return socket.inet_ntoa(bytes(raw))
+    if len(raw) == 16:
+        return socket.inet_ntop(socket.AF_INET6, bytes(raw))
+    return None
+
+
+def _service_addresses(info) -> list[str]:
+    """Every address one peer advertised, IPv4 and IPv6 alike.
+
+    ``ServiceInfo.parsed_addresses()`` is the library's own answer and is
+    preferred where it exists; the record bytes are decoded here otherwise,
+    which is also what the tests' stand-in records offer.  The two produce the
+    same strings for 4- and 16-byte records.
+    """
+    parsed = getattr(info, "parsed_addresses", None)
+    if callable(parsed):
+        try:
+            return [text for text in parsed() if text]
+        except Exception:
+            pass
+    found: list[str] = []
+    for raw in getattr(info, "addresses", None) or []:
+        text = _address_text(raw)
+        if text:
+            found.append(text)
+    return found
+
+
+def _route_source(ip: str) -> str | None:
+    """The local address this machine would reach *ip* from, or None.
+
+    A UDP socket that is connected and never written to sends nothing: this asks
+    the routing table a question, reads the answer off ``getsockname()`` and
+    closes the socket.  None means the OS has no route to it at all, which is a
+    real answer too — a peer's address this machine cannot reach is not the
+    address to dial it at, however ordinary the number looks.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect((ip, 5353))
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def _pick_best_address(
+    candidates: list[str],
+    our_ip: str,
+    virtual_ips: frozenset[str] = frozenset(),
+    our_prefix: int | None = None,
+) -> str:
+    """Choose the remote address most likely reachable on the LAN.
+
+    Ranked, best first:
+
+      0. on our own subnet — a peer on this network.  The subnet comes from the
+         local interface's real netmask (``_local_network_prefixes``), not from
+         the first three octets: on a /16 -- or /8 -- network a peer on the same
+         wire can differ in the third octet, and the /24 guess ranked it as
+         not-local beside an interface that really was unreachable, then broke
+         the tie by the address string.  Devices were listed and could not be
+         dialled, at the same wrong address on every retry;
+      1. an address this machine would reach over a real interface;
+      2. an address it would reach through a tunnel of its own, which is right
+         for a peer that really is on the same VPN and wrong for one that is on
+         this network;
+      3. an address it has no route to at all (a link-local IPv6 lands here:
+         dialling it needs a scope this layer does not carry);
+      4. the rest, which is not an address anybody can dial.
+
+    Rank 1 against rank 2 is the one that matters with a VPN up.  Every private
+    address used to rank equally and the tie was broken by the *string*, so a
+    peer advertising both 192.168.1.238 and a tunnel's 10.8.0.2 was dialled at
+    the tunnel address — "10." sorts before "192." — from any machine not on its
+    own /24.  Which route a packet would leave by is the routing table's answer,
+    so the routing table is asked.
+
+    Falls back to the first candidate on a tie, and ties within a rank are still
+    broken by the address string: mDNS address order is unstable across
+    announcements, and index-based tie-breaking made the chosen address flap
+    between two same-rank interfaces.
+    """
+
+    our_network = _our_network(our_ip, our_prefix)
+
+    def _same_network(ip: str) -> bool:
+        if our_network is not None:
+            try:
+                return ipaddress.IPv4Address(ip) in our_network
+            except (ipaddress.AddressValueError, ValueError):
+                return False
+        # No mask for our own address (a test's stand-in, or an interface list
+        # that failed): fall back to the old /24 guess, which is right where it
+        # has always been right and only used when the real answer is missing.
+        parts = ip.split(".")
+        ours = our_ip.split(".")
+        return len(parts) == 4 and len(ours) == 4 and parts[:3] == ours[:3]
+
+    def rank(ip: str) -> tuple:
+        if _same_network(ip):
+            return (0,)
+        try:
+            is_v6 = isinstance(ipaddress.ip_address(ip), ipaddress.IPv6Address)
+        except (ipaddress.AddressValueError, ValueError):
+            return (4,)
+        if is_v6:
+            # A global or ULA IPv6 is a real address on a real path; a
+            # link-local one is not dialable without a scope, which is rank 3
+            # with the rest of the unreachable addresses.
+            address = ipaddress.IPv6Address(ip)
+            return (1,) if not address.is_link_local else (3,)
+        if not _is_usable_ipv4(ip):
+            return (4,)
+        source = _route_source(ip)
+        if source is None:
+            # Nowhere to send it: this machine cannot reach that address at all.
+            return (3,)
+        if source in virtual_ips:
+            return (2,)
+        return (1,)
+
+    # Tie-break by the address string, not the list index — mDNS address order
+    # is unstable across announcements, so index-based tie-breaking made the
+    # chosen address flap between two same-subnet interfaces.
+    return min(candidates, key=lambda ip: (rank(ip), ip))
+
+
+def _our_network(our_ip: str, our_prefix: int | None = None) -> ipaddress.IPv4Network | None:
+    """This machine's own subnet, or None when its mask is not known.
+
+    *our_prefix* is the length the caller already read; left out, the interface
+    list is consulted.  None means "no mask", and the caller falls back to the
+    /24 comparison this replaced.
+    """
+    if our_prefix is None:
+        our_prefix = _local_network_prefixes().get(our_ip)
+    if our_prefix is None:
+        return None
+    try:
+        return ipaddress.IPv4Network(f"{our_ip}/{our_prefix}", strict=False)
+    except (ipaddress.AddressValueError, ValueError, TypeError):
+        return None
+
+
+class _PresenceListener(RecordUpdateListener):
+    """Stamps every PTR this machine hears, so presence stops depending on the
+    browser.
+
+    The browser is the wrong clock for "is that device still there", because it
+    fires ``Added`` only on *novelty*: a peer that re-announces the same record
+    produces no event at all, an A/SRV/TXT that expires while its PTR lives is
+    never re-queried, and a PTR that has been reported lost is not announced as
+    Added again for as long as the cached copy lives -- and the library clamps a
+    PTR's TTL up to 1125 seconds (``_DNS_PTR_MIN_TTL``), so "as long as" is
+    measured in tens of minutes.  The record manager has no such opinion: every
+    answer packet is handed to every listener as it arrives.  That asymmetry is
+    the whole reason this class exists.
+
+    It runs on the zeroconf event-loop thread, so it does one dict assignment
+    and nothing else.  Two calls are forbidden from here and both are the
+    obvious next refactor: ``update_service`` (deadlocks from this thread) and
+    ``get_service_info`` (refuses to run on this thread).  Re-announcing because
+    a peer was heard is also the wrong shape -- see ``_presence_round``.
+    """
+
+    def __init__(self, owner: "Discovery"):
+        self._owner = owner
+
+    def async_update_records(self, zc, now, records) -> None:
+        owner = self._owner
+        service_type = owner._service_type.lower()
+        own = owner._instance_name
+        cutoff = now - PRESENCE_STALE_MILLIS
+        with owner._heard_lock:
+            for update in records:
+                record = update.new
+                if record.type != _TYPE_PTR or record.name.lower() != service_type:
+                    continue
+                # Two ways a record arrives without anybody having spoken:
+                # the registration replay (a record cached long ago, delivered
+                # with ``old is None`` so it is indistinguishable from a new
+                # one) and the ten-second sweep that delivers expired records.
+                if record.created < cutoff or record.is_expired(now):
+                    continue
+                alias = record.alias
+                if alias and alias != own:
+                    owner._heard[alias] = now / 1000.0
+
+
+class Discovery:
+    """mDNS-based peer discovery."""
+
+    @staticmethod
+    def _hash_device_id(device_id: str) -> str:
+        return peer_id_hash(device_id)
+
+    def __init__(
+        self,
+        device_id: str,
+        device_name: str,
+        port: int,
+        service_type: str,
+        on_error: Callable[[], None] | None = None,
+    ):
+        self._device_id = device_id
+        self._device_name = device_name
+        self._device_id_hash = self._hash_device_id(device_id)
+        # The instance label is truncated and id-tagged (see _label); the name
+        # the user chose rides in the TXT record instead, which is what peers
+        # list this device under.
+        self._display_name = self._label(device_name, self._device_id_hash)
+        self._port = port
+        # Normalised here as well as at start(): an invalid type is a mistyped
+        # setting, and it must not be able to take the LAN engine down (see
+        # _usable_service_type and is_valid_service_type).
+        self._service_type = _usable_service_type(service_type)
+        # What the *user* asked for, as opposed to what the machinery is doing
+        # right now.  ``_service_info is None`` means both "the registration was
+        # lost" and "the user hid this device", and the repair paths could not
+        # tell them apart: the presence round re-registered a device the user
+        # had just hidden within ten seconds, and a network change or a wake
+        # switched both discovery switches back on behind the settings page's
+        # back (App.vue promises "hidden = nearby devices cannot see this
+        # device").  These two bits are the user's answer; every repair and
+        # rebuild consults them and never overrides them.
+        self._advertise_wanted = True
+        self._browse_wanted = True
+        # Called when the *real* (enabled, visible) state changes, so the
+        # runtime can publish ``discovery.changed`` and the settings page can
+        # follow the truth instead of the switch it last wrote.  Receives
+        # ``{"enabled": bool, "visible": bool}``.
+        self._state_callback: Callable[[dict], None] | None = None
+        self._reported_state: dict | None = None
+        # Called before a silent peer is reported lost: the runtime can vouch
+        # for a live TCP link, which is counter-evidence a machine that cannot
+        # hear multicast answers badly needs (see _sweep_presence).
+        self._link_checker: Callable[[str], bool] | None = None
+        # Called when the registration thread could not publish this device.
+        # start() returns before that thread does, so this is the only way the
+        # fact reaches whoever wired the object up.
+        self._on_error = on_error
+        self._zc: Zeroconf | None = None
+        self._service_info: ServiceInfo | None = None
+        self._browser: ServiceBrowser | None = None
+        self._listener: _PresenceListener | None = None
+        self._on_peer_found: Callable | None = None
+        self._on_peer_lost: Callable | None = None
+        self._lock = threading.Lock()
+        self._known_peers: dict[str, dict] = {}  # peer_id -> info
+        self._service_to_peer: dict[str, str] = {}  # service_name -> peer_id
+        self._our_ip = "127.0.0.1"
+        # The netmask of ``_our_ip``, read where the advertisement is rebuilt;
+        # None means "not known" and the ranking falls back to the /24 guess.
+        self._our_prefix: int | None = None
+        # Peers kept on the list although they have stopped answering (see
+        # _sweep_presence): peer id -> the monotonic second it went stale.
+        self._stale_since: dict[str, float] = {}
+        # This machine's own tunnel and virtual-adapter addresses, refreshed
+        # wherever the advertisement is rebuilt (see _advertised_ips).  A peer's
+        # candidate addresses are ranked against it, and the mDNS callback
+        # thread must not go looking for adapters to do that.
+        self._virtual_ips: frozenset[str] = frozenset()
+        # The address policy's last answer, for the runtime's diagnostics:
+        # {"addresses": [...], "advertised": [...], "reason": ""|"loopback_only"}.
+        # A device that can only be reached at 127.0.0.1 is invisible on the
+        # LAN, and the user needs to be told why rather than left guessing.
+        self._address_policy: dict = {}
+        # Network-change watcher state: the set of addresses we advertised,
+        # plus a stop signal for the light poll in _network_watch_loop.
+        self._netmon_stop = threading.Event()
+        self._advertised_ips: frozenset[str] = frozenset()
+        # Set while the registration worker is inside register_service().
+        # start_advertising() reads it so a hide/show toggle that lands during
+        # startup cannot race the first registration into a second one.
+        self._registering = threading.Event()
+        # Presence bookkeeping (see _presence_round): instance name -> the
+        # monotonic second its last PTR arrived.  Written from the zeroconf
+        # event loop by _PresenceListener and read by the presence thread, so
+        # it carries its own lock -- never _lock, which the browser thread
+        # holds while it works and which must not be held across a round.
+        self._heard: dict[str, float] = {}
+        self._heard_lock = threading.Lock()
+        # One round at a time.  A manual scan runs on the RPC thread and the
+        # loop's round on the presence thread; without this they would each
+        # announce, ask and settle at the same time.
+        self._scan_lock = threading.Lock()
+        # Our own instance name, read live by the listener, which runs on the
+        # event loop and so must not touch _service_info (lock-protected).
+        self._instance_name = ""
+        # Which round we are on, for the periodic announcement.
+        self._rounds = 0
+        # When the last round stopped reading answers.  The round after it
+        # reads back everyone heard since then -- which is every answer that has
+        # arrived, whenever it arrived (guarded by _lock, like the peer table it
+        # feeds).  A peer that spoke is the only thing that can put it back on
+        # the list, because the browser fires nothing for a record it already
+        # holds, so no answer may fall between two rounds.
+        self._answered_since = 0.0
+        # When the current browse began collecting names.  Nothing may be
+        # reported lost before the browse that could have heard it has been up
+        # for a full timeout: start_browsing clears the name mapping, which is
+        # the evidence a sweep reads (see _still_heard), so a sweep in the gap
+        # between the rebuild and the first answers reports every peer lost for
+        # having been heard under a name this side had just thrown away.
+        self._browse_since = 0.0
+        # Counters behind the browse repair in _repair_deaf_browse: how many
+        # consecutive asked rounds heard nobody (answered=0), when this machine
+        # last had a peer to miss, and when the browse was last rebuilt.  The
+        # old "has ever had a peer" flag never came back down, so a network that
+        # really had emptied was rebuilt forever; "when did I last see a peer"
+        # is the same fact with an expiry.
+        self._empty_rounds = 0
+        self._last_peer_seen_at: float | None = None
+        # -inf, not 0.0: the cooldown is measured against time.monotonic(),
+        # whose zero is boot, not the epoch.  On a host up for less than
+        # the cooldown a 0.0 start reads as "rebuilt a moment ago" and
+        # blocks the first repair (a fresh CI runner does exactly that).
+        self._last_browse_rebuild = float("-inf")
+        # How long the next rebuild has to wait.  Starts at the cooldown and
+        # doubles for every rebuild that did not bring a peer back, up to
+        # BROWSE_REBUILD_MAX_BACKOFF_SECONDS: one fault that no rebuild can fix
+        # (a firewall dropping multicast, say) is not worth tearing the sockets
+        # down every five minutes for, and the field logs paid exactly that --
+        # 332 rebuilds in one five-day log.
+        self._browse_rebuild_backoff = BROWSE_REBUILD_COOLDOWN_SECONDS
+
+    def set_callbacks(self, on_found: Callable, on_lost: Callable):
+        """Set callbacks for peer discovery events.
+
+        ``on_found(peer_id_hash, name, address, port, version, os, arch, app, named)``
+
+        and ``on_lost(peer_id_hash)``.  The trailing fields are what the peer
+        advertised about itself; ``named`` says whether ``name`` is the one its
+        user chose (see ``_handle_service_added``), which is what tells a caller
+        whether it may replace a name it already holds.
+        """
+        with self._lock:
+            self._on_peer_found = on_found
+            self._on_peer_lost = on_lost
+
+    def set_state_callback(self, callback: Callable[[dict], None] | None) -> None:
+        """Be told when what this machine is *actually doing* changes.
+
+        *callback* receives ``{"enabled": bool, "visible": bool}`` -- the same
+        two facts ``LanRuntime.discovery_state()`` reports, and the same pair
+        the settings page's two switches describe.  It is called on a real
+        transition only (repairs and network changes included), which is the
+        point: the switches used to show what the user last wrote while the
+        background repair re-registered the device behind them, so ``hidden``
+        was not hidden and nothing said so.
+
+        Called outside this object's lock, from whichever thread made the
+        change (the presence thread, the registration worker, the RPC thread).
+        The runtime is expected to hand it to its own event publisher rather
+        than publish from here.
+        """
+        with self._lock:
+            self._state_callback = callback
+
+    def set_link_checker(self, checker: Callable[[str], bool] | None) -> None:
+        """Let the runtime vouch for a peer's live TCP link during a sweep.
+
+        *checker(peer_id)* returns True when this machine holds a live socket to
+        that peer.  A peer that has gone silent in mDNS but is still linked is
+        not a device that left: it is a device whose multicast answers are not
+        arriving, which is exactly the fault a browse repair exists for (see
+        ``_sweep_presence``).  Optional; the browser-cache evidence stands on its
+        own, so a runtime that does not wire this loses only the extra proof.
+        """
+        self._link_checker = checker
+
+    def address_policy(self) -> dict:
+        """What was enumerated and what went into the A records, with the reason.
+
+        ``{"addresses": [...], "advertised": [...], "reason": ""}``; the reason
+        is ``"loopback_only"`` when nothing usable was found, which is the one
+        case a user has to be told about: the device listens, cannot be listed,
+        and the UI should say so instead of leaving "not found" unexplained.
+        """
+        with self._lock:
+            return dict(self._address_policy)
+
+    def _emit_state(self) -> None:
+        """Report the real (enabled, visible) pair if it has moved."""
+        with self._lock:
+            state = {
+                "enabled": self._browser is not None,
+                "visible": self._zc is not None and self._service_info is not None,
+            }
+            if state == self._reported_state:
+                return
+            self._reported_state = state
+            callback = self._state_callback
+        if callback is None:
+            return
+        try:
+            callback(dict(state))
+        except Exception:
+            logger.debug("Discovery state callback failed", exc_info=True)
+
+    def _cached_service_names(self) -> list[str]:
+        """The service instances the browser's cache still holds, minus our own.
+
+        This is the counter-evidence the sweep and the repair need: a cache with
+        services in it while a round answers nothing is a machine that can no
+        longer hear, not a network that emptied.  Read through the library's own
+        cache API where the stand-in object has no cache.
+        """
+        zc = self._zc
+        cache = getattr(zc, "cache", None)
+        lookup = getattr(cache, "get_all_by_details", None)
+        if not callable(lookup):
+            return []
+        try:
+            records = lookup(self._service_type, _TYPE_PTR, _CLASS_IN) or []
+        except Exception:
+            return []
+        names: list[str] = []
+        for record in records:
+            alias = getattr(record, "alias", None)
+            if alias and alias != self._instance_name:
+                names.append(alias)
+        return names
+
+    def _browser_cached_service_count(self) -> int:
+        return len(self._cached_service_names())
+
+    @staticmethod
+    def _label(device_name: str, device_id_hash: str) -> str:
+        """The mDNS instance label: 8 characters of the name, plus an id tag.
+
+        The hash suffix keeps two devices whose names share their first 8
+        characters on distinct instances instead of fighting over one mDNS
+        name and resolving to each other.
+        """
+        base = device_name[:8] if device_name else "ClipSync"
+        return f"{base}-{device_id_hash[:4]}"
+
+    def _published_name(self) -> str:
+        """The device name to put in the TXT record, or "" to publish none.
+
+        Peers list this device by the name the user gave it, and the truncated
+        instance label is only a fallback for peers that hear nothing else —
+        which is why the name has to travel somewhere, and why it travels here:
+        the label cannot hold it, since 8 characters is what makes it
+        collision-free.
+
+        Deliberately nothing while the name is still this machine's hostname.
+        The truncated label exists so a hostname is never broadcast in
+        plaintext on the LAN, and a hostname the user never chose is not
+        something this record should hand out. A name they did choose is a
+        label they meant to be seen, and this is what makes it seen.
+        """
+        name = (self._device_name or "").strip()
+        if not name or name == platform.node():
+            return ""
+        # A TXT string is capped at 255 bytes by the wire format, and the
+        # settings page puts no cap on the name. Character count is not that
+        # cap: 64 emoji are 256 bytes, which is a registration that raises
+        # instead of a device that advertises.
+        return _clip_bytes(_sanitize_peer_str(name), 200)
+
+    def advertised_facts(self) -> dict[str, str]:
+        """What this device says about itself, in the spellings the TXT record uses.
+
+        Five strings that are said twice: in the mDNS record, which a peer reads
+        at its own pace, and in this device's answer to a ``device_ping``, which
+        is a reply to a question asked a moment ago.  One definition so the two
+        cannot be spelled differently — a device list that flips between two
+        spellings of one fact is what the answer feature exists to avoid, not
+        something it may add.
+
+        ``name`` is empty for a device that has not chosen one, which is the case
+        the TXT record leaves the field out for.
+        """
+        return {
+            "version": __version__,
+            "os": platform.system().lower(),
+            "arch": (platform.machine() or "").lower(),
+            "app": running_shell(),
+            "name": self._published_name(),
+        }
+
+    def _service_props(self, addresses: list[str] | None = None) -> dict[bytes, bytes]:
+        """The TXT record we publish, for both registrations.
+
+        Built in one place because it is published twice — once by ``start``
+        and again by every ``start_advertising`` — and a field added to one
+        copy only would be there or not depending on whether this device had
+        been hidden and shown again.
+
+        *addresses* is the list the caller is also putting in the A records, so
+        that the two halves of one registration describe the same machine.  Left
+        out, it is enumerated here — which is what a caller with no A records to
+        fill in wants.
+        """
+        facts = self.advertised_facts()
+        # Use the hashed device_id to avoid exposing the real device identity
+        # in plaintext mDNS TXT records.
+        props = {
+            b"device_id_hash": self._device_id_hash.encode("utf-8"),
+            b"v": facts["version"].encode("utf-8"),
+            b"os": facts["os"].encode("utf-8"),
+            b"arch": facts["arch"].encode("utf-8"),
+            # Which of the two applications published from this repository this
+            # device is running.  Both are one release with two assets per
+            # platform, so (os, arch) does not say which one a peer can use --
+            # a Windows device here may be running either, and the installer
+            # for one is not installable by the other.  It travels with the
+            # same three fields for the same reason: the device list reads it
+            # to decide whether an update exchange is even possible.
+            b"app": facts["app"].encode("utf-8"),
+        }
+        if facts["name"]:
+            props[b"n"] = facts["name"].encode("utf-8")
+        if addresses is None:
+            addresses = get_all_local_addresses()
+        for i, ip in enumerate(addresses):
+            props[f"alt_ip_{i}".encode()] = ip.encode()
+        return props
+
+    def set_device_name(self, device_name: str):
+        """Rename this device's advertisement, live.
+
+        The settings page said "takes effect for network discovery after a
+        restart" because the name was captured here once, at construction, and
+        nothing ever revisited it — the peers that had already listed this
+        device kept the old name until a restart, and the ones that had not
+        learned it from the TXT record but from a dial kept it forever.
+
+        A rename is a new registration whenever *either* half of the record
+        changed: the instance label (8 characters, enough for a collision-free
+        name) **or the TXT name**, which is what peers actually list this device
+        under.  The label test alone was the bug: ``Kais-MacBook-Pro`` ->
+        ``Kais-MacBook-Air`` keeps ``Kais-Mac`` in the label and changes nothing
+        in it, so the rename was stored and never published — and the record
+        keeps re-announcing the old ``n`` every sixty seconds for the life of
+        the process, while this device's ``device_ping`` answer carries the new
+        one.  Two sources, two names.
+        """
+        name = (device_name or "").strip()
+        with self._lock:
+            if not name or name == self._device_name:
+                return
+            # The TXT name before and after: read while ``_device_name`` is still
+            # the old value, so "published name changed" is about this rename.
+            was_published = self._published_name()
+            self._device_name = name
+            now_published = self._published_name()
+            label = self._label(name, self._device_id_hash)
+            renamed = label != self._display_name
+            self._display_name = label
+            advertising = self._service_info is not None
+        if not advertising or not (renamed or was_published != now_published):
+            return
+        # A service instance name is part of the registration, so a rename is a
+        # new registration: the old instance goes first, or both stay live and
+        # a peer that learned either name keeps resolving to the dead one.  The
+        # internal stops leave the user's show/hide intent alone -- this is a
+        # rename, not a toggle.
+        self._stop_advertising_now()
+        self.start_advertising()
+        logger.info("Renamed this device to %s on the LAN", name)
+
+    def start(self):
+        """Open mDNS, start browsing, and register our own service.
+
+        The registration is the expensive half — the conflict probe zeroconf
+        runs before it will advertise costs it well over a second on every
+        launch (see :meth:`_register_service`) — so the browser, the interface
+        watcher and the presence loop are started here and the registration is
+        handed to a worker thread.  Startup is then bounded by opening the
+        sockets, and this device is discoverable a moment later instead of the
+        whole application waiting on it.
+        """
+        try:
+            self._zc = Zeroconf()
+        except Exception as e:
+            logger.error("Failed to initialize mDNS: %s", e)
+            return
+
+        # Browse for peers
+        self._open_browser()
+
+        # Start the watcher that re-registers when the local interfaces change
+        # (Wi-Fi <-> Ethernet, VPN toggle, DHCP renewal moving us to another
+        # subnet) — those produce no sleep/wake event, so without this the
+        # stale mDNS advertisement keeps pointing peers at a dead address.  The
+        # watcher owns the advertised-address bookkeeping from here on: it is
+        # the pass that notices a change, and it re-reads the set as it goes.
+        self._netmon_stop.clear()
+        threading.Thread(
+            target=self._network_watch_loop,
+            daemon=True,
+            name="clipsync-netwatch",
+        ).start()
+        threading.Thread(
+            target=self._presence_loop,
+            daemon=True,
+            name="clipsync-presence",
+        ).start()
+
+        self._registering.set()
+        threading.Thread(
+            target=self._register_soon,
+            daemon=True,
+            name="clipsync-mdns-register",
+        ).start()
+        self._emit_state()
+
+    def _register_soon(self):
+        """Publish our service from a worker, once the sockets are up.
+
+        `_publish` reports a failure through `_on_error` itself, so this only has to make sure
+        the "registration in flight" flag is cleared whatever happens.
+        """
+        try:
+            if not self._advertise_wanted:
+                # Hidden before the worker got here (a toggle during startup):
+                # the user's answer outranks the startup registration.
+                logger.info("Not advertising on mDNS: this device was hidden during startup")
+                return
+            self._publish()
+        finally:
+            self._registering.clear()
+            self._emit_state()
+
+    def _register_service(self) -> bool:
+        """Build and publish our service record.  Requires ``start()``.
+
+        Advertise ALL our LAN addresses (not just the "best" one) so peers on
+        any of our subnets can reach us.  Previously we only advertised a
+        single IP chosen by a fragile interface heuristic, which broke
+        discovery whenever that IP belonged to a VPN/virtual adapter -- so the
+        lesson is that every address on a real adapter goes out, and the
+        tunnel's is the one address that must not (it is not reachable from
+        this network at all; see get_all_local_addresses).
+
+        With nothing usable there is **no A record at all**, rather than the old
+        fallback to ``127.0.0.1``.  A loopback address in a record is worse than
+        no address: every peer's candidate filter discards ``127.*`` on sight,
+        so the record looked like a device and resolved to nothing, and this
+        machine's log said "registered" while no device could reach it.  The
+        service is still registered -- its TXT name and port are real -- and the
+        reason travels in ``address_policy()`` so the UI can explain it.
+
+        IPv6 is deliberately not advertised here yet: the record's AAAA half
+        would need local IPv6 enumeration and scope handling that this layer
+        does not do, and an AAAA nobody can dial is the same trap as a
+        ``127.0.0.1`` A record.  None is emitted, and no address of the wrong
+        family is ever packed into an A record.
+
+        Shared with :meth:`start_advertising`, which is what an interface
+        change and a hide/show cycle both go through.
+
+        ``cooperating_responders=True`` is what keeps this off the startup
+        critical path: without it zeroconf probes for a name conflict by asking
+        the network three times, 500 ms apart, and waits that out before it
+        will advertise.  The instance label is already unique per device (see
+        :meth:`_label`), and two ClipSync instances that did collide are handled
+        the way they always were -- the retry below publishes under a
+        distinguishing suffix.
+        """
+        zc = self._zc
+        if zc is None:
+            return False
+        all_ips = get_all_local_addresses()
+        props = self._service_props(all_ips)
+        local_ip = _get_local_address()
+        # The tunnels moved with the addresses, and this is the pass that
+        # notices: a VPN coming up adds one, and every peer's candidate list is
+        # ranked against the set from here on.
+        virtual = frozenset(_virtual_addresses())
+        # Only real, usable IPv4 addresses become A records.  Anything the
+        # enumeration could not turn into four bytes is dropped rather than
+        # crashing the registration (an A record cannot carry an IPv6 address;
+        # that is a different record, and this module does not emit one).
+        advertised: list[bytes] = []
+        for ip in all_ips:
+            try:
+                packaged = socket.inet_aton(ip)
+            except OSError:
+                logger.debug("Skipping non-A-record address %r in the registration", ip)
+                continue
+            advertised.append(packaged)
+        if advertised:
+            reason = ""
+            logger.info("Registering mDNS on %s (all IPs: %s)", local_ip, all_ips)
+        else:
+            reason = "loopback_only"
+            logger.warning(
+                "Registering mDNS without an address record: this machine has no "
+                "usable LAN address, so peers will see the service and cannot reach it"
+            )
+
+        # A truncated display name, so the real hostname is not broadcast in
+        # plaintext on the LAN.
+        registered = None
+        try:
+            info = ServiceInfo(
+                type_=self._service_type,
+                name=f"{self._display_name}.{self._service_type}",
+                addresses=advertised,
+                port=self._port,
+                properties=props,
+            )
+            zc.register_service(info, cooperating_responders=True)
+            registered = info
+            logger.info("Registered mDNS service on port %d", self._port)
+        except Exception as e:
+            # A registration failure must not leave us undiscoverable -- retry
+            # once under a name with an extra distinguishing suffix instead of
+            # only logging and giving up.
+            logger.warning("mDNS registration failed (%s) — retrying with altered name", e)
+            try:
+                retry_info = ServiceInfo(
+                    type_=self._service_type,
+                    name=f"{self._display_name}-x.{self._service_type}",
+                    addresses=advertised,
+                    port=self._port,
+                    properties=props,
+                )
+                zc.register_service(retry_info, cooperating_responders=True)
+                registered = retry_info
+                logger.info("Registered mDNS service on retry name")
+            except Exception as e2:
+                logger.warning("mDNS retry registration also failed: %s", e2)
+                # Both attempts failed -- leave _service_info None so
+                # is_advertising() reports False and start_advertising() can
+                # retry later, instead of believing we are still broadcasting.
+        with self._lock:
+            # Published only once zeroconf has accepted it, so is_advertising()
+            # never claims we are discoverable while we are not.
+            self._service_info = registered
+            self._instance_name = registered.name if registered is not None else ""
+            if registered is not None:
+                self._our_ip = local_ip
+                self._our_prefix = _local_network_prefixes().get(local_ip)
+                self._advertised_ips = frozenset(all_ips)
+                self._virtual_ips = virtual
+            self._address_policy = {
+                "addresses": list(all_ips),
+                "advertised": list(all_ips) if advertised else [],
+                "reason": "" if advertised else reason,
+            }
+        return registered is not None
+
+    def _network_watch_loop(self):
+        """Rebuild mDNS when the local IP set changes (no sleep involved).
+
+        Sleep/wake recovery rides the transport's wake callback; an ordinary
+        interface switch does not.  A cheap socket-level enumeration every
+        30 s notices a changed address set and rebuilds the Zeroconf instance
+        outright — both the registration *and* the browse sockets — so peers
+        can find us again immediately instead of only after an app restart.
+        """
+        CHECK_INTERVAL = 30.0  # noqa: N806
+        while not self._netmon_stop.wait(CHECK_INTERVAL):
+            if self._zc is None:
+                return
+            try:
+                current = frozenset(get_all_local_addresses())
+            except Exception:
+                continue
+            if not current or current == self._advertised_ips:
+                # An empty set is a transient disconnection — keep the old
+                # registration rather than re-register with no address record.
+                continue
+            logger.info(
+                "Local addresses changed (%s -> %s) — rebuilding mDNS",
+                sorted(self._advertised_ips),
+                sorted(current),
+            )
+            # Do NOT record `current` here: start_advertising() stamps
+            # _advertised_ips only when zeroconf actually accepts the new
+            # registration.  Claiming it up front made a failed re-register
+            # permanent -- the next tick saw current == _advertised_ips and
+            # never tried again, leaving peers pointed at the dead address.
+            self._restart_zeroconf("an address change")
+
+    # ── Presence ───────────────────────────────────────────────
+
+    def _presence_loop(self):
+        """Ask the network who is here, every ten seconds, forever.
+
+        Runs beside the browser rather than replacing it: the browser is what
+        resolves a service this machine has never seen, and this is what notices
+        one that stopped answering, one that is answering from a different
+        address, and one that came back after being reported lost.
+
+        Gated on the browse session, which is the important half: with browsing
+        paused this machine is not listening, and a round that ran anyway would
+        report every peer lost for the crime of going unheard by a machine that
+        had stopped listening.
+        """
+        while True:
+            # Spread the rounds: devices that started together (a wake, a
+            # reboot, two laptops opened at once) would otherwise ask in the
+            # same instant for the rest of the session.
+            delay = PRESENCE_INTERVAL_SECONDS * random.uniform(0.8, 1.2)
+            if self._netmon_stop.wait(delay):
+                return
+            if self._browser is None:
+                continue
+            try:
+                self._presence_round(
+                    announce=self._rounds % ANNOUNCE_EVERY_ROUNDS == 0
+                )
+            except Exception:
+                logger.debug("Presence round failed", exc_info=True)
+
+    def _presence_round(self, announce=False):
+        """One round: announce if it is due, ask, wait, read the answers back."""
+        with self._scan_lock:
+            zc = self._zc
+            if zc is None or self._browser is None:
+                return
+            self._rounds += 1
+            if announce:
+                self._announce(zc)
+            round_start = time.monotonic()
+            # Read back everyone heard since the last round stopped reading.
+            # The window is what decides which answers a round acts on, so this
+            # is what keeps a late answer from costing the device it came from:
+            # one round, instead of a place on the list.
+            with self._lock:
+                since = self._answered_since or round_start
+            # A question with no known answers, deliberately.  The library's own
+            # service query carries the cached PTRs it is asking about, and a
+            # responder that is entitled to suppress those answers sends
+            # nothing at all — PTR, SRV, TXT and address alike — so a peer that
+            # is sitting there answering questions is never asked one it will
+            # answer.  That is how "the device is not discovered" happens while
+            # the device is on the network.
+            # A failed send used to be suppressed without a word, and it is the one way
+            # this round can do nothing while looking healthy: zeroconf raises on an
+            # interface it cannot use (an adapter left by WSL or Docker, typically), the
+            # question is never asked, and the application goes on discovering nobody until
+            # it is restarted and builds a new zeroconf.  Suppressed still -- a raising
+            # round must not kill the presence thread -- but no longer silent, and counted,
+            # so "did we ask?" is answerable from a log instead of inferred.
+            sent = True
+            try:
+                zc.send(self._build_query())
+            except Exception as exc:
+                sent = False
+                logger.warning(
+                    "Presence round %d could not ask the network: %s: %s",
+                    self._rounds,
+                    type(exc).__name__,
+                    exc,
+                )
+            self._netmon_stop.wait(SCAN_SETTLE_SECONDS)
+            window_end = time.monotonic()
+            with self._lock:
+                self._answered_since = window_end
+            if self._browser is None:
+                # Browsing was paused while we waited.
+                return
+            with self._heard_lock:
+                answered = [
+                    name
+                    for name, when in self._heard.items()
+                    if when >= since
+                ]
+            # Read back the peers that answered -- everyone heard since the last
+            # round read, and only to refresh their row.  An answer carries SRV,
+            # TXT and the addresses as additionals beside the PTR, so this comes
+            # out of the cache; and it is what turns "a peer whose address
+            # changed" into something noticed within one round rather than
+            # whenever the browser next happened to fire.  A peer that is gone
+            # answered nothing, so it costs nothing here either — the sweep is
+            # what takes it off the list.
+            for name in answered:
+                if self._netmon_stop.is_set():
+                    return
+                try:
+                    self._handle_service_added(
+                        zc,
+                        self._service_type,
+                        name,
+                        timeout=_SERVICE_INFO_TIMEOUT_MS,
+                    )
+                except Exception:
+                    # A torn-down instance raises out of get_service_info
+                    # instead of returning None — _restart_zeroconf swaps and
+                    # closes the Zeroconf this round is holding.
+                    logger.debug("Presence re-read failed for %s", name, exc_info=True)
+            with self._lock:
+                known = len(self._known_peers)
+            # A peer this browse has heard is what makes an empty round a
+            # fault rather than a quiet network (see _repair_deaf_browse).  It
+            # is also what makes the silence mean something about a peer: a
+            # round in which *nobody* answered is this machine's own deafness
+            # and is not allowed to judge anybody (see _sweep_presence).  Only
+            # an actual answer counts as "seen" — a peer still on the list may
+            # itself be stale, and a stale peer renewing its own memory is how
+            # an emptied network kept being treated as a deaf one.
+            if answered:
+                self._last_peer_seen_at = time.monotonic()
+            if answered:
+                self._empty_rounds = 0
+                # A peer answered, so the repair has done its job (or was never
+                # needed): the next rebuild starts again at the short cooldown.
+                self._browse_rebuild_backoff = BROWSE_REBUILD_COOLDOWN_SECONDS
+            elif sent:
+                self._empty_rounds += 1
+            else:
+                # The send itself failed and warned; that is not the
+                # asked-but-nobody-answered state the repair is for.
+                self._empty_rounds = 0
+            logger.debug(
+                "Presence round %d: asked=%s answered=%d known=%d",
+                self._rounds,
+                sent,
+                len(answered),
+                known,
+            )
+            self._report_discovery_state(asked=sent, answered=len(answered))
+            self._repair_deaf_browse(answered=len(answered))
+            self._sweep_presence(answered_round=bool(answered))
+
+    def _report_discovery_state(self, *, asked: bool, answered: int = 0) -> None:
+        """One line a minute about whether this machine can be found, and fix it if not.
+
+        A restart cures the reported symptom, which means the fault is in this instance's
+        state -- and nothing was watching the advert half of it.  The address watcher only
+        rebuilds when the local address *set changes*, so sockets that break or a
+        registration that is lost while the address stays the same go unnoticed for as long
+        as the process runs: reachable by address, healthy, and invisible.
+
+        The line carries the two numbers that tell the field's fault apart:
+        ``cached_services`` is what the browser still holds and ``answered`` is
+        how many peers answered this round.  "Cache full, answers zero" is a
+        machine that stopped hearing; both zero is an empty network.  Without
+        both numbers the log could only show ``known_peers``, which the sweep
+        zeroes, so the two looked identical -- which is why 244 rebuilds went
+        undiagnosed.
+
+        Reported per round only in the log's own sense -- once every
+        ``DISCOVERY_STATE_EVERY_ROUNDS`` rounds, which at a ten-second cadence is about a
+        minute.  A repair is attempted whenever it is needed, regardless of the cadence,
+        because the condition is a fault rather than a status.
+        """
+        if self._rounds % DISCOVERY_STATE_EVERY_ROUNDS == 0:
+            with self._lock:
+                advertising = self._service_info is not None
+                addresses = sorted(self._advertised_ips)
+                stale = len(self._stale_since)
+                wanted = self._advertise_wanted
+            with self._heard_lock:
+                heard = len(self._heard)
+            logger.debug(
+                "Discovery state: advertising=%s advertising_wanted=%s addresses=%s "
+                "browsing=%s known_peers=%d stale_peers=%d heard_services=%d "
+                "cached_services=%d answered_this_round=%d last_asked=%s",
+                advertising,
+                wanted,
+                addresses or "none",
+                self._browser is not None,
+                len(self._known_peers),
+                stale,
+                heard,
+                self._browser_cached_service_count(),
+                answered,
+                asked,
+            )
+
+        # The repair.  `_netmon_stop` set means a shutdown is in progress, and a runtime that
+        # is not up has nothing to register with.
+        if self._netmon_stop.is_set() or self._zc is None:
+            return
+        with self._lock:
+            missing = self._service_info is None
+            wanted = self._advertise_wanted
+        if not missing:
+            return
+        if not wanted:
+            # Not a fault: the user asked for this device to be hidden.  The
+            # old code could not tell the two apart and re-registered within ten
+            # seconds of the toggle, while the settings page went on showing
+            # "hidden" (see the intent bits in __init__).
+            return
+        logger.info(
+            "This device is not advertising on mDNS -- register mDNS again so peers can find it"
+        )
+        try:
+            self._publish()
+        except Exception as exc:
+            logger.warning("Re-registering mDNS failed: %s: %s", type(exc).__name__, exc)
+        self._emit_state()
+
+    def _repair_deaf_browse(self, answered: int = 0) -> bool:
+        """Rebuild the browse when asking produces nothing for a minute.
+
+        A query that raises is reported by the round itself (see
+        _presence_round), but a socket that has gone deaf does not raise:
+        ``zc.send`` succeeds into a socket with no route, every round logs
+        ``asked=True answered=0``, and the device list silently empties.  That
+        is what pc-zhao's log shows -- 1387 of 2742 rounds over six runs of
+        about 31 minutes, with ``known_peers=0`` on 231 state lines -- and a
+        restart is what clears it, so this uses the same rebuild as the
+        address watcher (_restart_zeroconf replaces the sockets, then
+        re-registers and re-browses).  The advertisement repair above only
+        watches the registering half; this is the listening half.
+
+        Three conditions, all evidence rather than history, so a network that
+        really has emptied is left alone:
+
+        * this browse has seen a peer recently (``_last_peer_seen_at``) -- the
+          old "has ever had a peer" flag never came back down, so an idle
+          machine rebuilt itself every five minutes for as long as the process
+          ran (332 rebuilds in one five-day log);
+        * the browser's cache still holds our service type -- an empty cache is
+          an empty network, and there is nothing to be deaf about;
+        * the wait since the last rebuild has passed.  That wait starts at the
+          cooldown and doubles for every rebuild that did not bring a peer back,
+          up to ``BROWSE_REBUILD_MAX_BACKOFF_SECONDS``: one fault no rebuild can
+          fix is not worth tearing the sockets down every five minutes for.
+        """
+        if self._empty_rounds < BROWSE_REBUILD_AFTER_EMPTY_ROUNDS:
+            return False
+        if self._netmon_stop.is_set() or self._zc is None:
+            return False
+        now = time.monotonic()
+        last_seen = self._last_peer_seen_at
+        if last_seen is None:
+            return False
+        if now - last_seen > PEER_MEMORY_SECONDS:
+            # The peers left long ago; this network is empty, not unheard.
+            return False
+        cached = self._browser_cached_service_count()
+        if cached <= 0:
+            # Nothing in the cache to be deaf about.  (The browser's cache is
+            # the evidence the field logs were missing: with it the state line
+            # says "we hold 3 services and heard 0 answers" instead of nothing.)
+            return False
+        if now - self._last_browse_rebuild < self._browse_rebuild_backoff:
+            return False
+        self._empty_rounds = 0
+        self._last_browse_rebuild = now
+        logger.warning(
+            "Presence asked %d rounds in a row and heard nobody while the "
+            "browser cache still holds %d service(s) (answered this round: %d, "
+            "known peers: %d) — rebuilding mDNS browsing",
+            BROWSE_REBUILD_AFTER_EMPTY_ROUNDS,
+            cached,
+            answered,
+            len(self._known_peers),
+        )
+        # The backoff doubles *before* the rebuild, so a rebuild that fails to
+        # bring a peer back has already earned the longer wait.
+        self._browse_rebuild_backoff = min(
+            self._browse_rebuild_backoff * 2.0, BROWSE_REBUILD_MAX_BACKOFF_SECONDS
+        )
+        try:
+            self._restart_zeroconf("a browse that stopped hearing answers")
+        except Exception:
+            logger.warning("Rebuilding mDNS browsing failed", exc_info=True)
+            return False
+        return True
+
+    def _publish(self) -> bool:
+        """Register the service once, and record the result.
+
+        Split out of `_register_soon` so the repair above can call the same path rather than a
+        second copy of it -- two registrations that drift apart is how "it works after a
+        restart" becomes "it works after a restart, sometimes".
+        """
+        try:
+            published = self._register_service()
+        except Exception:
+            # A registration that raised must not take the process down; the network watcher
+            # re-registers when the address set next changes, and this device's own state line
+            # reports the truth in the meantime.
+            logger.warning("mDNS registration failed", exc_info=True)
+            published = False
+        if not published and not self._netmon_stop.is_set() and self._on_error is not None:
+            with contextlib.suppress(Exception):
+                self._on_error()
+        return published
+
+    def _sweep_presence(self, *, answered_round: bool = False):
+        """Report every peer that has gone unheard for ``PRESENCE_TIMEOUT``.
+
+        A peer leaves the same way a goodbye takes it — out of ``_known_peers``,
+        then ``on_lost`` — because the question "is this device still here" has
+        one answer, and nothing else in the app has an opinion about it.
+
+        But silence is not always about the peer.  This machine's own presence
+        query can be the deaf one: the field logs have 51.6% of rounds answered
+        by nobody at all -- for thirty-one minutes at a stretch -- while the
+        browser's cache still held the peers' records and their TCP links were
+        up.  Judging those peers lost is what produced "the device is on the
+        network and the list says it left", 514 times in one log.  So a peer is
+        only *reported lost* on silence when this machine can show that its
+        listening path works:
+
+        * another peer answered this round (``answered_round``) -- if anyone
+          heard anything, this peer's silence is its own; or
+        * the browser no longer lists the peer (no service name maps to it); or
+        * the runtime vouches for a live TCP link to it.
+
+        Otherwise the peer is marked **stale**: kept on the list, not reported
+        lost, and given up to ``PRESENCE_STALE_TIMEOUT_SECONDS`` to speak.  A
+        device that is really gone still leaves -- the browser drops the record
+        when it expires, or the stale window runs out -- but a machine that
+        merely stopped hearing multicast answers stops emptying its own list.
+
+        Asked per *peer*, not per name.  A peer that renamed itself has two
+        names pointing at it, and a per-name sweep would suppress each of them
+        for the other's sake, so a device that renamed and then left would stay
+        on the list for good.  A stamped name is dropped as it is swept, which is
+        what keeps the sweeps that follow from reporting the same peer again —
+        and a peer that answers later is stamped fresh and read back in, which is
+        how a device that was briefly unreachable returns within a round.
+        """
+        now = time.monotonic()
+        with self._heard_lock:
+            for name in [
+                name
+                for name, when in self._heard.items()
+                if now - when > PRESENCE_TIMEOUT_SECONDS
+            ]:
+                del self._heard[name]
+            heard = set(self._heard)
+        with self._lock:
+            browse_since = self._browse_since
+        if now - browse_since < PRESENCE_TIMEOUT_SECONDS:
+            # Silence only means "gone" once this browse has had a full timeout
+            # to hear from everyone, and the names above are the only evidence
+            # there is: start_browsing throws the mapping away, so for the
+            # timeout that follows a rebuilt browse *every* peer is unheard —
+            # the ones answering the round that just ran included.  Holding the
+            # report back for that one timeout is what keeps a network change,
+            # a wake or a VPN toggle from emptying the list on the way back up.
+            return
+        with self._lock:
+            known = dict(self._known_peers)
+            names_by_peer: dict[str, list[str]] = {}
+            for name, pid in self._service_to_peer.items():
+                names_by_peer.setdefault(pid, []).append(name)
+            stale_since = dict(self._stale_since)
+            link_checker = self._link_checker
+        lost: list[str] = []
+        stale: list[str] = []
+        for pid in known:
+            if self._still_heard(pid, heard, names_by_peer):
+                continue
+            # The counter-evidence this machine can offer: the browser still
+            # lists the peer (so the record did not lapse) and this round heard
+            # nobody, or a live TCP link says the device is there.
+            browser_lists = bool(names_by_peer.get(pid))
+            link_alive = False
+            if link_checker is not None:
+                try:
+                    link_alive = bool(link_checker(pid))
+                except Exception:
+                    link_alive = False
+            if link_alive or (browser_lists and not answered_round):
+                since = stale_since.get(pid, now)
+                if now - since < PRESENCE_STALE_TIMEOUT_SECONDS:
+                    stale.append(pid)
+                    continue
+            lost.append(pid)
+        with self._lock:
+            for pid in stale:
+                row = self._known_peers.get(pid)
+                if row is not None:
+                    row["stale"] = True
+                if pid not in self._stale_since:
+                    self._stale_since[pid] = now
+                    logger.info(
+                        "Peer %s has not answered but the browser still lists it "
+                        "(answerless round: %s) — keeping it as stale, not lost",
+                        pid[:12],
+                        not answered_round,
+                    )
+            for pid in known:
+                if pid not in stale and pid not in lost:
+                    # Heard again: no longer stale, and no longer awaiting proof.
+                    self._stale_since.pop(pid, None)
+                    row = self._known_peers.get(pid)
+                    if row is not None:
+                        row["stale"] = False
+            for pid in lost:
+                self._stale_since.pop(pid, None)
+                self._known_peers.pop(pid, None)
+            # Drop the names of the peers that just left: a name is how this
+            # machine answers "is that peer still here", and one that still
+            # names a peer it has already reported lost would vouch for it in
+            # the next sweep and let a goodbye report the same loss twice.
+            for name in [
+                name for name, pid in self._service_to_peer.items() if pid in lost
+            ]:
+                self._service_to_peer.pop(name, None)
+            on_lost = self._on_peer_lost
+        for pid in lost:
+            logger.info("Peer lost: %s", pid)
+            if on_lost:
+                try:
+                    on_lost(pid)
+                except Exception:
+                    logger.debug("on_lost callback failed for %s", pid, exc_info=True)
+
+    def _still_heard(self, pid, heard, names_by_peer: dict[str, list[str]] | None = None):
+        """Whether any of this peer's names is among the ones just heard.
+
+        A peer with no name at all is not heard: ``start_browsing`` clears the
+        mapping, so a peer that has not answered since the browse resumed is
+        exactly a peer this cannot vouch for.
+        """
+        if names_by_peer is None:
+            names_by_peer = {}
+            for name, peer in self._service_to_peer.items():
+                names_by_peer.setdefault(peer, []).append(name)
+        return any(name in heard for name in names_by_peer.get(pid, ()))
+
+    def _build_query(self) -> DNSOutgoing:
+        """A PTR question for our own service type, with no known answers.
+
+        The question carries the **unicast-response** (QU) bit, which is what
+        the library's own startup queries use and what this machine's field
+        failure needed.  A plain multicast-response (QM) question asks every
+        responder to multicast its answer; on a host whose inbound multicast is
+        filtered -- the inferred root cause of 51.6% answerless rounds in
+        pc-zhao's log -- that answer never reaches the process, so a peer that
+        is answering questions is never heard, and the library had to be
+        restarted to make it speak again.  With QU set, the responder sends the
+        answer straight back to this machine's 5353 socket instead, which is the
+        same path by which the rebuilt browser's first query found the peer
+        0.12 s after every rebuild.
+        """
+        out = DNSOutgoing(_FLAGS_QR_QUERY, True)
+        question = DNSQuestion(self._service_type, _TYPE_PTR, _CLASS_IN)
+        # Set after construction: the flag lives on the question object and the
+        # constructor of the Cython class takes no such argument.
+        question.unicast = True
+        out.add_question(question)
+        return out
+
+    def _announce(self, zc) -> None:
+        """Say this machine's record again, without re-registering it.
+
+        ``generate_service_broadcast`` rather than ``update_service``: the
+        latter removes and re-adds the registration — which resurrects a service
+        the user has just hidden — mutates the ``ServiceInfo`` that
+        ``is_advertising`` and the window's visibility indicator read, and
+        blocks for the better part of a second (three broadcasts, 225 ms apart)
+        while it does it.  The record has not changed, so all this has to do is
+        say it once more.
+        """
+        with self._lock:
+            info = self._service_info
+        if info is None:
+            return
+        with contextlib.suppress(Exception):
+            zc.send(zc.generate_service_broadcast(info, None))
+
+    def scan(self):
+        """Ask the network who is here, and read the answers back.
+
+        The round the loop runs, with the announcement always included: a
+        refresh is the one moment a reader has asked this machine to say
+        something as well as ask.  Blocks for about ``SCAN_SETTLE_SECONDS``, and
+        ``_scan_lock`` is what keeps it from overlapping a round already in
+        flight — a second click joins nothing and simply waits its turn.
+        """
+        try:
+            self._presence_round(announce=True)
+        except Exception:
+            logger.debug("Manual scan failed", exc_info=True)
+
+    def forget_peer(self, peer_id: str) -> None:
+        """Drop what this side remembers about one peer, so it is news again.
+
+        What the app calls when a device is removed (or restored), and the
+        point is the *next* sighting rather than this one: ``_known_peers`` is
+        the cache that turns "that peer announced itself" into nothing at all,
+        because a peer whose record has not changed is not news and never
+        reaches the app (see ``_handle_service_added``).  A device that is
+        removed and comes back announces exactly the record it left with, so
+        without this it stays off the list until the app restarts and every
+        record is novel again.
+
+        Both id forms go: the hash the TXT record carries and the id the app
+        knows the peer by are two names for one peer, and callers hold
+        whichever they happen to have (see ``internal.transport.ids``).
+        """
+        ids = {peer_id, peer_id_hash(peer_id)}
+        with self._lock:
+            for pid in ids:
+                self._known_peers.pop(pid, None)
+                self._stale_since.pop(pid, None)
+            names = [
+                name for name, pid in self._service_to_peer.items() if pid in ids
+            ]
+            for name in names:
+                self._service_to_peer.pop(name, None)
+        if names:
+            # The stamps go with the names.  A stamp is evidence that a peer
+            # spoke, and this is the one caller saying it no longer counts as
+            # one -- the peer is about to be heard from again anyway, and that
+            # fresh stamp is what a later sweep reads.
+            with self._heard_lock:
+                for name in names:
+                    self._heard.pop(name, None)
+        logger.debug("Forgot peer %s", peer_id)
+
+    def stop(self):
+        self._netmon_stop.set()
+        self.stop_browsing()
+        self.stop_advertising()
+        if self._zc:
+            self._zc.close()
+            self._zc = None
+        with self._lock:
+            self._stale_since.clear()
+        self._emit_state()
+        logger.info("Discovery stopped")
+
+    # ── Granular control ───────────────────────────────────────
+
+    @property
+    def is_browsing(self) -> bool:
+        return self._browser is not None
+
+    @property
+    def is_advertising(self) -> bool:
+        # Read under the lock like every other _service_info access: this is
+        # what the UI's "visible on the LAN" indicator reads, and it must not
+        # be able to observe the half-written state a concurrent
+        # (re-)register leaves behind.
+        with self._lock:
+            return self._zc is not None and self._service_info is not None
+
+    @property
+    def is_registering(self) -> bool:
+        """Whether our own mDNS record is being published right now.
+
+        Set by ``start()`` and cleared by the registration worker once the
+        record is out (see ``_register_soon``).  The window is the one
+        :meth:`start` describes — the browser is open and answering before it,
+        and the conflict probe makes it "well over a second" on a cold start —
+        so a reader that asks "is this device advertising?" and gets ``False``
+        cannot tell "not yet" from "not at all" without this.  The diagnostics
+        report is that reader: it read the window as a fault and told the user
+        the network needed attention.
+        """
+        return self._registering.is_set()
+
+    def stop_browsing(self):
+        """Stop discovering new peers without affecting advertising.
+
+        This is the *user's* answer, recorded in ``_browse_wanted``, so no
+        repair path re-opens the browse behind the settings page's back.
+        """
+        self._browse_wanted = False
+        self._stop_browsing_now()
+        self._emit_state()
+
+    def start_browsing(self):
+        """Resume discovering new peers. Requires start() to have been called."""
+        self._browse_wanted = True
+        if self._browser is not None:
+            return
+        if self._zc is None:
+            return
+        with self._lock:
+            # The new browser re-fires Added for every live service, so the
+            # name→id mapping is rebuilt from scratch.  Until a peer answers
+            # the new browse nothing here vouches for it, which is deliberate:
+            # the mapping is the evidence a sweep reads (see _still_heard), and
+            # a peer whose evidence predates the pause is a peer this machine
+            # has not heard from since it started listening again.  The round
+            # that follows re-reads everyone who answers it, so a device that
+            # is there is back in the mapping before the sweep asks.
+            self._service_to_peer.clear()
+        self._open_browser()
+
+    def _open_browser(self):
+        """Browse, and listen for the answers to the browsing.
+
+        One place because the browser is built from two call sites — ``start``
+        and ``start_browsing``, the second of which is also how
+        ``_restart_zeroconf`` recovers after a network change — and the presence
+        listener has to be attached on both.  It was two identical constructions
+        before, which is exactly how one path ends up without the listener.
+        """
+        try:
+            self._browser = ServiceBrowser(
+                self._zc,
+                self._service_type,
+                handlers=[self._on_service_state_change],
+            )
+        except Exception as exc:
+            # An invalid service type used to raise out of start() and take the
+            # whole LAN runtime down with it (see is_valid_service_type).  The
+            # type is normalised at construction, so what reaches here is a
+            # library that refused for some other reason: say so and leave
+            # browsing off rather than crash.  The presence loop is gated on the
+            # browser, so nothing downstream mistakes this for an empty network.
+            self._browser = None
+            logger.error(
+                "Could not browse for mDNS service type %r: %s: %s",
+                self._service_type,
+                type(exc).__name__,
+                exc,
+            )
+            self._emit_state()
+            return
+        self._listener = _PresenceListener(self)
+        with self._lock:
+            # The clock the sweep measures silence against starts here, with the
+            # mapping this browse is about to rebuild (see _sweep_presence):
+            # until it has run for a timeout, nothing this side has not heard
+            # from yet can be reported lost.  Reading answers starts here too --
+            # a stamp older than this browse is a peer this side has not heard
+            # since it started listening again, whatever the cache still holds.
+            self._browse_since = self._answered_since = time.monotonic()
+        with contextlib.suppress(Exception):
+            # No question: every record, and no replay of what the cache
+            # already holds.  The listener's freshness test rejects a replayed
+            # record anyway, so there is nothing to gain by asking for one.
+            self._zc.add_listener(self._listener, None)
+        logger.info("Started browsing for peers")
+        self._emit_state()
+
+    def _close_browser(self):
+        if self._browser is not None:
+            self._browser.cancel()
+            self._browser = None
+            logger.info("Stopped browsing for peers")
+        if self._listener is not None:
+            # Removed from the instance it was added to: _restart_zeroconf
+            # calls this before it swaps _zc, so ``self._zc`` is still the one
+            # that holds the listener.
+            with contextlib.suppress(Exception):
+                self._zc.remove_listener(self._listener)
+            self._listener = None
+
+    def _stop_browsing_now(self):
+        """Stop the browse without touching the user's intent bit.
+
+        Used by the rebuild paths, which stop and immediately start again: a
+        network change is not the user changing their mind.
+        """
+        self._close_browser()
+
+    def stop_advertising(self):
+        """Unregister mDNS service without affecting browsing.
+
+        This is the *user's* answer ("hidden on the LAN"), recorded in
+        ``_advertise_wanted``; repairs and rebuilds consult it and leave a
+        hidden device hidden.
+        """
+        self._advertise_wanted = False
+        self._stop_advertising_now()
+        self._emit_state()
+
+    def _stop_advertising_now(self):
+        """Unregister the service without touching the user's intent bit."""
+        with self._lock:
+            info, self._service_info = self._service_info, None
+        if self._zc is None or info is None:
+            return
+        try:
+            self._zc.unregister_service(info)
+        except Exception as e:
+            # zeroconf raises if the service was already gone (or the socket
+            # died with the interface).  _service_info is cleared either way --
+            # swallowing it here is what lets start_advertising() re-register.
+            logger.debug("mDNS unregister failed: %s", e)
+        logger.info("Stopped advertising this device")
+
+    def start_advertising(self):
+        """Re-register mDNS service. Requires start() to have been called."""
+        with self._lock:
+            self._advertise_wanted = True
+            if self._service_info is not None:
+                return
+        if self._zc is None:
+            return
+        if self._registering.is_set():
+            # The startup worker is already inside register_service(); it
+            # publishes into _service_info itself.  Racing it here would
+            # register the same instance twice.
+            return
+        # Rebuild service info (IPs may have changed, and ServiceInfo
+        # can't be re-registered after unregistration).
+        if self._register_service():
+            logger.info("Resumed advertising this device on port %d", self._port)
+        self._emit_state()
+
+    def _wake_recovery(self):
+        """Rebuild mDNS after wake-from-sleep (the transport's wake callback).
+
+        Same problem as an interface change: the address set the sockets were
+        bound to is gone.
+        """
+        self._restart_zeroconf("a sleep/wake")
+
+    def _restart_zeroconf(self, reason: str = "a network change"):
+        """Replace the Zeroconf instance, re-registering and re-browsing.
+
+        A ``Zeroconf`` object binds one socket per local address *when it is
+        constructed* and never rebinds them.  zeroconf only logs the resulting
+        ``[Errno 65] No route to host`` (its ``error_received``) and keeps the
+        dead socket in the poll set, so once an interface comes or goes — a
+        VPN toggle, a Wi-Fi switch, a sleep — both halves of discovery go on
+        using addresses that no longer exist: we answer nothing, we hear
+        nothing, and every query leaves through a socket with no route.  Peers
+        then stay invisible for the rest of the session, which is why the only
+        thing that ever cleared this was restarting the app's sync.
+
+        Re-registering on the same instance (what this used to do after a
+        sleep, and what the network watcher used to do on every change) cannot
+        fix that: a registration rides those same stale sockets.  The instance
+        is cheap, so it is replaced outright.
+
+        The replacement is built *before* the old one is torn down, so a
+        construction failure leaves the working state untouched and the
+        caller's next tick simply retries.
+
+        *reason* is what the log line names, and it is a parameter because the
+        three callers are three different faults: the address watcher, the
+        wake callback and the browse repair (:meth:`_repair_deaf_browse`).
+        Hard-coding "after a network change" made 244 repair rebuilds in one
+        log read as interface switches that never happened -- the wrong trail
+        for the one fault that had to be found.  It also decides whether each
+        half is started again: the user's show/hide intent is respected, so a
+        network change does not re-expose a device the user hid, nor re-enable
+        browsing they turned off.
+        """
+        if self._netmon_stop.is_set() or self._zc is None:
+            return
+        with self._lock:
+            advertise_wanted = self._advertise_wanted
+            browse_wanted = self._browse_wanted
+        try:
+            fresh = Zeroconf()
+        except Exception as e:
+            logger.warning("Could not rebuild mDNS after %s: %s", reason, e)
+            return
+        if self._netmon_stop.is_set():
+            # stop() ran while we were constructing; do not leave it behind.
+            with contextlib.suppress(Exception):
+                fresh.close()
+            return
+        self._stop_browsing_now()
+        self._stop_advertising_now()  # unregisters on the instance we are leaving
+        old, self._zc = self._zc, fresh
+        with contextlib.suppress(Exception):
+            old.close()
+        if advertise_wanted:
+            self.start_advertising()
+        else:
+            logger.info("Rebuilt mDNS sockets after %s, staying hidden as asked", reason)
+        if browse_wanted:
+            self.start_browsing()
+        else:
+            logger.info("Rebuilt mDNS sockets after %s, browsing stays off as asked", reason)
+        if advertise_wanted or browse_wanted:
+            logger.info("Rebuilt mDNS sockets after %s", reason)
+        self._emit_state()
+
+    def _on_service_state_change(self, zeroconf, service_type, name, state_change):
+        """Handle mDNS service add/update/remove events."""
+        if state_change.name in ("Added", "Updated"):
+            self._handle_service_added(zeroconf, service_type, name)
+        elif state_change.name == "Removed":
+            self._handle_service_removed(name)
+
+    def _handle_service_added(self, zeroconf, service_type, name, timeout=3000):
+        """Take one peer's answer and put it on the list.
+
+        ``timeout`` bounds the cache miss: the library's ``get_service_info``
+        waits its full timeout for a record that is not in the cache, and the
+        presence round calls this per peer, so it passes something shorter than
+        the three seconds a browser callback can afford to wait.  A responder
+        that sends its PTR without the SRV/TXT additionals is what makes that
+        path reachable at all.
+        """
+        info = zeroconf.get_service_info(service_type, name, timeout=timeout)
+        if info is None:
+            return
+
+        props = info.properties or {}
+        # Read the hashed device_id from TXT records.
+        peer_id_hash = ""
+        if b"device_id_hash" in props:
+            peer_id_hash = props[b"device_id_hash"].decode("utf-8")
+
+        # Skip our own service by comparing the hashed identity.
+        if peer_id_hash == self._device_id_hash:
+            return
+
+        # A legacy / malformed service with no hashed id in its TXT records
+        # cannot be addressed as a peer.  Skip it instead of creating a bogus
+        # _known_peers entry keyed by "" (which ghosts the Discovered list).
+        if not peer_id_hash:
+            logger.debug("Discovered service %s with no device_id_hash — skipping", name)
+            return
+
+        # Advertised version/platform/arch (M2 P2P update). Absent for older
+        # peers that predate these TXT fields.
+        peer_version = props.get(b"v", b"").decode("utf-8", errors="replace")
+        peer_os = props.get(b"os", b"").decode("utf-8", errors="replace")
+        peer_arch = props.get(b"arch", b"").decode("utf-8", errors="replace")
+        # Which application the peer runs (see ``_service_props``).  Empty for
+        # any build that predates the field, which is not the same as this
+        # one's shell -- an unknown peer is one whose answer cannot be read.
+        peer_app = props.get(b"app", b"").decode("utf-8", errors="replace")
+
+        # Collect every candidate address: all mDNS A/AAAA records plus the
+        # alt_ip_N TXT records we advertise. mDNS may list them in any order
+        # and the first is often not the one reachable on our subnet, so we
+        # gather them all and pick the most likely one below.
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def _add_candidate(ip: str) -> None:
+            ip = (ip or "").strip()
+            if not ip:
+                return
+            if ":" in ip:
+                # IPv6 (an AAAA record, or a peer that started publishing one):
+                # usable addresses are kept so an IPv6-only peer can still be
+                # dialled, and loopback/unspecified are dropped like their IPv4
+                # counterparts.  They used to be skipped silently -- the decoder
+                # was ``inet_ntoa``, which raises on the 16-byte form, and the
+                # exception path dropped the record -- so such a peer came out
+                # with no candidates at all and a WARNING every ten seconds.
+                if not _usable_ipv6(ip):
+                    return
+            elif not _is_usable_ipv4(ip):
+                return
+            if ip not in seen:
+                seen.add(ip)
+                candidates.append(ip)
+
+        for text in _service_addresses(info):
+            _add_candidate(text)
+
+        for key in props:
+            if key.startswith(b"alt_ip_"):
+                try:
+                    _add_candidate(props[key].decode("utf-8"))
+                except Exception:
+                    continue
+
+        if not candidates:
+            logger.warning(
+                "Discovered service %s with no usable address (records: %d, "
+                "alt_ip fields: %d) — listing it needs an address a peer can dial",
+                name,
+                len(getattr(info, "addresses", None) or []),
+                sum(1 for key in props if key.startswith(b"alt_ip_")),
+            )
+            return
+
+        port = info.port
+        # The name to list this peer under: the one the user on the other side
+        # chose, when they published it.  Falling back to the instance label —
+        # a privacy-safe truncation of whatever name that device started with,
+        # e.g. "<display_name>._clipsync._tcp.local." — which is all a peer
+        # running a build from before the TXT name can offer.
+        try:
+            label = _sanitize_peer_str(name.split(".")[0])
+        except (IndexError, TypeError):
+            label = peer_id_hash
+        chosen = props.get(b"n", b"")
+        peer_name = ""
+        if chosen:
+            try:
+                peer_name = _sanitize_peer_str(chosen.decode("utf-8"))
+            except Exception:
+                peer_name = ""
+        # `named` is what tells the caller whether `peer_display` is the peer's
+        # own answer or this machine's fallback guess: a caller that keeps a
+        # name of its own (learned over the relay, say) must not have it
+        # replaced by a truncation of a hostname it already knows better.
+        named = bool(peer_name)
+        peer_display = peer_name or label
+
+        our_ip = getattr(self, "_our_ip", None) or _get_local_address()
+        # Read off the instance rather than looked up: this runs on the
+        # browser's own thread, and the set was refreshed by whichever pass last
+        # built the advertisement — the same events that move it.  The prefix is
+        # the netmask of ``our_ip``, so "same subnet" is the kernel's answer
+        # rather than a /24 guess (see _pick_best_address).
+        address = _pick_best_address(
+            candidates, our_ip, self._virtual_ips, self._our_prefix
+        )
+
+        with self._lock:
+            existing = self._known_peers.get(peer_id_hash)
+            self._service_to_peer[name] = peer_id_hash
+            # A sighting is evidence that this network has a peer to miss, which
+            # is what the browse repair's "did I have anyone" memory is for.  It
+            # is recorded for unchanged re-announcements too -- a packet
+            # arriving is the peer saying something even when it says the same
+            # thing -- and it has to be here as well as in the presence round,
+            # because the browser's cache can be full of records while every
+            # presence answer is lost: counting only the answers would leave a
+            # genuinely deaf machine with no evidence and so no repair.
+            self._last_peer_seen_at = time.monotonic()
+            # What the record said before this sighting, kept for the log below:
+            # a version that moved is the one fact here a reader cannot recover
+            # afterwards, and it is the fact "the device list still shows the old
+            # version" has to be answered with.
+            was_version = existing.get("version") if existing is not None else None
+            if existing is not None:
+                # Refresh on re-announcement: the peer's address may have
+                # changed (DHCP renewal, Wi-Fi reconnect, interface switch).
+                # Previously we early-returned here, so a changed address was
+                # never updated and peers became permanently unreachable.
+                if (
+                    existing.get("address") == address
+                    and existing.get("port") == port
+                    and existing.get("name") == peer_display
+                    and existing.get("named") == named
+                    # The version is part of "changed": a peer that upgrades
+                    # re-announces from the same address and port, and that
+                    # re-announcement is the only word this machine gets that
+                    # the update landed.  Skipping it here left the device list
+                    # showing the old version until something else moved.
+                    and existing.get("version") == peer_version
+                    # Platform and application too, for the same reason: two
+                    # peers of one version can differ in OS, architecture and
+                    # which application they run, and the device list shows all
+                    # three.  A peer that re-announces after changing one of
+                    # them used to be read as "nothing changed" and kept the old
+                    # value for the life of the process -- the row's platform
+                    # and the update offer's "can this peer install it" were
+                    # both answered from a snapshot that never refreshed.
+                    and existing.get("os") == peer_os
+                    and existing.get("arch") == peer_arch
+                    and existing.get("app") == peer_app
+                    and not existing.get("stale")
+                ):
+                    return
+                existing["address"] = address
+                existing["port"] = port
+                existing["name"] = peer_display
+                existing["named"] = named
+                existing["version"] = peer_version
+                existing["os"] = peer_os
+                existing["arch"] = peer_arch
+                existing["app"] = peer_app
+                existing["stale"] = False
+            else:
+                self._known_peers[peer_id_hash] = {
+                    "name": peer_display,
+                    "named": named,
+                    "address": address,
+                    "port": port,
+                    "version": peer_version,
+                    "os": peer_os,
+                    "arch": peer_arch,
+                    "app": peer_app,
+                    "stale": False,
+                }
+            # It answered, so it is not stale any more whatever the row says.
+            self._stale_since.pop(peer_id_hash, None)
+
+        # The version is named here because this line is the only record of a
+        # peer's answer arriving, and it did not carry it: "the device list still
+        # shows the old version" could not be settled from a log that says a
+        # sighting arrived but not what it said.  A peer that publishes no
+        # version at all (a build older than the TXT field) reads "unknown",
+        # which is a different thing from "unchanged".
+        # The version is named here because this line is the only record of a
+        # peer's answer arriving, and it did not carry it: "the device list still
+        # shows the old version" could not be settled from a log that says a
+        # sighting arrived but not what it said.  A peer that publishes no
+        # version at all (a build older than the TXT field) reads "unknown",
+        # which is a different thing from "unchanged".
+        logger.info(
+            "Discovered peer: %s at %s:%d version=%s (candidates: %s)",
+            peer_display,
+            address,
+            port,
+            peer_version or "unknown",
+            candidates,
+        )
+        if was_version is not None and was_version != peer_version:
+            # Its own line, at its own words, because this is the one transition
+            # an upgrade report is looked for by: the device list showing a stale
+            # version is answered by whether this arrived, and when.
+            logger.info(
+                "Peer %s re-announced with version %s (was %s)",
+                peer_display,
+                peer_version or "unknown",
+                was_version or "unknown",
+            )
+
+        with self._lock:
+            on_found = self._on_peer_found
+        if on_found:
+            # The advertised version/platform/arch/app travel with the sighting:
+            # the device list shows them, and a peer on an older build of this
+            # platform -- running this application -- is what the update offer is
+            # for.  They were read above and kept here, but the callback dropped
+            # them, so every consumer had to be told the device existed and then
+            # ask a second time for what the first answer already carried.
+            on_found(
+                peer_id_hash,
+                peer_display,
+                address,
+                port,
+                peer_version,
+                peer_os,
+                peer_arch,
+                peer_app,
+                named,
+            )
+
+    def _handle_service_removed(self, name):
+        """A peer said goodbye (an mDNS removal), so stop counting it as here.
+
+        The other door out is ``_sweep_presence``, which is what decides a peer
+        that stopped answering without saying anything — the case a goodbye
+        cannot cover, because a device that is switched off, unplugged or out of
+        range never sends one.
+        """
+        with self._lock:
+            peer_id = self._service_to_peer.get(name)
+        if peer_id is None:
+            return
+        # A Removed record is not proof that the device left.  The browser
+        # reports Removed while the peer is still answering the presence query
+        # -- the logs have Discovered following Removed by 0.2-0.3 s, in the
+        # same round that logged answered=3 known=3 -- and re-adding it there
+        # is a flap the user sees as a device blinking.  A peer that answered
+        # inside the grace window is left to _sweep_presence, the one arbiter
+        # that reads the answers; a genuine goodbye ages out of _heard and is
+        # reported by the sweep a timeout later.
+        with self._heard_lock:
+            heard_at = self._heard.get(name)
+        if heard_at is not None:
+            age = time.monotonic() - heard_at
+            if age <= REMOVED_GRACE_SECONDS:
+                logger.debug(
+                    "Service %s removed but peer %s answered %.1fs ago — "
+                    "leaving it to the presence sweep",
+                    name,
+                    peer_id[:12],
+                    age,
+                )
+                return
+        with self._lock:
+            if self._service_to_peer.get(name) != peer_id:
+                # A re-announcement overtook the Removed; that Added is the
+                # newer truth and the mapping is already repaired.
+                return
+            self._service_to_peer.pop(name, None)
+            # A peer that renamed itself produces Removed(old-name) possibly
+            # after Added(new-name): only declare it lost if no OTHER service
+            # name still maps to it, otherwise a rename makes the device
+            # "ghost offline" until the app restarts.
+            if any(p == peer_id for p in self._service_to_peer.values()):
+                logger.debug(
+                    "Service %s removed but peer %s still advertised under "
+                    "another name — not reporting loss",
+                    name,
+                    peer_id[:12],
+                )
+                return
+            if peer_id in self._known_peers:
+                del self._known_peers[peer_id]
+            self._stale_since.pop(peer_id, None)
+            on_lost = self._on_peer_lost
+        if peer_id:
+            logger.info("Peer lost: %s", peer_id)
+            if on_lost:
+                on_lost(peer_id)
+

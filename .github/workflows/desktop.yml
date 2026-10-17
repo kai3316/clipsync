@@ -1,0 +1,549 @@
+name: Tauri Desktop
+
+on:
+  # Tags and a manual dispatch, nothing else.  A push to a branch does not
+  # build three platforms' bundles here: that is expensive enough to be worth
+  # doing once per release, and the tests it used to run belong on the machine
+  # doing the work.  A dispatch on a branch still produces all of it -- it just
+  # cannot publish, because `release` is gated on the ref being a tag.
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Two runs for the same tag both carry a `release` job that uploads installers
+# to it with `--clobber`, so whichever finishes last decides what the release
+# holds.  Move the tag and that is the *older* commit's build -- the guard
+# build.yml already keeps for its half of the release, needed here for this
+# half.  Same ref supersedes same ref; a tag build is never cancelled by a
+# push to master, which is a different ref.
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    # Unsigned bundles, on purpose: what this job establishes is that each
+    # platform turns the tree into an installable artifact at all.  Signing,
+    # notarization and updater verification are a separate release gate, and
+    # nothing here claims them.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundles: nsis
+            artifact: clipsync-desktop-windows
+          # Apple Silicon only, matching build.yml: Intel Macs are not supported.
+          - os: macos-latest
+            bundles: app,dmg
+            artifact: clipsync-desktop-macos-arm64
+          - os: ubuntu-24.04
+            bundles: deb,appimage
+            artifact: clipsync-desktop-linux-x64
+          # ARM64 Linux, which the previous Python application published and this
+          # one did not: `build.yml` shipped `clipsync-linux-arm64.tar.gz` up to
+          # 1.0.33 and the desktop matrix only ever had x64, so an ARM64 user who
+          # moved across lost their build.  `ubuntu-24.04-arm` is a native ARM
+          # runner, not an emulated one, so this costs a second Linux leg rather
+          # than a QEMU cross-build, and Tauri's own bundler resolves the host
+          # triple (`aarch64-unknown-linux-gnu`) from the runner.
+          #
+          # `continue-on-error`, and that is a decision about the other three
+          # legs rather than this one.  `needs: [package]` covers the whole
+          # matrix, so a leg that fails takes the release with it: a new platform
+          # nobody has built yet would be able to hold Windows, macOS and x64
+          # Linux hostage on its first outing.  Tolerated, a failure here leaves
+          # the ARM64 keys out of the manifest -- which the assembler already
+          # handles, because it refuses to name an artifact that is not on the
+          # release -- and the three proven legs publish as they always did.
+          - os: ubuntu-24.04-arm
+            bundles: deb,appimage
+            artifact: clipsync-desktop-linux-arm64
+            continue-on-error: true
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error == true }}
+    # Windows and macOS ship the sidecar as a directory resource; Linux still
+    # ships the onefile, because nobody has run the onedir package there and the
+    # two shapes are chosen separately on purpose (see clipsync-sidecar.spec).
+    # macOS is onedir whatever this says -- the spec forces it -- and the
+    # staging step and the bundler config both read this variable so they cannot
+    # disagree about which shape was staged.
+    env:
+      CLIPSYNC_SIDECAR_ONEDIR: ${{ matrix.os == 'windows-latest' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            scripts/constraints.txt
+      - name: Verify tag matches internal version
+        # The same guard build.yml applies to the legacy half, needed here for
+        # the desktop half -- and needed *before* the build, not at the manifest.
+        # This workflow bakes internal/version.py into the bundle but takes the
+        # manifest's version from the tag, so a tag pushed without the bump
+        # produces a correctly-signed bundle of the *old* version published
+        # under the new one.  The app then downloads it, verifies the signature
+        # (valid), installs it, restarts as the old version, and is offered the
+        # update again: an install loop no user action ends.  One leg runs it
+        # because the file it reads is the same in all of them, and a failing
+        # leg keeps `release` -- which needs every leg -- from writing the
+        # manifest at all.
+        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Linux'
+        shell: bash
+        run: |
+          ACTUAL="${{ github.ref_name }}"
+          EXPECTED="v$(python -c 'from internal.version import __version__; print(__version__)')"
+          echo "Expected version tag: $EXPECTED"
+          echo "Actual tag at HEAD:   $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Tag '$ACTUAL' does not match internal.version.__version__ ('$EXPECTED'). Bump internal/version.py before tagging."
+            exit 1
+          fi
+      - name: Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Install Python dependencies
+        # Best-effort constraints: direct dependencies are pinned so a
+        # dependency release cannot change what a tagged build installs.
+        run: python -m pip install -r requirements.txt pyinstaller -c scripts/constraints.txt
+      - name: Frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build the Python sidecar
+        run: python -m PyInstaller --noconfirm clipsync-sidecar.spec
+      - name: Smoke the packaged sidecar
+        # Windows only, because that is where this has actually been run: the
+        # other two runners get the build without the check rather than a check
+        # nobody has watched pass.  What it holds: the Companion resources in the
+        # build match the tree byte for byte -- read out of the executable's own
+        # archive for a onefile, off disk under `_internal/` for a directory --
+        # and the packaged binary answers its own IPC and serves authenticated
+        # HTTP over two full restart cycles.  None of that is visible to the
+        # Python suite, which never loads the executable at all.
+        #
+        # The path follows the shape: an onedir build puts the executable one
+        # level down, and naming the onefile path unconditionally is how this
+        # step would fail on a Windows leg that had switched (see the job's
+        # CLIPSYNC_SIDECAR_ONEDIR).
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="dist/clipsync-sidecar.exe"
+          if [ -n "${CLIPSYNC_SIDECAR_ONEDIR:-}" ]; then
+            exe="dist/clipsync-sidecar/clipsync-sidecar.exe"
+          fi
+          python scripts/smoke_sidecar.py "$exe"
+      - name: Stage the sidecar beside the host
+        # Bash on every runner: the Windows default shell would not run this.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macOS always builds the sidecar as a directory (see
+          # clipsync-sidecar.spec) and ships it as a bundle resource, so what is
+          # staged is the tree itself.  Windows does the same when
+          # CLIPSYNC_SIDECAR_ONEDIR is set -- that is what the environment on
+          # the job says -- because the tree starts in ~191ms against the
+          # onefile's ~1004ms, and a resource is how a tree gets shipped.
+          # Everywhere else it stays the onefile executable, staged under the
+          # target-triple name Tauri's `externalBin` expects.
+          if [ "$RUNNER_OS" = "macOS" ] || [ -n "${CLIPSYNC_SIDECAR_ONEDIR:-}" ]; then
+            rm -rf desktop/src-tauri/sidecar
+            cp -R dist/clipsync-sidecar desktop/src-tauri/sidecar
+            ls -l desktop/src-tauri/sidecar
+          else
+            ext=""
+            if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+            triple=$(rustc -vV | sed -n 's/^host: //p')
+            echo "host target: $triple"
+            mkdir -p desktop/src-tauri/binaries
+            cp "dist/clipsync-sidecar${ext}" "desktop/src-tauri/binaries/clipsync-sidecar-${triple}${ext}"
+            ls -l desktop/src-tauri/binaries
+          fi
+      - name: Write the packaging config
+        # Mirrors scripts/build-tauri.ps1, without needing pwsh on macOS/Linux.
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          sys.path.insert(0, ".")
+          from internal.version import __version__
+
+          # macOS ships the sidecar as a resource directory and starts it from
+          # `Contents/Resources/sidecar/`; a single externalBin has nowhere to
+          # put the `_internal` tree it needs beside it.  Windows does the same
+          # when the job sets CLIPSYNC_SIDECAR_ONEDIR -- the staging step above
+          # makes the same decision from the same variable, and the two have to
+          # agree or the bundler is pointed at a path that was not staged.  See
+          # the spec's docstring for what the directory buys.
+          onedir = bool(os.environ.get("CLIPSYNC_SIDECAR_ONEDIR", "").strip() not in ("", "0"))
+          if "${{ runner.os }}" == "macOS" or onedir:
+              bundle = {"resources": ["sidecar"]}
+          else:
+              bundle = {"externalBin": ["binaries/clipsync-sidecar"]}
+
+          # The updater's payloads and their detached signatures.  Asked for on
+          # a release build only: tauri.conf.json carries the public key, so the
+          # bundler treats "sign this" without a private key in reach as an
+          # error rather than a no-op, and a manual dispatch on a branch has no
+          # secrets.  Set here rather than in the committed config so that a
+          # developer running `tauri build` locally is not required to hold the
+          # signing key at all.
+          if "${{ github.ref }}".startswith("refs/tags/v"):
+              bundle["createUpdaterArtifacts"] = True
+
+          # externalBin is resolved against src-tauri, not against this file,
+          # and names the sidecar without its triple -- Tauri appends
+          # "-<target-triple><ext>" itself, which is why the staged file carries it.
+          with open("build/tauri-package.json", "w", encoding="utf-8") as handle:
+              json.dump({"version": __version__, "bundle": bundle}, handle)
+          PY
+          cat build/tauri-package.json
+      - name: Sign the staged macOS sidecar
+        # Before the bundler copies it in, because resources are sealed as data:
+        # signing them afterwards would break the app's seal.
+        #
+        # PyInstaller already ad-hoc signs everything it writes, the `_internal`
+        # tree included, so this is one binary -- but it is signed without the
+        # hardened runtime, and this re-signs it *with* one plus the entitlement
+        # that lets it load the Python framework beside it.  Left as PyInstaller
+        # wrote it, the runtime would come up unhardened, which is a weaker
+        # process than the onefile build it replaces.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          codesign --force --options runtime \
+            --entitlements desktop/src-tauri/entitlements.plist \
+            --sign - desktop/src-tauri/sidecar/clipsync-sidecar
+          codesign --verify --strict --verbose=2 desktop/src-tauri/sidecar/clipsync-sidecar
+      - name: Build the desktop bundles
+        working-directory: desktop
+        env:
+          # Read by the bundler when `createUpdaterArtifacts` is on -- the
+          # contents of the minisign private key, not a path to it.  Unset on a
+          # branch dispatch, which never turns that flag on.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: npm exec tauri build -- --config ../build/tauri-package.json --bundles ${{ matrix.bundles }}
+      - name: Verify the macOS bundle is signed
+        # An unsigned bundle is not merely warned about on Apple Silicon: the
+        # kernel refuses to launch it, and the user is told the download is
+        # damaged.  tauri.conf.json asks the bundler for an ad-hoc signature
+        # (`bundle.macOS.signingIdentity`), and this asserts the bundler
+        # actually produced one rather than quietly shipping the unsigned
+        # bundle the user reported.  No Apple credentials are involved.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="desktop/src-tauri/target/release/bundle/macos/ClipSync.app"
+          test -d "$app"
+          # Fails on a missing or invalid signature, and on any nested binary
+          # the bundler signed with a different identity than the app.
+          codesign --verify --strict --deep --verbose=2 "$app"
+          # An ad-hoc signature has no Team ID and no certificate chain; the
+          # presence of either would mean this is a real identity, not the one
+          # this project configured.
+          if codesign -dv "$app" 2>&1 | grep -q '^Authority='; then
+            echo "::error::$app is signed by a real identity; this project builds ad-hoc"
+            exit 1
+          fi
+          if ! codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'; then
+            echo "::error::$app does not carry an ad-hoc signature"
+            exit 1
+          fi
+          # The sidecar ships as a resource, which `--deep` above does not
+          # reach: it is sealed as data rather than as nested code the bundler
+          # signed.  It carries its own signature, and the entitlement that
+          # lets it load the Python framework beside it -- without that the
+          # library-identity check refuses the load and the process dies before
+          # it can send its first frame, which is what the released 1.0.5 did.
+          sidecar="$app/Contents/Resources/sidecar/clipsync-sidecar"
+          test -x "$sidecar"
+          codesign --verify --strict --verbose=2 "$sidecar"
+          if ! codesign -d --entitlements - "$sidecar" 2>&1 | grep -q 'disable-library-validation'; then
+            echo "::error::$sidecar is missing the entitlement its Python runtime needs"
+            exit 1
+          fi
+          echo "OK: $app is ad-hoc signed and $sidecar carries its entitlement"
+      - name: Run the bundled sidecar from inside the macOS bundle
+        # The signatures above are necessary but not sufficient.  The sidecar
+        # loads a Python framework that PyInstaller signed separately from it,
+        # and macOS refuses to load a library whose signing identity differs
+        # from its process's unless the process carries the entitlement that
+        # waives the check.  That refusal happens after every check above has
+        # passed -- which is how the released 1.0.5 shipped a sidecar that
+        # could not start at all.  Running the sidecar from where the
+        # application will run it is the only test that reaches the load.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          sidecar="desktop/src-tauri/target/release/bundle/macos/ClipSync.app/Contents/Resources/sidecar/clipsync-sidecar"
+          data=$(mktemp -d)
+          # --history-only opens no sockets and starts no background services;
+          # EOF on stdin ends the session and returns 0.  A dyld failure to load
+          # the packed framework aborts the process instead, which is the
+          # outcome this step exists to catch.
+          if ! CLIPSYNC_CONFIG_DIR="$data" "$sidecar" --history-only </dev/null; then
+            echo "::error::$sidecar did not run -- the packed Python runtime could not be loaded"
+            exit 1
+          fi
+          echo "OK: the bundled sidecar ran and loaded its Python runtime"
+      - name: Upload the bundles
+        uses: actions/upload-artifact@v4
+        with:
+          # Installers only.  The macOS .app reaches an artifact zip without its
+          # symlinks, so the dmg is the one to hand a user there; a Linux
+          # AppImage needs a chmod +x after download; Windows' setup .exe runs
+          # as it is.
+          name: ${{ matrix.artifact }}
+          path: |
+            desktop/src-tauri/target/release/bundle/**/*-setup.exe
+            desktop/src-tauri/target/release/bundle/**/*.msi
+            desktop/src-tauri/target/release/bundle/**/*.dmg
+            desktop/src-tauri/target/release/bundle/**/*.deb
+            desktop/src-tauri/target/release/bundle/**/*.AppImage
+          if-no-files-found: error
+      - name: Upload the updater payloads
+        # Separate from the installers and tag-gated, because these exist only
+        # when the build was signed: a branch dispatch never requests
+        # `createUpdaterArtifacts`, so this glob would match nothing and
+        # `if-no-files-found` would fail the leg.  The `.app.tar.gz` is here
+        # rather than above because it is an update payload, not an installer:
+        # the updater extracts it over the installed bundle, and no human is
+        # meant to open it.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-updater
+          path: |
+            desktop/src-tauri/target/release/bundle/**/*.sig
+            desktop/src-tauri/target/release/bundle/**/*.app.tar.gz
+          if-no-files-found: error
+
+  release:
+    # build.yml creates the release in its `prepare` job the moment the tag
+    # lands, precisely so this uploader cannot race it; this job adds the
+    # desktop installers to it, so one Releases page carries both apps, and it
+    # is what publishes the release once they are there.
+    #
+    # The release is created as a draft because publication is what puts a
+    # version in front of every installed application: they read the newest
+    # *published* release, and the desktop client then reads `latest.json` off
+    # it.  That manifest is written below, minutes after the tag lands, and a
+    # release published before it exists leaves every client asking for a file
+    # that is not there -- which the app can only report as "cannot install
+    # this one".  So the publication happens here, as the last step, when the
+    # release is complete; build.yml's `release` job publishes as well, on a
+    # timeout, so that a failure on this side cannot hide a release the
+    # previous application is waiting for.
+    #
+    # `needs: package` is what makes the artifacts this job attaches the ones
+    # just built.  It is worth naming because dropping it would not fail the
+    # run: the job uploads whatever the download holds, so the release would
+    # quietly be assembled from a partial or stale set and nothing on the page
+    # would say so.
+    #
+    # The test gate that used to be named here (`needs: [package, desktop]`)
+    # went with the `desktop` job; it is back as `needs: package`
+    # because a tag is the one ref that never runs test.yml.  What this
+    # workflow owes a tag is a signed bundle, an accurate manifest, and a
+    # commit whose suites actually passed.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: bundles
+      - name: Attach the desktop installers to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+
+          # The release is normally already there by now.  This wait is a
+          # safety net for the case where `prepare` lost a race with a re-push
+          # of the same tag; it is not the mechanism the design relies on.
+          for _ in $(seq 1 30); do
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then break; fi
+            sleep 20
+          done
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+          # Installers only -- a macOS .app would otherwise contribute one
+          # release asset per file inside the bundle.  Read with -print0 so a
+          # path with a space in it survives.  The .app.tar.gz is the one
+          # exception: it is the macOS update payload, so it has to be
+          # downloadable even though nobody opens it by hand.  The .sig files
+          # are deliberately not attached -- their contents go into the
+          # manifest below, and loose copies would only clutter the page.
+          files=()
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              *-setup.exe|*.msi|*.dmg|*.deb|*.AppImage) files+=("$f") ;;
+              *.app.tar.gz) files+=("$f") ;;
+            esac
+          done < <(find bundles -type f -print0)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No desktop installers were produced"
+            exit 1
+          fi
+          printf 'Attaching: %s\n' "${files[@]}"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+
+      - name: Write the update manifest
+        # One manifest for the whole release, assembled here rather than by the
+        # three build legs: they run in parallel and cannot see each other's
+        # artifacts, so per-leg manifests would need a merge step and a fourth
+        # job.  The tag is the version, and `v` has to come off it -- the
+        # updater parses this field as semver and rejects a leading `v`, which
+        # would make every client's check fail silently.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          version="${tag#v}"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag"
+
+          # `> latest.json` is load-bearing, not tidiness.  The assembler's
+          # contract is to print the manifest on stdout -- the tests below
+          # exercise it exactly that way -- so without the redirect the file it
+          # is about to upload never exists; `set -e` then kills the step on the
+          # `cat`.  This step had never once been reached with artifacts to
+          # assemble, so the first release to get that far (1.0.4) published
+          # five installers and no manifest, leaving the app unable to see an
+          # update whose payload was already sitting on the page.
+          python3 - "$version" "$base" > latest.json <<'PY'
+          import datetime
+          import json
+          import pathlib
+          import sys
+
+          version, base = sys.argv[1], sys.argv[2]
+
+          # The updater looks for `{os}-{arch}-{installer}` first and falls back
+          # to `{os}-{arch}`.  Linux needs both of its own keys, because a .deb
+          # and an AppImage are different payloads and a single bare
+          # `linux-x86_64` entry could only ever name one of them -- a .deb
+          # client served AppImage bytes fails the installer's own format check.
+          # The bare entries are the fallback for a client whose bundle type the
+          # plugin could not identify; on Linux that path installs an AppImage,
+          # which is what they therefore name.
+          #
+          # Every pattern names its architecture, and that is load-bearing now
+          # that there are two Linux legs: `*.AppImage` matched whichever leg was
+          # walked first, so the x64 key could have been filled with the ARM64
+          # payload and every x64 client would have been served bytes it cannot
+          # install -- with the manifest signed and the download successful, which
+          # is the least visible way for that to fail.
+          #
+          # The ARM64 spellings are Tauri's, and they are *not* consistent with
+          # each other: the AppImage says `aarch64` and the deb says `arm64`
+          # (measured on the 1.0.35 build -- the first release that produced
+          # them).  Guessing one spelling for both is what made 1.0.35's manifest
+          # step exit with "no artifact for: linux-aarch64-appimage".
+          wanted = {
+              "windows-x86_64-nsis": "*-setup.exe",
+              "darwin-aarch64-app": "*.app.tar.gz",
+              "linux-x86_64-appimage": "*_amd64.AppImage",
+              "linux-x86_64-deb": "*_amd64.deb",
+              "linux-aarch64-appimage": "*_aarch64.AppImage",
+              "linux-aarch64-deb": "*_arm64.deb",
+              "windows-x86_64": "*-setup.exe",
+              "darwin-aarch64": "*.app.tar.gz",
+              "linux-x86_64": "*_amd64.AppImage",
+              "linux-aarch64": "*_aarch64.AppImage",
+          }
+
+          # `linux-aarch64*` is published only when the ARM64 leg built.  Failing
+          # the whole manifest because one leg is missing would take the x64 and
+          # Windows installers down with it, so the ARM64 keys are required on the
+          # same terms as the rest only if their leg produced anything at all.
+          # Both spellings are checked, because the two payloads use different
+          # ones and a detector that knows only one would drop the keys for a
+          # release that does have ARM64 artifacts.
+          optional = ("linux-aarch64-appimage", "linux-aarch64-deb", "linux-aarch64")
+          produced_aarch64 = any(
+              path.name.endswith(("_arm64.deb", "_aarch64.AppImage"))
+              for path in pathlib.Path("bundles").rglob("*")
+          )
+          if not produced_aarch64:
+              for key in optional:
+                  wanted.pop(key, None)
+
+          # The artifact zip keeps the path it had under `bundle/`, so match on
+          # the basename and never on the full path.
+          artifacts, signatures = {}, {}
+          for path in pathlib.Path("bundles").rglob("*"):
+              if not path.is_file():
+                  continue
+              name = path.name
+              if name.endswith(".sig"):
+                  signatures[name[: -len(".sig")]] = path.read_text().strip()
+                  continue
+              for key, pattern in wanted.items():
+                  if key not in artifacts and pathlib.PurePath(name).match(pattern):
+                      artifacts[key] = name
+
+          # A manifest naming an artifact that is not on the release, or one
+          # with no signature, is a client-side failure no signal on this side
+          # would ever show.  Refuse to publish either.
+          missing = [key for key in wanted if key not in artifacts]
+          if missing:
+              sys.exit("no artifact for: " + ", ".join(missing))
+          unsigned = [artifacts[key] for key in wanted if artifacts[key] not in signatures]
+          if unsigned:
+              sys.exit("no signature for: " + ", ".join(sorted(set(unsigned))))
+
+          json.dump(
+              {
+                  "version": version,
+                  "pub_date": datetime.datetime.now(datetime.timezone.utc)
+                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "platforms": {
+                      key: {
+                          "signature": signatures[artifacts[key]],
+                          "url": f"{base}/{artifacts[key]}",
+                      }
+                      for key in wanted
+                  },
+              },
+              sys.stdout,
+              indent=2,
+          )
+          PY
+
+          cat latest.json
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber latest.json
+
+      - name: Publish the release
+        # The last step of the last job that touches this release, so publishing
+        # here is publishing a complete one: the installers, their signatures
+        # inside the manifest, and the manifest itself are all up by now.  No-op
+        # if build.yml's job got there first.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ github.ref_name }}" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --latest
