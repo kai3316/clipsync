@@ -778,22 +778,38 @@ def test_a_chat_frame_takes_the_relay_only_when_the_lan_send_fails(relay_rig):
     assert [route[3] for route in relay.published] == [0]
 
 
-def test_a_lan_delivered_chat_frame_waits_for_its_relay_ack(relay_rig):
-    """The sender's send list has to show the receipt the peer sends back."""
+def test_a_lan_delivered_chat_frame_does_not_wait_for_a_relay_ack(relay_rig):
+    """A frame the local link carried is delivered; there is nothing to ack.
+
+    It used to arm a relay ledger row anyway, on the reasoning that an
+    internet-reachable peer acks every chat frame.  With the relay off (or the
+    peer unreachable over it) that row could never be settled, and the message
+    the peer was reading turned "未送达" when the ledger expired it.
+    """
     runtime, transport = relay_rig.runtime, relay_rig.transport
     transport.connected.add("remote")
     assert runtime._chat_send_fn("remote")(
         chat_frame("chat_text", "c2", session_id="s1", text="hello there")
     )
 
+    assert runtime.relay_delivery_status()["items"] == []
+
+
+def test_a_relayed_chat_frame_waits_for_its_relay_ack(relay_rig):
+    """A send that needed the relay is the one the receipt belongs to."""
+    runtime = relay_rig.runtime
+    assert runtime._chat_send_fn("remote")(
+        chat_frame("chat_text", "c3", session_id="s1", text="hello there")
+    )
+
     row = runtime.relay_delivery_status()["items"][0]
     assert (row["msg_id"], row["kind"], row["session_id"], row["preview"]) == (
-        "c2", "chat_text", "s1", "hello there"
+        "c3", "chat_text", "s1", "hello there"
     )
     assert row["status"] == "sent"
 
     runtime._receive_relay(
-        encode_frame({"msg_type": "relay_ack", "msg_id": "c2"}, source_device="remote")
+        encode_frame({"msg_type": "relay_ack", "msg_id": "c3"}, source_device="remote")
     )
     assert runtime.relay_delivery_status()["items"][0]["status"] == "delivered"
 

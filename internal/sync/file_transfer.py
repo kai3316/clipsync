@@ -81,7 +81,13 @@ STALL_GRACE = 5.0  # seconds -- silence with gaps => request retransmit
 # pausing), but an abandoned pause must not pin a thread, an fd and a .part
 # file for the life of the process.
 PAUSED_MAX_SECONDS = 1800.0  # seconds -- pause left this long is abandoned
-SPEED_TEST_CHUNKS = 20  # number of chunks for speed test (~1.3 MB)
+SPEED_TEST_CHUNKS = 20  # number of chunks for the legacy (JSON) speed test
+# The real speed test streams binary chunks over the same path files use, so
+# the number reports what a transfer can do instead of what base64-in-JSON can.
+# 32 MiB is long enough for Wi-Fi rate adaptation to settle and short enough to
+# finish inside the panel's timeout on a slow link.
+SPEED_TEST_BYTES = 32 * 1024 * 1024
+SPEED_TEST_ACK_WAIT = 30.0
 MAX_HISTORY = 50  # max completed transfers to remember
 # Kinds that travel through this manager but are not a user's file transfer: an
 # update asset a peer served and a log this machine asked a peer for.  Both are
@@ -296,6 +302,9 @@ class FileTransferManager:
         self._history: list[dict[str, Any]] = []
         # Speed test state
         self._speed_test: dict[str, Any] | None = None
+        # Speed-test receive side, by test id: what the begin frame announced and
+        # how many binary chunks have arrived.  See `speed_test_chunk`.
+        self._speed_receives: dict[str, dict[str, int]] = {}
         self._lock = threading.Lock()
         # Transfers whose terminal callback has already gone out.  The guarded
         # case is one the ledger can no longer answer: the finalizing thread
@@ -961,6 +970,7 @@ class FileTransferManager:
             "file_chunk_ack": self._handle_file_chunk_ack,
             "file_pause": self._handle_file_pause,
             "file_resume": self._handle_file_resume,
+            "speed_test_begin": self._handle_speed_test_begin,
             "speed_test_data": self.handle_speed_test_data,
             "speed_test_result": self.handle_speed_test_result,
         }
@@ -2578,7 +2588,7 @@ class FileTransferManager:
                 "state": "sending",
                 "start_time": start_time,
                 "chunks_sent": 0,
-                "total_chunks": SPEED_TEST_CHUNKS,
+                "total_chunks": max(2, SPEED_TEST_BYTES // CHUNK_SIZE),
                 "result_mbps": 0.0,
             }
 
@@ -2593,40 +2603,47 @@ class FileTransferManager:
         return test_id
 
     def _run_speed_test(self, test_id: str, broadcast_fn: Callable[[bytes], None]):
-        import secrets as _secrets
+        """Stream binary chunks at the peer and time the round trip.
 
-        dummy = base64.b64encode(_secrets.token_bytes(CHUNK_SIZE)).decode("ascii")
-        total_bytes = SPEED_TEST_CHUNKS * CHUNK_SIZE
+        This used to send 20 chunks of 256 KiB as base64 inside JSON, which made
+        the number a measurement of base64/JSON encoding rather than of the
+        link: 44 MB/s reported on a loopback pair whose real transfers ran at
+        350+ MB/s.  What a transfer's throughput actually depends on is the
+        binary chunk path, so that is what the speed test now uses.  The begin
+        frame names the test to the receiver, which counts the chunks and echoes
+        a result on the last one (see ``speed_test_chunk``); the bytes are
+        otherwise ignored, exactly like the old dummy payload.
+        """
+        chunk = CHUNK_SIZE
+        total_chunks = max(2, SPEED_TEST_BYTES // chunk)
+        total_bytes = total_chunks * chunk
+        payload = b"\x00" * chunk
+        self._send_as_frame(
+            {
+                "msg_type": "speed_test_begin",
+                "test_id": test_id,
+                "total_chunks": total_chunks,
+                "chunk_size": chunk,
+                "total_bytes": total_bytes,
+            },
+            broadcast_fn,
+        )
         start = time.time()
 
-        for i in range(SPEED_TEST_CHUNKS):
+        for i in range(total_chunks):
             with self._lock:
                 if self._speed_test is None or self._speed_test.get("test_id") != test_id:
                     return
-            self._send_as_frame(
-                {
-                    "msg_type": "speed_test_data",
-                    "test_id": test_id,
-                    "chunk_index": i,
-                    "total_chunks": SPEED_TEST_CHUNKS,
-                    "data": dummy,
-                },
-                broadcast_fn,
-            )
+            broadcast_fn(encode_binary_chunk(test_id, i, total_chunks, payload))
             with self._lock:
                 if self._speed_test:
                     self._speed_test["chunks_sent"] = i + 1
 
-        # Measure a true round trip: the receiver echoes speed_test_result on
-        # the last chunk (see handle_speed_test_data) and handle_speed_test_result
-        # flips state to "acknowledged".  Waiting for that echo -- not local
-        # wall-clock -- is what the start_speed_test docstring promises.  The
-        # old 0.002s/chunk sleep floor also capped the report at ~125 MB/s
-        # regardless of link speed, so it is gone.  Time out so a dropped peer
-        # can't hang the thread.
-        SPEED_TEST_TIMEOUT = 30.0  # noqa: N806
+        # A true round trip: the receiver echoes speed_test_result on the last
+        # chunk (see speed_test_chunk) and handle_speed_test_result flips the
+        # state.  Time out so a dropped peer cannot hang the thread.
         acknowledged = False
-        deadline = time.time() + SPEED_TEST_TIMEOUT
+        deadline = time.time() + SPEED_TEST_ACK_WAIT
         while time.time() < deadline:
             with self._lock:
                 if self._speed_test is None or self._speed_test.get("test_id") != test_id:
@@ -2650,6 +2667,56 @@ class FileTransferManager:
                 self._speed_test["state"] = "done"
                 self._speed_test["result_mbps"] = round(mbps, 2)
         logger.info("Speed test %s complete: %.2f MB/s", test_id[:8], mbps)
+
+    def _handle_speed_test_begin(self, payload: dict, _send_fn=None) -> None:
+        """Receiver: arm a test id so its binary chunks are counted, not filed."""
+        test_id = payload.get("test_id", "")
+        total = payload.get("total_chunks")
+        if (
+            not isinstance(test_id, str)
+            or len(test_id) != 32
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or total <= 0
+            or total > 100_000
+        ):
+            return
+        with self._lock:
+            self._speed_receives[test_id] = {"total": total, "received": 0, "bytes": 0}
+
+    def speed_test_chunk(self, raw_payload: dict, send_fn: Callable[[bytes], None]) -> bool:
+        """Receiver: count one binary chunk of an armed speed test.
+
+        Returns True when the chunk belonged to a speed test (so the host router
+        must not fall through to the file-transfer handler with an unknown id).
+        The last chunk sends the result the sender is waiting for; the data
+        itself is discarded.
+        """
+        transfer_id = str(raw_payload.get("transfer_id", ""))
+        with self._lock:
+            state = self._speed_receives.get(transfer_id)
+            if state is None:
+                return False
+            index = raw_payload.get("chunk_index")
+            total = raw_payload.get("total_chunks")
+            data = raw_payload.get("_raw_data")
+            if (
+                not isinstance(index, int)
+                or not isinstance(total, int)
+                or total != state["total"]
+                or not isinstance(data, (bytes, bytearray))
+            ):
+                return True
+            state["received"] += 1
+            state["bytes"] += len(data)
+            done = state["received"] >= state["total"]
+            if done:
+                del self._speed_receives[transfer_id]
+        if done:
+            self._send_as_frame(
+                {"msg_type": "speed_test_result", "test_id": transfer_id}, send_fn
+            )
+        return True
 
     def handle_speed_test_data(self, payload: dict, send_fn: Callable[[bytes], None]):
         """Receiver side: echo back speed test data as result."""

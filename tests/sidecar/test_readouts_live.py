@@ -27,7 +27,7 @@ in ``notes/tauri/feature-parity.md``.
 import time
 from contextlib import ExitStack
 
-from internal.sync.file_transfer import SPEED_TEST_CHUNKS
+from internal.sync.file_transfer import CHUNK_SIZE, SPEED_TEST_BYTES
 
 # The transport's own ceiling, read from the module rather than restated, so a
 # change there fails this test instead of quietly making it agree with itself.
@@ -241,7 +241,8 @@ def test_speed_test_and_the_history_summary_over_a_real_link(tmp_path, monkeypat
             deadline=60.0, interval=0.2,
         )
         speed = completed["speed_test"]
-        assert speed["chunks_sent"] == speed["total_chunks"] == SPEED_TEST_CHUNKS
+        expected_chunks = max(2, SPEED_TEST_BYTES // CHUNK_SIZE)
+        assert speed["chunks_sent"] == speed["total_chunks"] == expected_chunks
         assert speed["done"] is True
         # A zero here is not a slow link: it is the run that never heard its own
         # echo back, which the readout renders as a failure rather than as

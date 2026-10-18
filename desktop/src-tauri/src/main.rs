@@ -2098,6 +2098,27 @@ fn verify_signed_release(
     release_signature: &str,
     pubkey_b64: &str,
 ) -> Option<(String, String)> {
+    let file_name = verify_signed_payload(bytes, release_signature, pubkey_b64)?;
+    let version = version_in_name(&file_name)?;
+    Some((file_name, version))
+}
+
+/// Verify *bytes* against a release signature and return the signed file name.
+///
+/// The name need not carry a version.  On macOS the updater payload is named
+/// `ClipSync.app.tar.gz` and its signed trusted comment holds no dotted version
+/// at all; the release it belongs to is named by the manifest (`update.version`)
+/// or by the peer transfer, never by that filename.  Requiring a version here
+/// is what made a peer-sent macOS update fall through to "open the folder"
+/// instead of installing: the signature verified, then this function returned
+/// None because it could not name a version, and the caller read that as a
+/// mismatch.  The offline path, which has only the signature to go on, still
+/// uses [`verify_signed_release`] and still requires the version.
+fn verify_signed_payload(
+    bytes: &[u8],
+    release_signature: &str,
+    pubkey_b64: &str,
+) -> Option<String> {
     fn decoded(value: &str) -> Option<String> {
         base64::engine::general_purpose::STANDARD
             .decode(value)
@@ -2109,9 +2130,7 @@ fn verify_signed_release(
     let public_key = PublicKey::decode(&public_key_text).ok()?;
     let signature = Signature::decode(&signature_text).ok()?;
     public_key.verify(bytes, &signature, true).ok()?;
-    let file_name = signed_file_name(signature.trusted_comment())?;
-    let version = version_in_name(&file_name)?;
-    Some((file_name, version))
+    signed_file_name(signature.trusted_comment())
 }
 
 /// The basename minisign's signed trusted comment names (`...\tfile:<name>`).
@@ -2363,8 +2382,8 @@ pub(crate) async fn install_staged_update(
             let Ok(bytes) = tokio::fs::read(&path).await else {
                 return reveal_staged_update(bridge).await;
             };
-            let Some((signed_name, _signed_version)) =
-                verify_signed_release(&bytes, &update.signature, &pubkey)
+            let Some(signed_name) =
+                verify_signed_payload(&bytes, &update.signature, &pubkey)
             else {
                 note_install_decision(
                     bridge,
@@ -2752,6 +2771,11 @@ async fn quit_app(
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
+    // macOS: the Dock tile is put away while the window is (see the close
+    // handler), and it has to come back before the window does — a window with
+    // no Dock tile is one the user cannot get back to except from the tray.
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -2769,6 +2793,88 @@ fn show_main_window_and(app: &tauri::AppHandle, event: &str) {
     use tauri::Emitter;
     show_main_window(app);
     let _ = app.emit_to("main", event, json!({}));
+}
+
+/// Make a sound for an incoming chat message the reader asked to hear.
+///
+/// The sidecar owns the decision *whether* (sounds enabled in settings, the
+/// peer not muted, an incoming text — see `LanRuntime._announce_chat`); this is
+/// the other half, whether it would be heard.  A message that arrives while the
+/// window is visible and focused is already on screen, so only a background
+/// arrival rings.  The sound is spawned rather than played inline: the event
+/// reader must not wait on `afplay`/`powershell` before it can read the next
+/// frame.
+pub(crate) fn alert_chat_notification(app: &tauri::AppHandle) {
+    let (visible, focused) = app
+        .get_webview_window("main")
+        .map(|window| {
+            (
+                window.is_visible().unwrap_or(false),
+                window.is_focused().unwrap_or(false),
+            )
+        })
+        .unwrap_or((false, false));
+    if should_play_chat_alert(visible, focused) {
+        play_chat_alert();
+    }
+}
+
+/// Whether an arriving message should make a sound.
+fn should_play_chat_alert(window_visible: bool, window_focused: bool) -> bool {
+    !(window_visible && window_focused)
+}
+
+/// The system's own notification sound, so the app carries no audio asset.
+fn play_chat_alert() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("/usr/bin/afplay")
+            .arg("/System/Library/Sounds/Glass.aiff")
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: no console flashes behind a tray app.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[System.Media.SystemSounds]::Asterisk.Play()",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let played = std::process::Command::new("paplay")
+            .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
+            .spawn()
+            .is_ok();
+        if !played {
+            let _ = std::process::Command::new("canberra-gtk-play")
+                .args(["-i", "message"])
+                .spawn();
+        }
+    }
+}
+
+#[cfg(test)]
+mod alert_tests {
+    use super::should_play_chat_alert;
+
+    /// A background arrival rings; the message the reader is looking at does
+    /// not.  Both halves matter: ringing over a focused window is noise, and
+    /// staying silent for a hidden one is the reported bug.
+    #[test]
+    fn a_chat_alert_rings_only_when_the_window_is_not_in_front() {
+        assert!(should_play_chat_alert(false, false));
+        assert!(should_play_chat_alert(false, true));
+        assert!(should_play_chat_alert(true, false));
+        assert!(!should_play_chat_alert(true, true));
+    }
 }
 
 /// Run one sidecar call from the tray.
@@ -3043,10 +3149,22 @@ fn main() {
                     if let Some(window) = handle.get_webview_window("main") {
                         api.prevent_close();
                         let _ = window.hide();
+                        // macOS: a hidden window under the default (Regular)
+                        // activation policy leaves its Dock tile behind, so the
+                        // app looks open but clicking the tile brings nothing.
+                        // The tray is the one way back in; access them from the
+                        // menu bar and the tile disappears with the window.
+                        #[cfg(target_os = "macos")]
+                        let _ = handle.set_dock_visibility(false);
                     }
                 }
                 _ => {}
             },
+            // macOS asks the running application to reopen when its Dock icon is
+            // clicked (or the system re-activates it).  The window was hidden,
+            // not destroyed, so that request becomes "show it again".
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main_window(handle),
             tauri::RunEvent::Exit => {
                 tauri::async_runtime::block_on(handle.state::<Host>().stop_bridge());
             }
@@ -3770,6 +3888,27 @@ mod tests {
                 "ClipSync_9.9.9_x64-setup.exe".to_string(),
                 "9.9.9".to_string()
             ))
+        );
+    }
+
+    #[test]
+    fn a_manifest_signature_check_does_not_require_a_version_in_the_name() {
+        // macOS names its updater payload `ClipSync.app.tar.gz`; the trusted
+        // comment therefore carries no dotted version, and the release version
+        // comes from the manifest.  The manifest path must verify the bytes
+        // without one -- requiring a version here is what sent a peer-sent
+        // macOS update to "open the folder" instead of installing it.
+        assert_eq!(version_in_name("ClipSync.app.tar.gz"), None);
+        assert_eq!(
+            verify_signed_payload(TEST_BYTES, TEST_SIGNATURE, TEST_PUBKEY),
+            Some("ClipSync_9.9.9_x64-setup.exe".to_string())
+        );
+        let mut changed = TEST_BYTES.to_vec();
+        changed[0] ^= 0xff;
+        assert_eq!(
+            verify_signed_payload(&changed, TEST_SIGNATURE, TEST_PUBKEY),
+            None,
+            "the name-only path must still reject bytes the signature does not cover"
         );
     }
 

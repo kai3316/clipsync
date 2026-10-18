@@ -419,6 +419,12 @@ class LanRuntime:
         # this machine's stale memory (clear it) or the peer's current word
         # (leave it).
         self._connect_sources = {}
+        # Peers whose current dial the user asked for (clicked Connect/Pair, or
+        # started a chat with).  Only those failures are announced: startup and
+        # reconnect dials run on their own, and announcing each one put a run of
+        # "connection failed" notices on screen every time the app opened with a
+        # paired device that was switched off.
+        self._connect_announced: set[str] = set()
         # The (address, port) each in-flight dial went to.  Two dials to the same
         # target are one dial; a fresh sighting that names a *different* address
         # means the peer moved, so the old in-flight dial must not suppress it.
@@ -659,7 +665,7 @@ class LanRuntime:
         self.chat.set_own_fingerprint(pairing.get_identity().fingerprint)
         self.chat.set_on_sessions_changed(lambda: self._publish("chat.sessions.changed", {}))
         self.chat.set_on_message(
-            lambda sid, entry: self._publish("chat.message", self._chat_entry(sid, entry))
+            lambda sid, entry: self._on_chat_message(sid, entry)
         )
         # Chat file transfers report their own progress/outcome; without these
         # the desktop progress row and the phone's chat file bubble sat at 0%
@@ -2935,6 +2941,50 @@ class LanRuntime:
             "peer_name": named.get("peer_name", ""),
         }
 
+    def _on_chat_message(self, session_id, entry):
+        """Publish one conversation entry, and ring for an incoming text.
+
+        `chat.message` is what the window draws; `chat.notify` says "this one
+        would have been missed" and is what the native host turns into the
+        notification sound.  It is a separate name rather than a flag on the
+        entry because the two are read by different fronts: the shell reads the
+        entry, the host reads this, and a rename of one is what the event-name
+        contract test exists to catch.
+        """
+        self._publish("chat.message", self._chat_entry(session_id, entry))
+        self._announce_chat(session_id, entry)
+
+    def _announce_chat(self, session_id, entry):
+        """Publish `chat.notify` for an incoming text the user asked to hear.
+
+        The decision lives here, not in the host: the settings and the per-peer
+        mute list are this side's.  The host only adds the other half — whether
+        the window is in front of the reader (see `alert_chat_notification` in
+        the desktop host) — so an open window does not ring over the message it
+        is already showing.
+        """
+        if entry.get("outgoing"):
+            return
+        if entry.get("kind") != "text":
+            return
+        if not (self.config.notifications_enabled and self.config.sound_enabled):
+            return
+        peer = self.chat.session_peer(session_id)
+        peer_id = str(peer.get("peer_id") or "")
+        if peer_id and peer_id in self._chat_muted:
+            return
+        self._publish(
+            "chat.notify",
+            {
+                "session_id": session_id,
+                "peer_id": peer_id,
+                "peer_name": str(peer.get("peer_name") or ""),
+                # A preview, not the content: the host only rings, and a front
+                # that starts showing notifications must not need the whole text.
+                "text": str(entry.get("text") or "")[:200],
+            },
+        )
+
     def chat_messages(self, session_id):
         return {"messages": self.chat.get_messages(session_id)}
 
@@ -2986,9 +3036,22 @@ class LanRuntime:
 
         def send(data):
             if self.transport.send_to_peer(peer_id, data):
-                self._note_chat_sent(peer_id, self._decode_frame(data))
+                # Delivered on the local link: that is the whole receipt.  A
+                # ledger row here used to be armed as well, on the reasoning
+                # that an internet-reachable peer acks every chat frame -- but
+                # an ack needs a working relay, and when the two machines are on
+                # the same Wi-Fi with the relay off (or unreachable) nothing was
+                # ever going to settle that row.  The message arrived, and the
+                # bubble sat at "发送中" until the ledger expired it as "未送达":
+                # a false failure for a message the peer is reading.  Receipts
+                # belong to sends that actually took the relay; the LAN path
+                # reports delivery the way it always did, by succeeding.
                 return True
-            return self._relay_publish_to_peer(data, peer_id)
+            sent = self._relay_publish_to_peer(data, peer_id)
+            if sent:
+                # Only a relayed send needs a receipt to call itself delivered.
+                self._note_chat_sent(peer_id, self._decode_frame(data))
+            return sent
 
         if self._peer_is_internet_reachable(peer_id):
             # A peer that *can* be reached over the relay is chunked relay-safe
@@ -4263,6 +4326,8 @@ class LanRuntime:
             self._connecting[pid] = now + self.PAIRING_SEND_WAIT
             self._connect_sources[pid] = source
             self._dial_addresses[pid] = (address[1], address[2])
+            if force:
+                self._connect_announced.add(self._resolve(pid))
         self.transport.connect_to_peer(pid, *address, no_auto_pairing=no_auto_pairing)
         return True
 
@@ -4723,6 +4788,12 @@ class LanRuntime:
         real = self._resolve(pid)
         with self._lock:
             self._connecting.pop(real, None)
+            # A failure is only news when the user asked for this dial.  The
+            # startup refresh and the reconnect ladder both dial paired peers on
+            # their own; announcing those made a powered-off laptop produce a
+            # burst of failures on every launch (the report that started this).
+            announce = real in self._connect_announced
+            self._connect_announced.discard(real)
             # Keep the source across repeated failures: the decision to drop a
             # stale address is about a *streak*, and the second failure must see
             # where the address came from too.
@@ -4756,10 +4827,11 @@ class LanRuntime:
                     peer.last_ip = ""
                     peer.last_port = 0
                     self._persist_dirty = True
-        self._publish(
-            "device.connect_failed",
-            {"device_id": real, "name": name or self._peer_name(real), "reason": code},
-        )
+        if announce:
+            self._publish(
+                "device.connect_failed",
+                {"device_id": real, "name": name or self._peer_name(real), "reason": code},
+            )
         self._refresh()
 
     def _connect_rejected(self, name, pid, reason=0):
@@ -5196,6 +5268,7 @@ class LanRuntime:
                     self._connecting.pop(pid, None)
                     self._address_failures.pop(self._resolve(pid), None)
                     self._connect_sources.pop(self._resolve(pid), None)
+                    self._connect_announced.discard(self._resolve(pid))
         if changed and publish:
             self._publish("devices.changed", snapshot)
         if publish:
@@ -7505,6 +7578,10 @@ class LanRuntime:
                 if trusted:
                     self._resend_clip_chunks(payload, pid)
                 return
+        if kind == "file_chunk" and self.file_transfer.speed_test_chunk(
+            getattr(msg, "_raw_payload", {}) or {}, self._chat_send_fn(pid)
+        ):
+            return
         if kind == "file_chunk" and self.chat.handle_binary_chunk(
             getattr(msg, "_raw_payload", {}), pid, self._chat_send_fn(pid)
         ):
@@ -7556,9 +7633,12 @@ class LanRuntime:
                 self.chat.shorten_fingerprint(self.pairing.get_peer_fingerprint(pid)),
                 self._chat_send_fn(pid),
             )
-            # A chat frame the chat layer processed earns a relay receipt, so
-            # the internet sender can mark its message delivered.
-            if accepted:
+            # A chat frame the chat layer processed earns a relay receipt when
+            # it arrived over the relay, so the internet sender can mark its
+            # message delivered.  A frame the local link carried needs none: the
+            # sender no longer arms a ledger row for those (it would only be
+            # settled by a relay this exchange never used).
+            if accepted and via_relay:
                 self._maybe_send_relay_ack(msg, pid)
             return
         # No fallthrough to SyncManager for chat/file/relay/control protocols.

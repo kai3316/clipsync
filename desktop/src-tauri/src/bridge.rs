@@ -241,6 +241,16 @@ fn hides_main_window(value: &Value) -> bool {
     value["type"] == "event" && value["name"] == "app.window_close_requested"
 }
 
+/// Whether a sidecar frame asks this host to ring for an incoming chat message.
+///
+/// The sidecar has already decided the user wants the sound (enabled, not a
+/// muted peer, an incoming text); see `LanRuntime._announce_chat`.  The host
+/// only decides whether the reader is at the window — see
+/// `crate::alert_chat_notification`.
+fn chat_notification(value: &Value) -> bool {
+    value["type"] == "event" && value["name"] == "chat.notify"
+}
+
 /// Whether a sidecar frame is an update that may be installed without a click.
 ///
 /// `phase == "ready"` says the archive is on disk and staged. What else has to
@@ -585,18 +595,23 @@ impl Bridge {
                 if !value["session_id"].is_string() {
                     return Err(BridgeError::new("PROTOCOL_ERROR", "Invalid event session"));
                 }
-                // No native notification is raised for any event: the window
-                // says everything the event means, on its own status strip, and
-                // this host is a background process whose reader opens it when
-                // they go to pair or to look.  Ringing the desktop as well said
-                // the same fact twice, the second time over whatever the reader
-                // was actually doing.
+                // Most events are for the window; the one exception is an
+                // incoming chat message, which rings when the window is not in
+                // front (the reader may have the app in the tray, or be in
+                // another application).  Which messages ring is decided by the
+                // sidecar, from the settings and the mute list.
                 // The native tray follows the saved state; this fires for
                 // changes made from the web UI or the phone too, which never
                 // reach a Tauri command.
                 if changes_the_tray(&value) {
                     let handle = app.clone();
                     tauri::async_runtime::spawn(async move { crate::tray::refresh(&handle).await });
+                }
+                if chat_notification(&value) {
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        crate::alert_chat_notification(&handle)
+                    });
                 }
                 if let Some(reason) = restart_request_reason(&value) {
                     // Spawn rather than await: stop() waits for a reply only

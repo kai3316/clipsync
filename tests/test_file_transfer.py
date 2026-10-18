@@ -1092,3 +1092,36 @@ class TestDestinationNameIsClaimedAtomically:
         assert len(set(claimed)) == 8, "every concurrent claim must be unique"
 
 
+def test_the_speed_test_streams_binary_chunks_not_base64_json():
+    """The reported speed has to measure the transfer path, not base64/JSON.
+
+    The old test sent 20 × 256 KiB as base64 inside JSON, which on a loopback
+    pair whose real transfers ran at 350+ MB/s reported 44 MB/s — the number
+    measured the encoder.  The sender now streams the same binary chunks files
+    use, and the receiver counts them and echoes on the last one.
+    """
+    manager = FileTransferManager("local")
+    frames = []
+
+    def send(frame: bytes) -> None:
+        message = decode_frame(frame)
+        frames.append(message)
+        if message.msg_type == "speed_test_begin":
+            manager.handle_message("speed_test_begin", message._raw_payload, send)
+        elif message.msg_type == "file_chunk":
+            manager.speed_test_chunk(message._raw_payload, send)
+        elif message.msg_type == "speed_test_result":
+            manager.handle_message("speed_test_result", message._raw_payload, send)
+
+    assert manager.start_speed_test(send, has_peers_fn=lambda: True)
+    assert _wait_until(
+        lambda: (manager.get_speed_test() or {}).get("state") == "done", timeout=15
+    ), manager.get_speed_test()
+
+    state = manager.get_speed_test()
+    kinds = {message.msg_type for message in frames}
+    assert "speed_test_data" not in kinds, "the JSON/base64 path was used"
+    assert "file_chunk" in kinds
+    assert state["result_mbps"] > 5.0, state
+
+

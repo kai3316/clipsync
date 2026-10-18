@@ -4761,11 +4761,27 @@ def test_a_failed_dial_is_announced_with_its_reason(rig):
     """A connect click that fails must not just turn the row offline."""
     runtime, _pairing, _transport, _discovery, _clipboard, _history, events, *_ = rig
 
+    # What a click does: the failure belongs to this dial, so it is announced.
+    runtime._connect_announced.add("remote")
     runtime._connect_failed("Remote", "remote", "timeout")
 
     assert events_named(events, "device.connect_failed") == [
         {"device_id": "remote", "name": "Remote", "reason": "timeout"}
     ]
+
+
+def test_a_background_dial_failure_raises_no_notice(rig):
+    """Startup and reconnect dials failing is not news; the tray build proved it.
+
+    Every launch with a paired device switched off used to raise a run of
+    "connection failed" notices, because the automatic dials announced
+    themselves exactly like a click did.
+    """
+    runtime, _pairing, _transport, _discovery, _clipboard, _history, events, *_ = rig
+
+    runtime._connect_failed("Remote", "remote", "unreachable")
+
+    assert events_named(events, "device.connect_failed") == []
 
 
 def test_terminal_pairing_states_are_announced_and_cleared(rig):
@@ -4951,3 +4967,69 @@ def test_a_discovered_only_device_can_be_given_a_name(rig):
 
     row = _row(runtime, "newdev")
     assert row["note"] == "lab-pi"
+
+
+def test_an_incoming_text_asks_the_host_to_ring(rig, monkeypatch):
+    """The sidecar decides whether a message is worth a sound; the host rings."""
+    runtime, _pairing, _transport, _discovery, _clipboard, _history, events, *_ = rig
+    monkeypatch.setattr(
+        runtime.chat, "session_peer", lambda sid: {"peer_id": "remote", "peer_name": "Remote"}
+    )
+    runtime.config.notifications_enabled = True
+    runtime.config.sound_enabled = True
+
+    runtime._announce_chat("s1", {"outgoing": False, "kind": "text", "text": "hello there"})
+
+    rows = events_named(events, "chat.notify")
+    assert len(rows) == 1
+    assert rows[0]["peer_id"] == "remote"
+    assert rows[0]["peer_name"] == "Remote"
+    assert rows[0]["text"] == "hello there"
+
+
+def test_a_muted_peer_or_a_silent_setting_raises_no_chat_notify(rig, monkeypatch):
+    """The two reasons not to ring are decided here, where the settings are."""
+    runtime, _pairing, _transport, _discovery, _clipboard, _history, events, *_ = rig
+    monkeypatch.setattr(
+        runtime.chat, "session_peer", lambda sid: {"peer_id": "remote", "peer_name": "Remote"}
+    )
+    runtime.config.notifications_enabled = True
+    runtime.config.sound_enabled = True
+    entry = {"outgoing": False, "kind": "text", "text": "hi"}
+
+    runtime._chat_muted.add("remote")
+    runtime._announce_chat("s1", entry)
+    assert events_named(events, "chat.notify") == []
+    runtime._chat_muted.discard("remote")
+
+    runtime.config.sound_enabled = False
+    runtime._announce_chat("s1", entry)
+    assert events_named(events, "chat.notify") == []
+
+    runtime.config.sound_enabled = True
+    runtime._announce_chat("s1", {**entry, "outgoing": True})
+    runtime._announce_chat("s1", {**entry, "kind": "file"})
+    assert events_named(events, "chat.notify") == []
+
+
+def test_a_chat_the_lan_carried_arms_no_relay_receipt(rig):
+    """A delivered LAN message must not wait for a relay ack to call itself sent.
+
+    The sender used to ledger every chat frame to an internet-reachable peer,
+    including the LAN ones, and only a relay ack settles a ledger row.  With the
+    two machines on the same Wi-Fi and the relay off, the message arrived and
+    the bubble then turned "未送达" when that row expired.
+    """
+    runtime, _pairing, transport, *_ = rig
+    runtime.config.netpair_secrets = {"remote": "netpair-secret"}
+    transport.connected.add("remote")
+
+    frame = encode_frame(
+        {"msg_type": "chat_text", "session_id": "s1", "text": "hello"},
+        msg_id="m-lan",
+        source_device="local",
+    )
+
+    assert runtime._chat_send_fn("remote")(frame) is True
+    assert runtime.relay_delivery_status() == {"pending": 0, "items": []}
+
