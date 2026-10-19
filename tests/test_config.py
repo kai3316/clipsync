@@ -345,9 +345,23 @@ def test_config_save_load_roundtrips_new_keys(tmp_path, monkeypatch):
     # token on the next start — happens after a reload, not before.
     cfg.web_token = ""
     cfg.web_token_disabled = True
+    # The remote-access settings are part of the same saved record: they must
+    # survive a save/load or the tunnel silently switches itself off at the
+    # next launch, which is exactly what happened while they lived only in
+    # FIELD_RULES.
+    cfg.companion_remote_enabled = True
+    cfg.companion_remote_page_url = "https://example.pages.dev/"
+    cfg.companion_remote_brokers = ["wss://broker.emqx.io:8084/mqtt"]
+    cfg.companion_remote_token = "remote-secret"
+    cfg.companion_remote_mode = "full"
     config_module.save(cfg)
 
     cfg2 = config_module.load()
+    assert cfg2.companion_remote_enabled is True
+    assert cfg2.companion_remote_page_url == "https://example.pages.dev/"
+    assert cfg2.companion_remote_brokers == ["wss://broker.emqx.io:8084/mqtt"]
+    assert cfg2.companion_remote_token == "remote-secret"
+    assert cfg2.companion_remote_mode == "full"
     assert cfg2.internet_sync_enabled is True
     assert cfg2.relay_brokers == cfg.relay_brokers
     assert cfg2.relay_private_brokers == cfg.relay_private_brokers

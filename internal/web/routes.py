@@ -37,6 +37,7 @@ from internal.web.api.history import (
     delete_item,
     get_history,
     get_history_item,
+    get_history_preview,
     increment_paste_count,
     paste_rich,
     push_text,
@@ -525,6 +526,23 @@ def _dispatch(
         elif path == "/api/history/item":
             data, status = get_history_item(query_params, history, cfg)
             return _json_response(data, status)
+
+        elif path == "/api/history/preview":
+            data, status = get_history_preview(query_params, history)
+            return _json_response(data, status)
+
+        elif path == "/api/phone-chat/messages":
+            from internal.application.phone_chat import get_phone_chat_store
+
+            try:
+                after_id = int(query_params.get("after_id", ["0"])[0] or 0)
+            except ValueError:
+                after_id = 0
+            mark_read = (query_params.get("mark_read", ["0"])[0] or "").lower() in ("1", "true")
+            data = get_phone_chat_store().messages(
+                after_id=after_id, reader="phone" if mark_read else ""
+            )
+            return _json_response(data, 200)
 
         elif path == "/api/status":
             from internal.version import __version__
@@ -1361,6 +1379,28 @@ def _dispatch(
                 return _json_response({"ok": False, "error": "dialog_id and action required"}, 400)
             ok = dialog_mgr.handle_response(dialog_id, action, value)
             return _json_response({"ok": ok})
+
+        elif path == "/api/phone-chat/send":
+            from internal.application.phone_chat import get_phone_chat_store
+
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json_response({"ok": False, "error": "invalid json"}, 400)
+            text = str((req or {}).get("text") or "")
+            if not text.strip():
+                return _json_response({"ok": False, "error": "text required"}, 400)
+            try:
+                message = get_phone_chat_store().append("phone", text)
+            except ValueError:
+                return _json_response({"ok": False, "error": "invalid text"}, 400)
+            return _json_response({"ok": True, "message": message}, 200)
+
+        elif path == "/api/phone-chat/read":
+            from internal.application.phone_chat import get_phone_chat_store
+
+            get_phone_chat_store().messages(after_id=0, reader="phone")
+            return _json_response({"ok": True}, 200)
 
         elif path == "/api/chat/invite":
             data, status = _chat_api.invite(chat_mgr, body, chat_start_session)

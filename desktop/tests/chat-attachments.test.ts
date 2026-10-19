@@ -6,6 +6,9 @@ import { bridge } from "../src/api/bridge";
 vi.mock("../src/api/bridge", () => ({
   bridge: {
     chatDevices: vi.fn(), chatSessions: vi.fn(), chatMessages: vi.fn(),
+    phoneChatList: vi.fn().mockResolvedValue({ messages: [], last_id: 0 }),
+    phoneChatSend: vi.fn(), phoneChatRead: vi.fn().mockResolvedValue({ ok: true }),
+    companionRemoteStatus: vi.fn().mockResolvedValue({ enabled: true, token_set: true }),
     openChatFile: vi.fn(), revealChatFile: vi.fn(), markChatRead: vi.fn(),
   },
 }));
@@ -96,7 +99,7 @@ describe("saved chat attachments", () => {
     vi.mocked(bridge.chatMessages).mockImplementation(id => id === "one"
       ? new Promise(done => { resolve = done; }) : Promise.resolve({ messages: [] }));
     await vi.advanceTimersByTimeAsync(1500);
-    await wrapper.findAll(".chat-session")[1].trigger("click");
+    await wrapper.get('[data-session-id="two"]').trigger("click");
     await flushPromises();
     resolve({ messages: [attachment()] });
     await flushPromises();

@@ -137,6 +137,13 @@ class SidecarApplication:
         self.runtime = None
         self.companion = None
         self._companion_factory = companion_factory
+        # The remote-access tunnel (MQTT relay) and its event subscription.
+        # Owned here because the companion's token, port and event journal are
+        # all this object's; the tunnel itself lives in
+        # ``internal.transport.companion_tunnel``.
+        self.companion_tunnel = None
+        self._tunnel_unsubscribe = None
+        self._tunnel_signature = None
         # Internet pairing is deliberately owned by the runtime boundary.
         # Keeping the optional service here lets the sidecar expose the same
         # use cases without importing the legacy Tk application.
@@ -427,8 +434,195 @@ class SidecarApplication:
         # idempotent) instead of an orphan holding the port.  The start's own
         # exception travels on to the lifecycle, which reports it.
         self.companion.start()
+        # The tunnel is a separate outbound connection: a broker that is down or
+        # slow must not turn the local companion into a failed start.
+        self._sync_companion_tunnel()
+        if self.companion_tunnel is None and self.config.companion_remote_enabled:
+            # The server thread can still be finishing its bind just after
+            # start(); retry once without blocking the lifecycle.
+            retry = threading.Timer(1.0, self._sync_companion_tunnel)
+            retry.daemon = True
+            retry.start()
+
+    def _companion_port(self):
+        """The port the companion is actually listening on, or None."""
+        owner = self.companion
+        server = owner.server if owner is not None else None
+        listener = server._httpd if server is not None else None
+        thread = server._thread if server is not None else None
+        if listener is None or thread is None or not thread.is_alive():
+            return None
+        return int(listener.server_address[1])
+
+    def _ensure_remote_token(self):
+        """Mint the remote tunnel's own token the first time it is needed.
+
+        It deliberately does not fall back to ``web_token``: the QR code lives
+        on a phone and in screenshots, and one token for both the LAN and remote
+        entrances means a leaked QR also opens the LAN door.
+        """
+        cfg = self.config
+        if (
+            cfg is not None
+            and cfg.companion_remote_enabled
+            and not cfg.companion_remote_token
+            and self.identity is not None
+        ):
+            cfg.companion_remote_token = secrets.token_urlsafe(32)
+            try:
+                save(cfg, self.identity.encryption)
+            except Exception:
+                logger.debug("Remote token could not be saved yet", exc_info=True)
+
+    def _tunnel_settings(self):
+        cfg = self.config
+        token = "" if cfg is None else cfg.companion_remote_token
+        return (
+            bool(cfg and cfg.companion_remote_enabled),
+            token,
+            tuple(cfg.companion_remote_brokers if cfg else ()),
+            self._tunnel_port(),
+            str(getattr(cfg, "device_name", "") or "") if cfg else "",
+            str(getattr(cfg, "companion_remote_mode", "readonly")) if cfg else "readonly",
+        )
+
+    def _tunnel_port(self):
+        """The port the tunnel should dial.
+
+        ``_companion_port`` is deliberately strict for the status page (the
+        listener must actually be up), but at start() time the HTTP thread may
+        not have published ``_httpd`` yet.  Falling back to the configured port
+        keeps the tunnel from being silently skipped on launch; a wrong port
+        still fails closed with a 503 from the proxy.
+        """
+        port = self._companion_port()
+        if port is None and self.companion is not None and self.config is not None:
+            port = int(self.config.web_port)
+        return port
+
+    def _sync_companion_tunnel(self):
+        """Start, restart or stop the tunnel to match the configuration.
+
+        Called on companion start, on a companion token rotation, and from the
+        remote-access RPC.  A settings signature decides what "matches" means:
+        the token, broker list, port and computer name all feed it, so rotating
+        the token moves the channel instead of leaving an old one subscribed.
+        """
+        self._ensure_remote_token()
+        enabled, token, brokers, port, name, mode = self._tunnel_settings()
+        signature = (enabled, token, brokers, port, name, mode)
+        if not enabled or not token or not port or not brokers:
+            self._stop_companion_tunnel()
+            return
+        if self.companion_tunnel is not None and signature == self._tunnel_signature:
+            return
+        self._stop_companion_tunnel()
+        try:
+            from internal.transport.companion_tunnel import CompanionTunnel
+
+            tunnel = CompanionTunnel(
+                token,
+                list(brokers),
+                port,
+                computer_name=name,
+                mode=mode,
+                companion_token=self.config.web_token,
+            )
+            self._tunnel_unsubscribe = self.events.subscribe(
+                lambda event_name, data: tunnel.publish_event(event_name, data)
+            )
+            tunnel.start()
+            self.companion_tunnel = tunnel
+            self._tunnel_signature = signature
+        except Exception:
+            logger.exception("Companion remote tunnel could not start")
+            self.companion_tunnel = None
+            self._tunnel_signature = None
+
+    def _stop_companion_tunnel(self):
+        unsubscribe, self._tunnel_unsubscribe = self._tunnel_unsubscribe, None
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception:
+                logger.debug("Companion tunnel unsubscribe failed", exc_info=True)
+        tunnel, self.companion_tunnel = self.companion_tunnel, None
+        self._tunnel_signature = None
+        if tunnel is not None:
+            try:
+                tunnel.stop()
+            except Exception:
+                logger.debug("Companion tunnel stop failed", exc_info=True)
+
+    def companion_remote_status(self):
+        cfg = self.config
+        tunnel = self.companion_tunnel
+        token = "" if cfg is None else cfg.companion_remote_token
+        status = {
+            "enabled": bool(cfg and cfg.companion_remote_enabled),
+            "token_set": bool(token),
+            "mode": (cfg.companion_remote_mode if cfg else "readonly"),
+            "brokers": list(cfg.companion_remote_brokers) if cfg else [],
+            "page_url": cfg.companion_remote_page_url if cfg else "",
+            "connected": False,
+            "broker": "",
+            "phone_online": False,
+            "phone_id": "",
+            "last_seen": 0.0,
+            "rx": 0,
+            "tx": 0,
+            "error": "",
+        }
+        if tunnel is not None:
+            try:
+                status.update(tunnel.status())
+            except Exception:
+                logger.debug("Companion tunnel status failed", exc_info=True)
+        return status
+
+    def configure_companion_remote(self, enabled=None, brokers=None,
+                                   rotate_token=False, clear_token=False,
+                                   page_url=None, mode=None):
+        """Turn remote phone access on/off, or move it to another broker.
+
+        Deliberately separate from ``configure_companion``: the LAN companion
+        can stay enabled (and its QR code unchanged) while remote access is off,
+        and rotating the remote token must not invalidate the LAN token.
+        """
+        cfg = self.config
+        if cfg is None or self.identity is None:
+            raise ApplicationError("APP_NOT_READY", "Application is not running")
+        if enabled is not None:
+            cfg.companion_remote_enabled = bool(enabled)
+        if mode is not None:
+            if mode not in ("readonly", "full"):
+                raise ApplicationError("INVALID_ARGUMENT", "Unknown remote mode")
+            cfg.companion_remote_mode = mode
+        if brokers is not None:
+            cleaned = [str(url).strip() for url in brokers if str(url).strip()]
+            if not cleaned:
+                raise ApplicationError("INVALID_ARGUMENT", "At least one broker is required")
+            cfg.companion_remote_brokers = cleaned
+        if page_url is not None:
+            page = str(page_url).strip()
+            if page and not page.startswith(("https://", "http://")):
+                raise ApplicationError("INVALID_ARGUMENT", "The remote page must be an http(s) URL")
+            cfg.companion_remote_page_url = page
+        if clear_token:
+            cfg.companion_remote_token = ""
+        elif rotate_token:
+            cfg.companion_remote_token = secrets.token_urlsafe(32)
+        if cfg.companion_remote_enabled and not cfg.companion_remote_token:
+            cfg.companion_remote_token = secrets.token_urlsafe(32)
+        save(cfg, self.identity.encryption)
+        self._sync_companion_tunnel()
+        self.events.publish("companion.changed", {})
+        return self.companion_remote_status()
 
     def _stop_companion(self):
+        # The tunnel holds an outbound MQTT connection and a journal
+        # subscription; both must go before the companion it proxies.
+        self._stop_companion_tunnel()
         if self.companion is None:
             return True
         if self.companion.stop() is False:
@@ -461,6 +655,7 @@ class SidecarApplication:
                 if token else None
             ),
             "token": token,
+            "remote": self.companion_remote_status(),
         }
 
     def companion_qr(self) -> dict:
@@ -479,6 +674,37 @@ class SidecarApplication:
             qr = png_data_url(url)
         except Exception:
             logger.debug("QR code generation failed", exc_info=True)
+            return {"ok": False, "error": "QR_UNAVAILABLE", "url": url, "qr": None}
+        return {"ok": True, "url": url, "qr": qr}
+
+    def companion_remote_qr(self, page_url=None) -> dict:
+        """The remote-access QR: the static page URL plus a fragment.
+
+        The fragment carries the tunnel token and broker list, so the static
+        host never sees either.  Never raises for the normal reasons a dialog
+        cannot show a code (remote off, no token, no page deployed): those are
+        states the caller renders.
+        """
+        cfg = self.config
+        status = self.companion_remote_status()
+        if not status["enabled"]:
+            return {"ok": False, "error": "REMOTE_DISABLED", "url": None, "qr": None}
+        token = cfg.companion_remote_token
+        if not token:
+            return {"ok": False, "error": "REMOTE_TOKEN_MISSING", "url": None, "qr": None}
+        page = (page_url or cfg.companion_remote_page_url or "").strip()
+        if not page.startswith(("https://", "http://")):
+            return {"ok": False, "error": "REMOTE_PAGE_NOT_SET", "url": None, "qr": None}
+        page = page.split("#", 1)[0]
+        fragment = "v=1&t={}&b={}".format(
+            quote(token, safe=""),
+            quote(json.dumps(list(cfg.companion_remote_brokers), separators=(",", ":")), safe=""),
+        )
+        url = f"{page}#{fragment}"
+        try:
+            qr = png_data_url(url)
+        except Exception:
+            logger.debug("Remote QR generation failed", exc_info=True)
             return {"ok": False, "error": "QR_UNAVAILABLE", "url": url, "qr": None}
         return {"ok": True, "url": url, "qr": qr}
 
@@ -551,6 +777,9 @@ class SidecarApplication:
             finally:
                 # No URLs/tokens in the broadcast event.
                 self.events.publish("companion.changed", {})
+            # The LAN token may have rotated or the port moved; the remote
+            # tunnel derives its channel from that token and must follow.
+            self._sync_companion_tunnel()
             return self.companion_status()
 
     def require_internet_pairing(self):
@@ -661,6 +890,12 @@ class SidecarApplication:
                 "favorites.group_delete",
                 "settings.get", "settings.update",
                 "companion.status", "companion.qr",
+                # Remote access is configured from the app object (config +
+                # tunnel), not the LAN engine: switch it on or off before the
+                # engine is up and it still answers.
+                "companion.remote_status", "companion.remote_configure",
+                "companion.remote_qr",
+                "phone_chat.list", "phone_chat.send", "phone_chat.read",
                 "backups.list", "backups.create", "backups.restore",
                 "history.export", "history.import",
                 # Local-only, so it answers with the engine down: the context

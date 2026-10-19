@@ -468,6 +468,8 @@ async function refreshCompanion() {
     if (generation !== companionGeneration) return;
     companion.value = result;
     companionPort.value = companion.value.port;
+    companionRemotePage.value = companion.value.remote.page_url;
+    companionRemoteMode.value = companion.value.remote.mode;
   } catch (error) {
     if (generation === companionGeneration) store.setError(error);
   }
@@ -485,11 +487,74 @@ async function configureCompanion(enabled: boolean, rotateToken = false, clearTo
     if (generation !== companionGeneration) return;
     companion.value = result;
     companionPort.value = companion.value.port;
+    companionRemotePage.value = companion.value.remote.page_url;
+    companionRemoteMode.value = companion.value.remote.mode;
   } catch (error) {
     if (generation !== companionGeneration) return;
     store.setError(error);
     await refreshCompanion();
   } finally { companionBusy.value = false; }
+}
+
+/* Remote phone access: the same page carried over an MQTT tunnel when the
+ * phone is not on this network.  It is a separate switch from the LAN
+ * companion above because it sends this machine's traffic to a third-party
+ * broker (encrypted) and has its own page URL and QR code. */
+const companionRemotePage = ref("");
+const companionRemoteMode = ref<"readonly" | "full">("readonly");
+const companionRemoteBusy = ref(false);
+const companionRemoteQrOpen = ref(false);
+const companionRemoteDialog = useDialog(companionRemoteQrOpen);
+const companionRemoteQrBusy = ref(false);
+const companionRemoteQrImage = ref("");
+const companionRemoteQrUrl = ref("");
+const companionRemoteQrMessage = ref("");
+
+function remoteLastSeenLabel(): string {
+  const seen = companion.value?.remote?.last_seen;
+  return seen ? new Date(seen * 1000).toLocaleString() : t("暂无");
+}
+
+async function configureCompanionRemote(enabled?: boolean, pageUrl?: string, rotateToken = false) {
+  if (companionRemoteBusy.value) return;
+  companionRemoteBusy.value = true;
+  try {
+    const result = await bridge.companionRemoteConfigure({
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(pageUrl === undefined ? { pageUrl: companionRemotePage.value.trim() } : { pageUrl }),
+      mode: companionRemoteMode.value,
+      ...(rotateToken ? { rotateToken: true } : {}),
+    });
+    if (companion.value) companion.value = { ...companion.value, remote: result };
+    companionRemotePage.value = result.page_url;
+    companionRemoteMode.value = result.mode;
+    announce(rotateToken ? t("远程令牌已更换，旧二维码已失效") : enabled === false ? t("远程访问已关闭") : t("远程访问设置已保存"));
+  } catch (error) {
+    store.setError(error);
+  } finally { companionRemoteBusy.value = false; }
+}
+
+async function openCompanionRemoteQr() {
+  companionRemoteQrImage.value = "";
+  companionRemoteQrUrl.value = "";
+  companionRemoteQrMessage.value = "";
+  companionRemoteQrOpen.value = true;
+  companionRemoteQrBusy.value = true;
+  try {
+    const result = await bridge.companionRemoteQr(companionRemotePage.value.trim() || undefined);
+    companionRemoteQrUrl.value = result.url || "";
+    if (result.ok && result.qr) companionRemoteQrImage.value = result.qr;
+    else {
+      const messages: Record<string, string> = {
+        REMOTE_DISABLED: t("请先开启远程访问"),
+        REMOTE_PAGE_NOT_SET: t("请先填写手机页面地址并保存"),
+        REMOTE_TOKEN_MISSING: t("访问令牌已清除，无法生成远程二维码"),
+        QR_UNAVAILABLE: t("二维码不可用"),
+      };
+      companionRemoteQrMessage.value = messages[result.error || ""] || t("二维码不可用");
+    }
+  } catch (error) { store.setError(error); }
+  finally { companionRemoteQrBusy.value = false; }
 }
 const settingsLoaded = ref(false);
 let settingsLoading = false;
@@ -6194,6 +6259,28 @@ async function translateText() {
                 <div class="setting-actions">
                   <button type="button" :disabled="companionBusy || !companion.running" @click="openCompanionQr"><QrCode :size="16" />{{ t("显示二维码") }}</button>
                 </div>
+                <h3 class="setting-subtitle">{{ t("远程访问（手机不在同一网络）") }}</h3>
+                <p class="note">{{ t("开启后，手机在 4G/5G 或别人家 Wi-Fi 也能通过中继访问这台电脑。流量端到端加密，但会经过第三方 MQTT 服务器。") }}</p>
+                <label class="setting">
+                  <span class="setting-name">{{ t("手机页面地址") }}</span>
+                  <span class="setting-control"><input v-model="companionRemotePage" class="setting-wide" :aria-label="t('手机页面地址')" placeholder="https://clipsync-companion.pages.dev/" :disabled="companionRemoteBusy" /></span>
+                </label>
+                <label class="setting">
+                  <span class="setting-name">{{ t("远程权限") }}</span>
+                  <span class="setting-control">
+                    <select v-model="companionRemoteMode" :aria-label="t('远程权限')" :disabled="companionRemoteBusy">
+                      <option value="readonly">{{ t("只读（推荐）") }}</option>
+                      <option value="full">{{ t("完整（允许推送、删除、发送聊天）") }}</option>
+                    </select>
+                  </span>
+                </label>
+                <div class="setting-actions">
+                  <button type="button" :disabled="companionRemoteBusy" @click="configureCompanionRemote(true)">{{ companion.remote.enabled ? t("保存设置") : t("开启远程访问") }}</button>
+                  <button type="button" :disabled="companionRemoteBusy || !companion.remote.enabled" @click="configureCompanionRemote(false)">{{ t("关闭远程访问") }}</button>
+                  <button type="button" :disabled="companionRemoteBusy || companionRemoteQrBusy || !companion.remote.enabled" @click="openCompanionRemoteQr"><QrCode :size="16" />{{ t("远程二维码") }}</button>
+                  <button type="button" class="danger-outline" :disabled="companionRemoteBusy || !companion.remote.enabled" @click="configureCompanionRemote(undefined, undefined, true)">{{ t("更换远程令牌") }}</button>
+                </div>
+                <p class="setting-block setting-block--card">{{ companion.remote.enabled ? (companion.remote.connected ? t('中继已连接：{broker}', { broker: companion.remote.broker }) : t('中继未连接（会自动重试）')) : t('远程访问已关闭') }}<template v-if="companion.remote.enabled && companion.remote.phone_online"> · {{ t("手机在线") }}</template><template v-if="companion.remote.last_seen"> · {{ t("最近访问：{time}", { time: remoteLastSeenLabel() }) }}</template><template v-if="companion.remote.error"> · {{ companion.remote.error }}</template></p>
               </template>
             </section>
           </template>
@@ -6305,6 +6392,17 @@ async function translateText() {
           <SendHorizontal :size="17" />{{ qrShareBusy ? t("正在发送…") : t("发送文件到手机") }}
         </button>
         <button autofocus @click="qrOpen = false">{{ t("关闭") }}</button>
+      </div>
+    </dialog>
+    <dialog ref="companionRemoteDialog" aria-labelledby="remote-qr-title" class="modal" @close="companionRemoteQrOpen = false" @cancel="companionRemoteQrOpen = false">
+      <h2 id="remote-qr-title">{{ t("远程访问二维码") }}</h2>
+      <p class="muted">{{ t("手机不在同一网络时（4G/5G 或其他 Wi-Fi），用相机扫描这个二维码。") }}</p>
+      <p v-if="companionRemoteQrBusy" class="muted">{{ t("正在生成二维码…") }}</p>
+      <img v-else-if="companionRemoteQrImage" :src="companionRemoteQrImage" :alt="t('远程访问二维码')" class="qr-image" width="220" height="220" />
+      <p v-else class="muted" role="status">{{ companionRemoteQrMessage || t("二维码不可用") }}</p>
+      <p v-if="companionRemoteQrUrl" class="note selectable">{{ companionRemoteQrUrl }}</p>
+      <div class="modal-actions">
+        <button autofocus @click="companionRemoteQrOpen = false">{{ t("关闭") }}</button>
       </div>
     </dialog>
     <dialog ref="aboutDialog" aria-labelledby="about-title" class="modal" @close="aboutOpen = false" @cancel="aboutOpen = false">

@@ -1317,6 +1317,83 @@ body.light .upload-btn {
   }
   html { scroll-behavior: auto; }
 }
+
+  /* ── Visual pass: the phone now uses the desktop's tokens, not a second
+     palette.  Kept as an override block so the legacy rules above still
+     document the old layout; every colour, radius and font below is the
+     desktop app's own value. ─────────────────────────────────────────── */
+  :root {
+    --bg: #202423;
+    --surface: #252b28;
+    --panel: #2c322f;
+    --panel-2: #343b37;
+    --fg: #e4e7e5;
+    --fg-muted: #a6b1ab;
+    --fg-subtle: #7f8b85;
+    --accent: #65c6a6;
+    --accent-2: #65c6a6;
+    --accent-glow: rgba(101,198,166,0.10);
+    --accent-glow-strong: rgba(101,198,166,0.18);
+    --violet-glow: transparent;
+    --pink-glow: transparent;
+    --success: #65c6a6;
+    --danger: #ffb1a8;
+    --border: #3d4642;
+    --border-strong: #4c5752;
+    --radius: 8px;
+    --radius-sm: 5px;
+    --font: "Segoe UI", -apple-system, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-mono: "Cascadia Mono", "SF Mono", Consolas, Menlo, monospace;
+    --spring: 160ms ease;
+    --fast: 120ms ease;
+  }
+
+  body.light {
+    --bg: #f5f7f6;
+    --surface: #ffffff;
+    --panel: #eef2f0;
+    --panel-2: #e5ebe8;
+    --fg: #1f2a25;
+    --fg-muted: #5a6b63;
+    --fg-subtle: #84938c;
+    --accent: #087c6b;
+    --accent-2: #087c6b;
+    --accent-glow: rgba(8,124,107,0.10);
+    --accent-glow-strong: rgba(8,124,107,0.18);
+    --success: #0b7a5c;
+    --danger: #b3261e;
+    --border: #d6e0da;
+    --border-strong: #bccbc3;
+  }
+
+  /* The old page leaned on glows and gradients for hierarchy; the desktop
+     uses borders and spacing instead.  Flatten those surfaces rather than
+     chasing each legacy rule. */
+  .header, .tabs {
+    background: var(--bg) !important;
+    border-color: var(--border) !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  body.light .header, body.light .tabs { background: var(--bg) !important; }
+  .h-item, .f-item, .setting-block--card, .modal, .chat-msg {
+    background: var(--surface) !important;
+    border-color: var(--border) !important;
+    box-shadow: none !important;
+  }
+  .tab, button, input, select, .searchbar {
+    border-radius: var(--radius-sm) !important;
+  }
+  .h-item, .f-item, .modal { border-radius: var(--radius) !important; }
+  .h-item:active, .f-item:active, .tab:active { background: var(--panel) !important; }
+  .tab { min-width: 64px; padding: 9px 10px; font-size: 12px; }
+  .tab--active {
+    background: var(--accent) !important;
+    color: #102018 !important;
+    box-shadow: none !important;
+  }
+  * { text-shadow: none !important; }
+
 </style>
 </head>
 <body>
@@ -1460,6 +1537,16 @@ body.light .upload-btn {
     return text;
   }
 
+  // In remote mode the LAN advice is actively wrong: the phone is reaching
+  // this computer through the relay, and a transient disconnect is retried.
+  // Say that instead of "put both on the same Wi-Fi".
+  function failHint() {
+    if (window.__CLIPSYNC_REMOTE__) {
+      return ZH ? '中继正在连接，稍后会自动重试…' : 'Connecting through the relay; retrying automatically…';
+    }
+    return T.loadFailHint;
+  }
+
   var T = {
     title: ZH ? '剪贴板' : 'ClipSync',
     sub: ZH ? '电脑的剪贴板 · 局域网' : 'This computer · LAN',
@@ -1500,10 +1587,10 @@ body.light .upload-btn {
     uploadCancel: ZH ? '取消' : 'Cancel',
     uploadCancelled: ZH ? '已取消' : 'Cancelled',
     tokenExpired: ZH ? '访问令牌已更改，请重新扫描电脑上的二维码' : 'The access token changed — re-scan the QR code on your computer',
-    tabChat: ZH ? '💬 聊天' : '💬 Chat',
-    tabTransfers: ZH ? '📤 传输' : '📤 Transfers',
-    tabFavorites: ZH ? '⭐ 收藏' : '⭐ Favorites',
-    tabSettings: ZH ? '⚙ 设置' : '⚙ Settings',
+    tabChat: ZH ? '聊天' : 'Chat',
+    tabTransfers: ZH ? '传输' : 'Transfers',
+    tabFavorites: ZH ? '收藏' : 'Favorites',
+    tabSettings: ZH ? '设置' : 'Settings',
     chatDevices: ZH ? '设备' : 'Devices',
     chatSessions: ZH ? '会话' : 'Sessions',
     chatStart: ZH ? '发起' : 'Start',
@@ -1519,6 +1606,9 @@ body.light .upload-btn {
     chatSend: ZH ? '发送' : 'Send',
     chatSendEmpty: ZH ? '请输入消息' : 'Type a message',
     chatSendFail: ZH ? '发送失败' : 'Failed to send',
+    chatComputer: ZH ? '电脑' : 'Computer',
+    chatComputerStatus: ZH ? '本机' : 'This computer',
+    chatComputerEmpty: ZH ? '还没有消息，发一句试试' : 'No messages yet — say hello',
     chatTextFailed: ZH ? '未送达' : 'Not delivered',
     chatResend: ZH ? '重发' : 'Resend',
     chatResendFail: ZH ? '重发失败' : 'Resend failed',
@@ -1655,7 +1745,21 @@ body.light .upload-btn {
   /* ── Apply strings ─────────────────────────────────────────── */
 
   document.getElementById('title').textContent = T.title;
-  document.getElementById('subtitle').textContent = T.sub;
+  document.getElementById('subtitle').textContent = window.__CLIPSYNC_REMOTE__
+    ? (ZH ? '电脑的剪贴板 · 远程' : 'This computer · Remote')
+    : T.sub;
+
+  // Remote mode cannot carry an upload body yet (and should not pretend it
+  // can).  Hide the two entry points that would only fail; downloads, history
+  // and the relay chat stay available.
+  if (window.__CLIPSYNC_REMOTE__) {
+    var remoteSettingsTab = document.getElementById('tabSettings');
+    if (remoteSettingsTab) remoteSettingsTab.style.display = 'none';
+    var remoteUploadBtn = document.getElementById('uploadBtn');
+    if (remoteUploadBtn) remoteUploadBtn.style.display = 'none';
+    var remoteFileInput = document.getElementById('fileInput');
+    if (remoteFileInput) remoteFileInput.disabled = true;
+  }
   document.getElementById('tabHistory').textContent = T.tabHistory;
   document.getElementById('tabSend').textContent = T.tabSend;
   document.getElementById('tabFiles').textContent = T.tabFiles;
@@ -1904,6 +2008,12 @@ body.light .upload-btn {
   };
 
   function previewText(item) {
+    // The stored label of an older vector row is "[Vector Image]", but the row
+    // has a bitmap beside it now; the kind is the honest label, and the modal
+    // will show the picture.
+    if (item.content_type && String(item.content_type).toUpperCase().indexOf('IMAGE') === 0) {
+      return T.tImage;
+    }
     var preview = item.text_preview || '';
     // hasOwnProperty, not a bare lookup: the key comes from stored content,
     // and `PREVIEW_LABELS['constructor']` is a function rather than a key.
@@ -2109,7 +2219,7 @@ body.light .upload-btn {
         if (!silent) {
           var msg = (err && err.status === 403)
             ? esc(T.tokenExpired)
-            : esc(T.loadFail) + '<br>' + esc(T.loadFailHint);
+            : esc(T.loadFail) + '<br>' + esc(failHint());
           historyList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + msg + '</div></div>';
         }
       });
@@ -2163,7 +2273,7 @@ body.light .upload-btn {
       })
       .catch(function () {
         historyClearing = false;
-        showToast(T.histClearFail + ' · ' + T.loadFailHint, true);
+        showToast(T.histClearFail + ' · ' + failHint(), true);
       });
   });
 
@@ -2242,9 +2352,19 @@ body.light .upload-btn {
     modalDetailItem = null;
     updateModalUtils();
     // The list no longer carries full content — fetch it when the modal opens.
+    // An image row is the exception: its full `types` can be megabytes and the
+    // relay refuses that frame, so ask for the 480 px preview instead.
     if (item.entry_id) {
-      getJson('/api/history/item?entry_id=' + encodeURIComponent(item.entry_id))
+      var isImage = String(item.content_type || '').toUpperCase().indexOf('IMAGE') === 0;
+      var detail = isImage
+        ? '/api/history/preview?entry_id='
+        : '/api/history/item?entry_id=';
+      getJson(detail + encodeURIComponent(item.entry_id))
         .then(function (data) {
+          if (isImage) {
+            if (data && data.image) showImageModal(data.image);
+            return;
+          }
           if (data && data.item) {
             setModalContent(data.item);
             // Full payload arrived (with `types`) — the favorite button's
@@ -2373,7 +2493,7 @@ body.light .upload-btn {
         })
         .catch(function () {
           done();
-          showToast(T.histPinFail + ' · ' + T.loadFailHint, true);
+          showToast(T.histPinFail + ' · ' + failHint(), true);
         });
     });
   });
@@ -2413,7 +2533,7 @@ body.light .upload-btn {
         })
         .catch(function () {
           done();
-          showToast(T.histPushFail + ' · ' + T.loadFailHint, true);
+          showToast(T.histPushFail + ' · ' + failHint(), true);
         });
     });
   });
@@ -2447,7 +2567,7 @@ body.light .upload-btn {
         })
         .catch(function () {
           done();
-          showToast(T.histFavFail + ' · ' + T.loadFailHint, true);
+          showToast(T.histFavFail + ' · ' + failHint(), true);
         });
     });
   });
@@ -2484,7 +2604,7 @@ body.light .upload-btn {
         })
         .catch(function () {
           done();
-          showToast(T.histDelFail + ' · ' + T.loadFailHint, true);
+          showToast(T.histDelFail + ' · ' + failHint(), true);
         });
     });
   });
@@ -2518,7 +2638,7 @@ body.light .upload-btn {
       })
       .catch(function () {
         sendBtn.disabled = false;
-        showToast(T.sendFail + ' · ' + T.loadFailHint, true);
+        showToast(T.sendFail + ' · ' + failHint(), true);
       });
   });
 
@@ -2591,7 +2711,7 @@ body.light .upload-btn {
       };
       xhr.onerror = function () {
         resetUploadUI();
-        showToast(T.uploadFail + ' · ' + T.loadFailHint, true);
+        showToast(T.uploadFail + ' · ' + failHint(), true);
       };
       xhr.onabort = function () {
         cancelled = true;
@@ -2679,7 +2799,7 @@ body.light .upload-btn {
         if (!silent) {
           var msg = (err && err.status === 403)
             ? esc(T.tokenExpired)
-            : esc(T.loadFail) + '<br>' + esc(T.loadFailHint);
+            : esc(T.loadFail) + '<br>' + esc(failHint());
           fileList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + msg + '</div></div>';
         }
       });
@@ -2703,7 +2823,7 @@ body.light .upload-btn {
         }
       })
       .catch(function () {
-        showToast(T.uploadFail + ' · ' + T.loadFailHint, true);
+        showToast(T.uploadFail + ' · ' + failHint(), true);
       });
   }
 
@@ -2729,6 +2849,10 @@ body.light .upload-btn {
 
   var chatDevices = [];
   var chatSessions = [];
+  // A fixed conversation with this computer, distinct from peer sessions.
+  var PHONE_CHAT_ID = '__computer__';
+  var phoneChatMessages = [];
+  var phoneChatLastId = 0;
   var chatOpenSession = null;
   var chatMessages = [];
   var chatLoading = false;
@@ -2851,6 +2975,9 @@ body.light .upload-btn {
   // A cheap signature of the open conversation so silent polls can skip the
   // re-render (and the composer's focus) when nothing changed.
   function chatConvSignature() {
+    if (chatOpenSession === PHONE_CHAT_ID) {
+      return phoneChatMessages.map(function (m) { return m.id + ':' + m.sender; }).join('|');
+    }
     var parts = [];
     for (var i = 0; i < chatMessages.length; i++) {
       var m = chatMessages[i];
@@ -2906,6 +3033,20 @@ body.light .upload-btn {
 
   function renderChatList() {
     var html = '';
+    // The local computer is always addressable, even with no peer online.
+    var lastPhone = phoneChatMessages.length
+      ? phoneChatMessages[phoneChatMessages.length - 1]
+      : null;
+    html += '<div class="chat-session" data-session-id="' + PHONE_CHAT_ID + '">' +
+      '<span class="chat-session__dot chat-session__dot--on"></span>' +
+      '<div class="chat-session__body">' +
+        '<div class="chat-session__top">' +
+          '<span class="chat-session__name">' + esc(T.chatComputer) + '</span>' +
+          '<span class="chat-session__status">' + esc(T.chatComputerStatus) + '</span>' +
+        '</div>' +
+        '<div class="chat-session__preview">' + esc(lastPhone ? lastPhone.text : T.chatComputerEmpty) + '</div>' +
+      '</div>' +
+    '</div>';
     html += '<div class="chat-hdr">💻 ' + esc(T.chatDevices) + '</div>';
     if (chatDevices.length === 0) {
       html += '<div class="empty"><div class="empty__icon">📡</div><div class="empty__text">' + esc(T.chatEmptyDevices) + '</div></div>';
@@ -2954,6 +3095,7 @@ body.light .upload-btn {
   }
 
   function renderChatConversation() {
+    if (chatOpenSession === PHONE_CHAT_ID) { renderComputerConversation(); return; }
     var sess = chatOpenSessionObj();
     var name = sess ? (sess.peer_name || sess.peer_id) : '';
     var status = sess ? chatStatusLabel(sess.status) : '';
@@ -2990,7 +3132,7 @@ body.light .upload-btn {
       (Date.now() < chatPeerTypingUntil ? '' : ' style="display:none"') + '>' +
       esc(T.chatTyping) + '</div>';
     html += '<div class="chat-composer">' +
-      '<button class="chat-composer__attach" id="chatAttachBtn" title="' + esc(T.chatAttach) + '"' + (chatFileBusy ? ' disabled' : '') + '>' + (chatFileBusy ? '…' : '📎') + '</button>' +
+      (window.__CLIPSYNC_REMOTE__ ? '' : '<button class="chat-composer__attach" id="chatAttachBtn" title="' + esc(T.chatAttach) + '"' + (chatFileBusy ? ' disabled' : '') + '>' + (chatFileBusy ? '…' : '📎') + '</button>') +
       '<input class="chat-composer__input" id="chatInput" placeholder="' + esc(T.chatInputPlaceholder) + '" maxlength="4000" autocomplete="off">' +
       '<button class="chat-composer__send" id="chatSendBtn">' + esc(T.chatSend) + '</button>' +
     '</div>';
@@ -3007,6 +3149,45 @@ body.light .upload-btn {
     }
   }
 
+  function phoneChatAsMessage(message) {
+    return {
+      kind: 'text',
+      outgoing: message.sender === 'phone',
+      text: message.text,
+      ts: message.ts,
+      entry_id: 'phone-' + message.id,
+    };
+  }
+  function renderComputerConversation() {
+    var prevInput = document.getElementById('chatInput');
+    var draft = prevInput ? prevInput.value : null;
+    var html = '';
+    html += '<div class="chat-conv__hdr">' +
+      '<button class="chat-btn chat-btn--ghost" id="chatBackBtn">' + esc(T.chatBack) + '</button>' +
+      '<div class="chat-conv__name">' + esc(T.chatComputer) + '</div>' +
+      '<div class="chat-conv__status">' + esc(T.chatComputerStatus) + '</div>' +
+    '</div>';
+    html += '<div class="chat-conv__msgs">';
+    if (!phoneChatMessages.length) {
+      html += '<div class="empty"><div class="empty__icon">💬</div><div class="empty__text">' + esc(T.chatComputerEmpty) + '</div></div>';
+    } else {
+      for (var i = 0; i < phoneChatMessages.length; i++) html += chatMsgHtml(phoneChatAsMessage(phoneChatMessages[i]));
+    }
+    html += '</div>';
+    html += '<div class="chat-composer">' +
+      '<input class="chat-composer__input" id="chatInput" placeholder="' + esc(T.chatInputPlaceholder) + '" maxlength="4000" autocomplete="off">' +
+      '<button class="chat-composer__send" id="chatSendBtn">' + esc(T.chatSend) + '</button>' +
+    '</div>';
+    chatView.innerHTML = html;
+    var input = document.getElementById('chatInput');
+    if (input) {
+      if (draft !== null && input.value !== draft) input.value = draft;
+      try { input.focus(); } catch (e) {}
+      try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+    }
+    if (chatScrollBottom) { chatScrollBottom = false; scrollChatToBottom(); }
+  }
+
   function scrollChatToBottom() {
     contentEl.scrollTop = contentEl.scrollHeight;
   }
@@ -3017,15 +3198,28 @@ body.light .upload-btn {
     if (!silent && chatOpenSession === null && chatDevices.length === 0 && chatSessions.length === 0) {
       chatView.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
     }
+    var pPhone = getJson('/api/phone-chat/messages?after_id=0')
+      .then(function (d) { return d || {}; }, function () { return {}; });
     var pDev = getJson('/api/chat/devices').then(function (d) { return d.devices || []; }, function (err) { if (err && err.status === 403) notifyTokenExpired(); return []; });
     var pSess = getJson('/api/chat/sessions').then(function (d) { return d || {}; }, function (err) { if (err && err.status === 403) notifyTokenExpired(); return {}; });
-    Promise.all([pDev, pSess]).then(function (out) {
+    Promise.all([pDev, pSess, pPhone]).then(function (out) {
       chatDevices = out[0];
       chatSessions = (out[1] && out[1].sessions) || [];
       var mutedList = (out[1] && out[1].muted) || [];
       chatMutedSet = {};
       for (var mi = 0; mi < mutedList.length; mi++) chatMutedSet[mutedList[mi]] = true;
       if (out[1] && typeof out[1].open_to_all === 'boolean') chatOpenToAll = out[1].open_to_all;
+      phoneChatMessages = (out[2] && out[2].messages) || [];
+      phoneChatLastId = (out[2] && out[2].last_id) || 0;
+      if (chatOpenSession === PHONE_CHAT_ID) {
+        getJson('/api/phone-chat/messages?after_id=0&mark_read=1')
+          .then(function (d) {
+            phoneChatMessages = (d && d.messages) || phoneChatMessages;
+            chatLoading = false;
+            renderComputerConversation();
+          }, function () { chatLoading = false; renderComputerConversation(); });
+        return;
+      }
       refreshChatPeerTyping();
       if (!chatOpenSession) {
         chatLoading = false;
@@ -3095,7 +3289,7 @@ body.light .upload-btn {
   // throttles too); a state CHANGE always goes out immediately, which is
   // what makes the peer's indicator vanish the moment typing stops.
   function chatSendTyping(typing) {
-    if (!chatOpenSession) return;
+    if (!chatOpenSession || chatOpenSession === PHONE_CHAT_ID) return;
     var now = Date.now();
     if (typing === chatTypingLastState && (now - chatTypingLastSent) < 2000) return;
     chatTypingLastState = !!typing;
@@ -3138,7 +3332,7 @@ body.light .upload-btn {
       })
       .catch(function () {
         chatInviteBusy = '';
-        showToast(T.chatInviteFailed + ' · ' + T.loadFailHint, true);
+        showToast(T.chatInviteFailed + ' · ' + failHint(), true);
       });
   }
 
@@ -3151,6 +3345,19 @@ body.light .upload-btn {
     var text = input.value.trim();
     if (!text) { showToast(T.chatSendEmpty, true); return; }
     chatSending = true;
+    if (chatOpenSession === PHONE_CHAT_ID) {
+      apiFetch('/api/phone-chat/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text }),
+      }).then(function (res) {
+        chatSending = false;
+        if (res.status === 403) { notifyTokenExpired(); return; }
+        if (res.data && res.data.ok) { input.value = ''; chatScrollBottom = true; loadChat(true); }
+        else showToast((res.data && res.data.error) || T.chatSendFail, true);
+      }).catch(function () { chatSending = false; showToast(T.chatSendFail + ' · ' + failHint(), true); });
+      return;
+    }
     apiFetch('/api/chat/text', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3173,7 +3380,7 @@ body.light .upload-btn {
       })
       .catch(function () {
         chatSending = false;
-        showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
+        showToast(T.chatSendFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3193,7 +3400,7 @@ body.light .upload-btn {
         }
       })
       .catch(function () {
-        showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
+        showToast(T.chatSendFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3213,7 +3420,7 @@ body.light .upload-btn {
         loadChat(true);
       })
       .catch(function () {
-        showToast(T.chatResendFail + ' · ' + T.loadFailHint, true);
+        showToast(T.chatResendFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3267,7 +3474,7 @@ body.light .upload-btn {
         loadChat(true);
       })
       .catch(function () {
-        showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
+        showToast(T.chatSendFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3314,7 +3521,7 @@ body.light .upload-btn {
         chatMuteBusy = '';
         chatMutedSet[peerId] = !newMuted;
         if (!chatOpenSession) renderChatList();
-        showToast(T.chatMuteFail + ' · ' + T.loadFailHint, true);
+        showToast(T.chatMuteFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3343,7 +3550,7 @@ body.light .upload-btn {
         chatClosing = false;
         // Keep the conversation open and say why — a silent failure would
         // leave the user staring at a session that never goes away.
-        showToast(T.chatSendFail + ' · ' + T.loadFailHint, true);
+        showToast(T.chatSendFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3409,12 +3616,12 @@ body.light .upload-btn {
         })
         .catch(function () {
           finishChatAttachment();
-          showToast(T.chatFileSendFail + ' · ' + T.loadFailHint, true);
+          showToast(T.chatFileSendFail + ' · ' + failHint(), true);
         });
     };
     xhr.onerror = function () {
       finishChatAttachment();
-      showToast(T.chatFileSendFail + ' · ' + T.loadFailHint, true);
+      showToast(T.chatFileSendFail + ' · ' + failHint(), true);
     };
     xhr.onabort = function () {
       finishChatAttachment();
@@ -3633,7 +3840,7 @@ body.light .upload-btn {
         transfersLoading = false;
         if (err && err.status === 403) notifyTokenExpired();
         if (!silent) {
-          var msg = (err && err.status === 403) ? esc(T.tokenExpired) : esc(T.loadFail) + '<br>' + esc(T.loadFailHint);
+          var msg = (err && err.status === 403) ? esc(T.tokenExpired) : esc(T.loadFail) + '<br>' + esc(failHint());
           transfersView.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + msg + '</div></div>';
         }
       });
@@ -3665,7 +3872,7 @@ body.light .upload-btn {
       .catch(function () {
         transfersCancellingAll = false;
         renderTransfers();
-        showToast(T.trActionFail + ' · ' + T.loadFailHint, true);
+        showToast(T.trActionFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3694,7 +3901,7 @@ body.light .upload-btn {
       .catch(function () {
         retryBusyId = '';
         renderTransfers();
-        showToast(T.trRetryFail + ' · ' + T.loadFailHint, true);
+        showToast(T.trRetryFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3712,7 +3919,7 @@ body.light .upload-btn {
         loadTransfers(true);
       })
       .catch(function () {
-        showToast(T.trActionFail + ' · ' + T.loadFailHint, true);
+        showToast(T.trActionFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3790,7 +3997,7 @@ body.light .upload-btn {
         favoritesLoading = false;
         if (err && err.status === 403) notifyTokenExpired();
         if (!silent) {
-          var msg = (err && err.status === 403) ? esc(T.tokenExpired) : esc(T.loadFail) + '<br>' + esc(T.loadFailHint);
+          var msg = (err && err.status === 403) ? esc(T.tokenExpired) : esc(T.loadFail) + '<br>' + esc(failHint());
           favoritesList.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + msg + '</div></div>';
         }
       });
@@ -3816,7 +4023,7 @@ body.light .upload-btn {
         }
       })
       .catch(function () {
-        showToast(T.favCopyFail + ' · ' + T.loadFailHint, true);
+        showToast(T.favCopyFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3837,7 +4044,7 @@ body.light .upload-btn {
         }
       })
       .catch(function () {
-        showToast(T.favDeleteFail + ' · ' + T.loadFailHint, true);
+        showToast(T.favDeleteFail + ' · ' + failHint(), true);
       });
   }
 
@@ -3863,7 +4070,7 @@ body.light .upload-btn {
         }
       })
       .catch(function () {
-        showToast(T.favExportFail + ' · ' + T.loadFailHint, true);
+        showToast(T.favExportFail + ' · ' + failHint(), true);
       })
       .then(function () {
         // Manual reset instead of .finally (older-webview friendly).
@@ -4027,7 +4234,7 @@ body.light .upload-btn {
       })
       .catch(function () {
         diagState.requested = false;
-        showToast(T.diagFixFail + ' · ' + T.loadFailHint, true);
+        showToast(T.diagFixFail + ' · ' + failHint(), true);
         renderDiag();
       });
   }
@@ -4114,7 +4321,7 @@ body.light .upload-btn {
           })
           .catch(function () {
             if (!silent) {
-              settingsView.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '<br>' + esc(T.loadFailHint) + '</div></div>';
+              settingsView.innerHTML = '<div class="empty"><div class="empty__icon">⚠️</div><div class="empty__text">' + esc(T.loadFail) + '<br>' + esc(failHint()) + '</div></div>';
             }
           });
       });

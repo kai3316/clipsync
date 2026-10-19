@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Bell, BellOff, Check, Clock, Copy, MessageCircle, Paperclip, RefreshCw, Send, X } from "@lucide/vue";
-import { bridge } from "../api/bridge";
+import { bridge, type PhoneChatMessage } from "../api/bridge";
 import { t } from "../i18n";
 import { systemText } from "../i18n/chat";
 import { shortTime, size } from "../i18n/format";
@@ -68,6 +68,17 @@ const devices = ref<Device[]>([]);
 const sessions = ref<ChatSession[]>([]);
 const messages = ref<ChatEntry[]>([]);
 const muted = ref<string[]>([]);
+/** The local phone conversation, merged into this page as a fixed contact. */
+const PHONE_CHAT_ID = "__phone__";
+const phoneMessages = ref<PhoneChatMessage[]>([]);
+const phoneDraft = ref("");
+const phoneSending = ref(false);
+let lastPhoneMessageId = 0;
+let phoneChatInitialized = false;
+/** Remote access is what makes the phone conversation reachable at all. */
+const remoteEnabled = ref(false);
+const remoteTokenSet = ref(false);
+const remoteAvailable = computed(() => remoteEnabled.value && remoteTokenSet.value);
 /** Whether nearby devices may send without asking — see `ChatSessionsPage`. */
 const openToAll = ref(true);
 const selectedId = ref("");
@@ -79,6 +90,53 @@ const fileInput = ref<HTMLInputElement | null>(null);
 let timer: ReturnType<typeof setInterval> | undefined;
 let typingTimer: ReturnType<typeof setTimeout> | undefined;
 const selected = computed(() => sessions.value.find((s) => s.session_id === selectedId.value));
+const phoneSelected = computed(() => selectedId.value === PHONE_CHAT_ID);
+const phoneUnread = computed(() =>
+  phoneMessages.value.filter((m) => m.sender === "phone" && !m.read).length);
+const phonePreview = computed(() => {
+  const last = phoneMessages.value[phoneMessages.value.length - 1];
+  return last ? last.text : t("暂无消息");
+});
+
+async function loadPhoneChat(notifyNew = false) {
+  if (!remoteAvailable.value) return;
+  const result = await bridge.phoneChatList(0);
+  const all = result?.messages ?? [];
+  const firstLoad = !phoneChatInitialized;
+  const incoming = all.filter((m) => m.id > lastPhoneMessageId && m.sender === "phone");
+  lastPhoneMessageId = result?.last_id ?? 0;
+  phoneMessages.value = all;
+  phoneChatInitialized = true;
+  if (phoneSelected.value) await bridge.phoneChatRead();
+  if (notifyNew && !firstLoad && incoming.length && !phoneSelected.value) {
+    props.notify?.(t("手机：{text}", { text: incoming[incoming.length - 1].text }));
+  }
+}
+
+async function openPhoneConversation() {
+  if (!remoteAvailable.value) return;
+  attachmentError.value = "";
+  selectedId.value = PHONE_CHAT_ID;
+  following = true;
+  await loadPhoneChat();
+  await nextTick();
+  messageList.value?.scrollTo?.({ top: messageList.value.scrollHeight });
+}
+
+async function sendPhoneConversation() {
+  const text = phoneDraft.value.trim();
+  if (!text || phoneSending.value) return;
+  phoneSending.value = true;
+  try {
+    await bridge.phoneChatSend(text);
+    phoneDraft.value = "";
+    await loadPhoneChat();
+    await nextTick();
+    messageList.value?.scrollTo?.({ top: messageList.value.scrollHeight });
+  } catch (reason: any) {
+    error.value = reason?.message || t("无法发送消息");
+  } finally { phoneSending.value = false; }
+}
 
 /** The statuses a conversation is still live in — see `nearby`. */
 const LIVE_STATUS = ["active", "inviting", "invited"];
@@ -163,12 +221,19 @@ function filePercent(entry: ChatEntry) {
 }
 async function refresh() {
   try {
-    const [deviceResult, result] = await Promise.all([bridge.chatDevices(), bridge.chatSessions()]);
+    const [deviceResult, result, remote] = await Promise.all([
+      bridge.chatDevices(), bridge.chatSessions(), bridge.companionRemoteStatus(),
+    ]);
     devices.value = deviceResult.devices || [];
     sessions.value = result.sessions || [];
     muted.value = result.muted || [];
     openToAll.value = result.open_to_all !== false;
+    remoteEnabled.value = !!remote?.enabled;
+    remoteTokenSet.value = !!remote?.token_set;
+    if (!remoteAvailable.value && selectedId.value === PHONE_CHAT_ID) selectedId.value = "";
+    await loadPhoneChat(true);
     if (!selectedId.value && sessions.value.length) await select(sessions.value[0]);
+    if (selectedId.value === PHONE_CHAT_ID) { error.value = ""; return; }
     if (selectedId.value) await load(selectedId.value);
     error.value = "";
   } catch (reason: any) { error.value = reason?.message || t("无法读取聊天会话"); }
@@ -537,7 +602,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
           <h2>{{ t("附近设备") }}</h2>
           <button class="icon-button" :aria-label="t('刷新聊天')" :title="t('刷新聊天')" @click="refreshNow"><RefreshCw :size="17" /></button>
         </div>
-        <button v-for="device in nearby" :key="`chat-${device.id}`" class="chat-device"
+        <button class="chat-device" v-for="device in nearby" :key="`chat-${device.id}`"
           :disabled="busy || !reachable(device)"
           :title="reachable(device) ? undefined : t('{name} 当前不在线', { name: deviceLabel(device) })"
           @click="invite({ peer_id: device.id, peer_name: deviceLabel(device) } as ChatSession)">
@@ -552,7 +617,13 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
         <p v-if="!nearby.length" class="note chat-nearby-empty">{{ t("附近没有可聊天的设备。") }}</p>
 
         <h3 class="chat-section card-sub">{{ t("会话") }}</h3>
+        <button v-if="remoteAvailable" class="chat-session phone-chat-row" data-session-id="__phone__" :class="{ active: phoneSelected }" @click="openPhoneConversation">
+          <MessageCircle :size="17" />
+          <span><strong>{{ t("手机对话") }}</strong><small>{{ t("与手机直接聊天") }} · {{ phonePreview }}</small></span>
+          <b v-if="phoneUnread" class="badge badge--count">{{ phoneUnread }}</b>
+        </button>
         <div v-for="session in sessions" :key="session.session_id" class="chat-session"
+          :data-session-id="session.session_id"
           :class="{ active: selectedId === session.session_id }" role="button" tabindex="0"
           @click="select(session)" @keydown.enter="select(session)" @contextmenu.prevent="sessionMenu($event, session)">
           <MessageCircle :size="17" />
@@ -612,6 +683,23 @@ onUnmounted(() => { if (timer) clearInterval(timer); if (typingTimer) clearTimeo
           <textarea v-model="draft" :aria-label="t('聊天消息')" maxlength="16000" :placeholder="t('输入消息，按 Enter 发送')" @keydown="keydown" @input="typing" />
           <button type="button" class="icon-button" :aria-label="t('发送附件')" :title="t('发送附件')" :disabled="busy" @click="sendFile"><Paperclip :size="18" /></button>
           <button class="primary icon-button" :aria-label="t('发送消息')" :title="t('发送消息')" :disabled="!draft.trim() || busy"><Send :size="18" /></button>
+        </form>
+      </div>
+      <div class="chat-conversation" v-else-if="phoneSelected">
+        <header class="chat-heading card-head">
+          <div><h2>{{ t("手机 Companion") }}</h2><small class="muted">{{ t("远程访问 · 与手机直接聊天") }}</small></div>
+        </header>
+        <div ref="messageList" class="chat-messages" aria-live="polite">
+          <div v-if="!phoneMessages.length" class="empty"><MessageCircle :size="28" /><p class="note">{{ t("暂无消息") }}</p></div>
+          <article v-for="message in phoneMessages" :key="message.id" class="chat-message"
+            :class="{ outgoing: message.sender === 'desktop' }">
+            <span>{{ message.text }}</span>
+            <small>{{ shortTime(message.ts) }}</small>
+          </article>
+        </div>
+        <form class="chat-composer" @submit.prevent="sendPhoneConversation">
+          <textarea v-model="phoneDraft" :aria-label="t('聊天消息')" maxlength="4000" :placeholder="t('输入消息…')" @keydown.enter.exact.prevent="sendPhoneConversation" />
+          <button class="primary icon-button" :aria-label="t('发送消息')" :title="t('发送消息')" :disabled="!phoneDraft.trim() || phoneSending"><Send :size="18" /></button>
         </form>
       </div>
       <!-- Nothing selected, which on a machine that has never chatted is the

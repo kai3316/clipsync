@@ -281,6 +281,19 @@ class _ClipboardReader(ClipboardReader):
                 user32.CloseClipboard()
 
         fmt_count = len(content.types)
+        # A vector clip carries no bitmap of its own; browsers (the phone page
+        # included) cannot draw EMF.  Render a PNG preview beside the vector so
+        # the history has something to show, without changing what a paste
+        # puts back on the clipboard.
+        emf = content.types.get(ContentType.IMAGE_EMF)
+        if emf and ContentType.IMAGE_PNG not in content.types:
+            from internal.clipboard.emf import render_emf_to_png
+
+            rendered = render_emf_to_png(emf)
+            if rendered:
+                content.types[ContentType.IMAGE_PNG] = rendered
+                content.image_fmt = "png"
+                fmt_count = len(content.types)
         if fmt_count > 0:
             logger.debug("Read %d format(s) from clipboard", fmt_count)
         return content

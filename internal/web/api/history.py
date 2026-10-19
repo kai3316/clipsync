@@ -154,6 +154,82 @@ def get_history_item(query_params, history, cfg):
     return {"item": result}, 200
 
 
+def get_history_preview(query_params, history):
+    """A downscaled picture for one entry, for clients that cannot fetch it whole.
+
+    The full item is the wrong read for a phone on a relay: an image clip's
+    ``types`` carries megabytes, and the tunnel's frame budget refuses it.  This
+    returns the same 480 px preview the desktop hover card uses, so a phone tap
+    costs kilobytes instead of a multi-megabyte round trip.
+
+    A vector-only row (older captures, before Windows capture started rendering
+    the bitmap beside it) is rendered here too, once, rather than staying the
+    label "Vector Image".
+    """
+    entry_id = (query_params.get("entry_id", [""])[0] or "").strip()
+    if not entry_id:
+        return {"ok": False, "error": "entry_id required"}, 400
+    _, entry = history.find_by_id(entry_id)
+    if entry is None:
+        return {"ok": False, "error": "not found"}, 404
+
+    from internal.application.use_cases.history import decode_formats
+    from internal.clipboard.format import ContentType
+
+    try:
+        types = decode_formats(entry)
+    except (ValueError, TypeError):
+        return {"ok": False, "error": "invalid data"}, 400
+    data = types.get(ContentType.IMAGE_PNG)
+    if data is None and ContentType.IMAGE_EMF in types:
+        from internal.clipboard.emf import render_emf_to_png
+
+        data = render_emf_to_png(types[ContentType.IMAGE_EMF])
+    if not data:
+        return {"ok": False, "error": "no preview"}, 404
+    url, width, height = _phone_preview(data)
+    if not url:
+        return {"ok": False, "error": "no preview"}, 404
+    return {"ok": True, "kind": "image", "image": url, "width": width, "height": height}, 200
+
+
+def _phone_preview(data: bytes) -> tuple[str, int, int]:
+    """A small JPEG/PNG data URL that fits the relay's inner-frame budget.
+
+    The desktop hover preview is 480 px PNG, which is right for a local hover
+    and wrong for a relayed phone tap: a screenshot's PNG at that size is often
+    60 KB, over the tunnel's 32 KiB frame.  320 px JPEG is a fraction of that
+    and still plenty for a phone modal.  Falls back to PNG for small pictures
+    where JPEG would be larger.
+    """
+    import base64
+    from io import BytesIO
+
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            width, height = image.size
+            converted = image.convert("RGBA")
+            canvas = Image.new("RGB", converted.size, (255, 255, 255))
+            canvas.paste(converted, mask=converted.split()[-1])
+            canvas.thumbnail((320, 320), Image.LANCZOS)
+            out = BytesIO()
+            canvas.save(out, format="JPEG", quality=72, optimize=True)
+            encoded = out.getvalue()
+            mime = "jpeg"
+            if len(encoded) > 24 * 1024:
+                png = BytesIO()
+                canvas.save(png, format="PNG", optimize=True)
+                if len(png.getvalue()) < len(encoded):
+                    encoded, mime = png.getvalue(), "png"
+    except Exception:
+        logger.debug("Phone preview could not be decoded", exc_info=True)
+        return "", 0, 0
+    return f"data:image/{mime};base64,{base64.b64encode(encoded).decode('ascii')}", width, height
+
+
 def push_text(body, cfg, sync_mgr, history):
     """Push text to local clipboard, record it and broadcast to peers.
 

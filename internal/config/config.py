@@ -210,6 +210,32 @@ class Config:
     # re-mints (see the parity audit).
     web_token_disabled: bool = False
     web_history_limit: int = 30
+    # Remote access to the companion through the relay tunnel.  Off by
+    # default: it publishes this machine's companion traffic (encrypted) to a
+    # third-party MQTT broker, and that is the user's decision to make.
+    companion_remote_enabled: bool = False
+    # The tunnel's own token.  Empty reuses ``web_token``; a separate one can
+    # be rotated or cleared without invalidating the LAN QR code.
+    companion_remote_token: str = ""
+    # WSS MQTT brokers the tunnel tries in order.  Kept apart from
+    # ``relay_brokers`` so remote phone access can point at a different broker
+    # (a private one, or one that is reachable on the user's network) without
+    # moving clipboard sync.
+    companion_remote_brokers: list[str] = field(
+        default_factory=lambda: [
+            "wss://broker.emqx.io:8084/mqtt",
+            "wss://broker.hivemq.com:8884/mqtt",
+            "wss://test.mosquitto.org:8081/mqtt",
+        ]
+    )
+    # What a remote phone may do: ``readonly`` (default) can read history,
+    # chats, files; ``full`` also adds push/pin/delete/chat actions.  The tunnel
+    # enforces this after its path allow-list, never instead of it.
+    companion_remote_mode: str = "readonly"
+    # Where the static phone page is published.  The remote QR code points here;
+    # the token and broker list ride in the URL fragment, which the static host
+    # never receives.  Empty means "not deployed yet" and the QR is refused.
+    companion_remote_page_url: str = ""
 
     # Translation (LibreTranslate-compatible endpoint). Empty url = the
     # public LibreTranslate instance; when both url and key are empty the
@@ -631,6 +657,11 @@ FIELD_RULES: dict[str, tuple] = {
     "web_enabled": ("bool",),
     "web_token": ("str",),
     "web_token_disabled": ("bool",),
+    "companion_remote_enabled": ("bool",),
+    "companion_remote_token": ("str",),
+    "companion_remote_brokers": ("strlist_nonnull",),
+    "companion_remote_mode": ("str",),
+    "companion_remote_page_url": ("str",),
     "translate_url": ("str",),
     "translate_api_key": ("str",),
     "hotkeys": ("hotkeys",),
@@ -979,6 +1010,11 @@ def load() -> Config:
                 "web_token",
                 "web_token_disabled",
                 "web_history_limit",
+                "companion_remote_enabled",
+                "companion_remote_token",
+                "companion_remote_brokers",
+                "companion_remote_mode",
+                "companion_remote_page_url",
                 "translate_url",
                 "translate_api_key",
                 "hotkeys",
@@ -1161,6 +1197,11 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "web_token": cfg.web_token,
             "web_token_disabled": cfg.web_token_disabled,
             "web_history_limit": cfg.web_history_limit,
+            "companion_remote_enabled": cfg.companion_remote_enabled,
+            "companion_remote_token": cfg.companion_remote_token,
+            "companion_remote_brokers": cfg.companion_remote_brokers,
+            "companion_remote_mode": cfg.companion_remote_mode,
+            "companion_remote_page_url": cfg.companion_remote_page_url,
             "translate_url": cfg.translate_url,
             "translate_api_key": cfg.translate_api_key,
             "hotkeys": cfg.hotkeys,

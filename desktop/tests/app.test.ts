@@ -90,6 +90,10 @@ vi.mock("../src/api/bridge", () => ({
     chatDevices: vi.fn().mockResolvedValue({ devices: [] }),
     chatSessions: vi.fn().mockResolvedValue({ sessions: [], muted: [] }),
     chatMessages: vi.fn().mockResolvedValue({ messages: [] }),
+    phoneChatList: vi.fn().mockResolvedValue({ messages: [], last_id: 0 }),
+    phoneChatSend: vi.fn().mockResolvedValue({ ok: true }),
+    phoneChatRead: vi.fn().mockResolvedValue({ ok: true }),
+    companionRemoteStatus: vi.fn().mockResolvedValue({ enabled: true, token_set: true }),
     markChatRead: vi.fn().mockResolvedValue({ ok: true }),
     // "Connecting" is the quietest answer the invite can give: the sidecar
     // answers before its dial finishes, so a case about the row's own state
@@ -646,7 +650,8 @@ describe("history rendering", () => {
   it("requires confirmation to rotate the Companion token without applying an edited port", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
-    const running = { enabled: true, running: true, port: 8080, state: "running", access_url: "old-url", url: "old-url-plain" };
+    const remote = { enabled: false, token_set: true, mode: "readonly" as const, brokers: [], page_url: "", connected: false, broker: "", phone_online: false, phone_id: "", last_seen: 0, rx: 0, tx: 0, error: "" };
+    const running = { enabled: true, running: true, port: 8080, state: "running", access_url: "old-url", url: "old-url-plain", remote };
     vi.mocked(bridge.companionStatus).mockReset().mockResolvedValue(running);
     vi.mocked(bridge.configureCompanion).mockReset().mockResolvedValue({ ...running, access_url: "new-url" });
     vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
@@ -2690,7 +2695,7 @@ describe("files dropped on the window", () => {
     const { app, drop } = await mountWithDrop();
     try {
       await openChat(app);
-      await app.get(".chat-session").trigger("click");
+      await app.get('[data-session-id="s1"]').trigger("click");
       await flushPromises();
 
       drop({ type: "drop", paths: ["C:/a.txt", "C:/b.txt"], position: { x: 1, y: 1 } });
@@ -2753,7 +2758,7 @@ describe("files dropped on the window", () => {
     const { app, drop } = await mountWithDrop();
     try {
       await openChat(app);
-      await app.get(".chat-session").trigger("click");
+      await app.get('[data-session-id="s1"]').trigger("click");
       await flushPromises();
       drop({ type: "drop", paths: ["C:/a.txt"], position: { x: 1, y: 1 } });
       await flushPromises();

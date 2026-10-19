@@ -11,6 +11,31 @@ export function inDesktop(): boolean {
 /** The surfaces the native tray can ask this window to open. */
 export type MenuAction = "about" | "qr" | "send-url" | "settings" | "export-logs" | "check-update";
 
+/** The remote-access tunnel that carries the phone page when LAN is unreachable. */
+export interface PhoneChatMessage {
+  id: number;
+  sender: "phone" | "desktop";
+  text: string;
+  ts: number;
+  read: boolean;
+}
+
+export interface CompanionRemoteStatus {
+  enabled: boolean;
+  token_set: boolean;
+  mode: "readonly" | "full";
+  brokers: string[];
+  page_url: string;
+  connected: boolean;
+  broker: string;
+  phone_online: boolean;
+  phone_id: string;
+  last_seen: number;
+  rx: number;
+  tx: number;
+  error: string;
+}
+
 /** Every one, so the listener and its test cannot miss a new entry. */
 export const MENU_ACTIONS: readonly MenuAction[] = [
   "about", "qr", "send-url", "settings", "export-logs", "check-update",
@@ -133,9 +158,35 @@ export const bridge = {
   // `access_url` carries the token and goes null once it is cleared, while
   // `url` is the same address without one — the address a phone opens when the
   // companion is deliberately serving token-free.
-  companionStatus: () => command<{ enabled: boolean; port: number; running: boolean; state: string; access_url: string | null; url: string | null }>("companion_status"),
+  companionStatus: () => command<{ enabled: boolean; port: number; running: boolean; state: string; access_url: string | null; url: string | null; remote: CompanionRemoteStatus }>("companion_status"),
+  companionRemoteStatus: () => command<CompanionRemoteStatus>("companion_remote_status"),
+  companionRemoteConfigure: (values: {
+    enabled?: boolean;
+    brokers?: string[];
+    rotateToken?: boolean;
+    clearToken?: boolean;
+    pageUrl?: string;
+    mode?: "readonly" | "full";
+  }) => command<CompanionRemoteStatus>("companion_remote_configure", {
+    enabled: values.enabled,
+    brokers: values.brokers,
+    rotateToken: values.rotateToken,
+    clearToken: values.clearToken,
+    pageUrl: values.pageUrl,
+    mode: values.mode,
+  }),
+  companionRemoteQr: (pageUrl?: string) =>
+    command<{ ok: boolean; url: string | null; qr: string | null; error?: string }>(
+      "companion_remote_qr",
+      { pageUrl },
+    ),
+  phoneChatList: (afterId = 0) =>
+    command<{ messages: PhoneChatMessage[]; last_id: number }>("phone_chat_list", { afterId }),
+  phoneChatSend: (text: string) =>
+    command<{ ok: boolean; message: PhoneChatMessage }>("phone_chat_send", { text }),
+  phoneChatRead: () => command<{ ok: boolean }>("phone_chat_read"),
   configureCompanion: (enabled: boolean, port: number, rotateToken = false, clearToken = false) =>
-    command<{ enabled: boolean; port: number; running: boolean; state: string; access_url: string | null; url: string | null }>("configure_companion", { enabled, port, rotateToken, clearToken }),
+    command<{ enabled: boolean; port: number; running: boolean; state: string; access_url: string | null; url: string | null; remote: CompanionRemoteStatus }>("configure_companion", { enabled, port, rotateToken, clearToken }),
   updateSettings: (values: Record<string, unknown>) => command("update_settings", { values }),
   translate: (text: string, targetLang = "en", sourceLang = "auto") =>
     command<Record<string, unknown>>("translate_text", { text, targetLang, sourceLang }),

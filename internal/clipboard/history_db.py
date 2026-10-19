@@ -130,10 +130,10 @@ def _build_preview(types: dict[ContentType, bytes]) -> str:
         html = _safe_decode(types[ContentType.HTML])
         plain = strip_html(html)
         return plain[:200] if plain else "[HTML]"
-    if ContentType.IMAGE_EMF in types:
-        return "[Vector Image]"
     if ContentType.IMAGE_PNG in types:
         return "[Image]"
+    if ContentType.IMAGE_EMF in types:
+        return "[Vector Image]"
     if ContentType.RTF in types:
         return "[Rich Text]"
     return ""

@@ -9,6 +9,9 @@ import type { ChatEntry } from "../src/api/types";
 vi.mock("../src/api/bridge", () => ({
   bridge: {
     chatDevices: vi.fn(), chatSessions: vi.fn(), chatMessages: vi.fn(),
+    phoneChatList: vi.fn().mockResolvedValue({ messages: [], last_id: 0 }),
+    phoneChatSend: vi.fn(), phoneChatRead: vi.fn().mockResolvedValue({ ok: true }),
+    companionRemoteStatus: vi.fn().mockResolvedValue({ enabled: true, token_set: true }),
     openChatFile: vi.fn(), markChatRead: vi.fn(), setChatMuted: vi.fn(),
     inviteChat: vi.fn(),
   },
@@ -78,7 +81,8 @@ describe("the conversation view", () => {
 describe("the rail the devices and the conversations share", () => {
   const device = { id: "peer-one", name: "Pixel 8 Pro", paired: true, connection_state: "online" };
   const devices = () => wrapper.findAll(".chat-device");
-  const rows = () => wrapper.findAll(".chat-session");
+  const rows = () => wrapper.findAll(".chat-session")
+    .filter((row) => !row.classes().includes("phone-chat-row"));
 
   beforeEach(() => {
     vi.mocked(bridge.chatDevices).mockResolvedValue({ devices: [device] } as any);

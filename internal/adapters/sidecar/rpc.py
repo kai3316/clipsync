@@ -365,6 +365,50 @@ class Dispatcher:
                 "clear_token": (bool, lambda _: True),
             }, ("enabled",))
             return self.app.configure_companion(**params)
+        if method == "companion.remote_status":
+            validate_params(params, {})
+            return self.app.companion_remote_status()
+        if method == "companion.remote_qr":
+            validate_params(params, {
+                "page_url": (str, lambda value: len(value) <= 512),
+            })
+            return self.app.companion_remote_qr(params.get("page_url"))
+        if method == "companion.remote_configure":
+            validate_params(params, {
+                "enabled": (bool, lambda _: True),
+                "brokers": (
+                    list,
+                    lambda value: all(
+                        isinstance(url, str) and 0 < len(url.strip()) <= 512
+                        for url in value
+                    ),
+                ),
+                "rotate_token": (bool, lambda _: True),
+                "clear_token": (bool, lambda _: True),
+                "page_url": (str, lambda value: len(value) <= 512),
+                "mode": (str, lambda value: value in ("readonly", "full")),
+            })
+            return self.app.configure_companion_remote(**params)
+        if method == "phone_chat.list":
+            from internal.application.phone_chat import get_phone_chat_store
+
+            validate_params(params, {"after_id": (int, lambda value: value >= 0)})
+            return get_phone_chat_store().messages(
+                after_id=params.get("after_id", 0)
+            )
+        if method == "phone_chat.send":
+            from internal.application.phone_chat import get_phone_chat_store
+
+            validate_params(params, {"text": (str, lambda value: 0 < len(value.strip()) <= 4000)},
+                            ("text",))
+            message = get_phone_chat_store().append("desktop", params["text"])
+            return {"ok": True, "message": message}
+        if method == "phone_chat.read":
+            from internal.application.phone_chat import get_phone_chat_store
+
+            validate_params(params, {})
+            get_phone_chat_store().messages(after_id=0, reader="desktop")
+            return {"ok": True}
         if method == "devices.note":
             validate_params(params, {
                 "device_id": (str, lambda v: 0 < len(v) <= 128),

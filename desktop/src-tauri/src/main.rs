@@ -218,6 +218,105 @@ async fn configure_companion(window: WebviewWindow, host: State<'_, Host>, enabl
 }
 
 #[tauri::command]
+async fn companion_remote_status(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    host.bridge().await?.call("companion.remote_status", json!({})).await
+}
+
+#[tauri::command]
+async fn companion_remote_configure(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    enabled: Option<bool>,
+    brokers: Option<Vec<String>>,
+    rotate_token: Option<bool>,
+    clear_token: Option<bool>,
+    page_url: Option<String>,
+    mode: Option<String>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    let mut params = serde_json::Map::new();
+    if let Some(value) = enabled {
+        params.insert("enabled".into(), json!(value));
+    }
+    if let Some(value) = brokers {
+        params.insert("brokers".into(), json!(value));
+    }
+    if let Some(value) = rotate_token {
+        params.insert("rotate_token".into(), json!(value));
+    }
+    if let Some(value) = clear_token {
+        params.insert("clear_token".into(), json!(value));
+    }
+    if let Some(value) = page_url {
+        params.insert("page_url".into(), json!(value));
+    }
+    if let Some(value) = mode {
+        params.insert("mode".into(), json!(value));
+    }
+    host.bridge()
+        .await?
+        .call("companion.remote_configure", Value::Object(params))
+        .await
+}
+
+#[tauri::command]
+async fn companion_remote_qr(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    page_url: Option<String>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    let mut params = serde_json::Map::new();
+    if let Some(value) = page_url {
+        params.insert("page_url".into(), json!(value));
+    }
+    host.bridge()
+        .await?
+        .call("companion.remote_qr", Value::Object(params))
+        .await
+}
+
+#[tauri::command]
+async fn phone_chat_list(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    after_id: Option<u64>,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    let mut params = serde_json::Map::new();
+    if let Some(value) = after_id {
+        params.insert("after_id".into(), json!(value));
+    }
+    host.bridge()
+        .await?
+        .call("phone_chat.list", Value::Object(params))
+        .await
+}
+
+#[tauri::command]
+async fn phone_chat_send(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    text: String,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    host.bridge()
+        .await?
+        .call("phone_chat.send", json!({ "text": text }))
+        .await
+}
+
+#[tauri::command]
+async fn phone_chat_read(window: WebviewWindow, host: State<'_, Host>) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    host.bridge().await?.call("phone_chat.read", json!({})).await
+}
+
+#[tauri::command]
 async fn list_devices(window: WebviewWindow, host: State<'_, Host>) -> Result<Value, BridgeError> {
     authorize(&window)?;
     host.bridge().await?.call("devices.list", json!({})).await
@@ -2824,8 +2923,33 @@ fn should_play_chat_alert(window_visible: bool, window_focused: bool) -> bool {
     !(window_visible && window_focused)
 }
 
-/// The system's own notification sound, so the app carries no audio asset.
-fn play_chat_alert() {
+/// The chime the app rings for a message.
+///
+/// Bundled rather than borrowed from the OS: the Windows system alert is the
+/// two-tone "error" beep and macOS's Glass is an attention sound, neither of
+/// which reads as "a message arrived".  This is a soft two-note bell, the same
+/// on every platform.
+static CHAT_CHIME: &[u8] = include_bytes!("../assets/notify.wav");
+
+/// Where the chime is written for the platform players.
+///
+/// `afplay`, `SoundPlayer` and `paplay` all take a path, and an installed app
+/// has no writable resource directory.  One fixed temp file is enough: the
+/// bytes are checked before reuse, so a rebuild with a different chime replaces
+/// it, and a normal launch does not rewrite it.
+fn chat_chime_path() -> Option<std::path::PathBuf> {
+    let path = std::env::temp_dir().join("clipsync-notify.wav");
+    let current = std::fs::read(&path).ok();
+    if current.as_deref() == Some(CHAT_CHIME) {
+        return Some(path);
+    }
+    std::fs::write(&path, CHAT_CHIME).ok()?;
+    Some(path)
+}
+
+/// The system's own notification sound, for the rare case the bundled chime
+/// could not be written to the temp directory.
+fn play_system_alert() {
     #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("/usr/bin/afplay")
@@ -2835,7 +2959,6 @@ fn play_chat_alert() {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: no console flashes behind a tray app.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let _ = std::process::Command::new("powershell")
             .args([
@@ -2849,13 +2972,48 @@ fn play_chat_alert() {
     }
     #[cfg(target_os = "linux")]
     {
+        let _ = std::process::Command::new("canberra-gtk-play")
+            .args(["-i", "message"])
+            .spawn();
+    }
+}
+
+/// Play the chat chime with the platform's own audio player.
+fn play_chat_alert() {
+    let Some(chime) = chat_chime_path() else {
+        play_system_alert();
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("/usr/bin/afplay")
+            .arg(&chime)
+            .spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: no console flashes behind a tray app.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let script = format!(
+            "(New-Object System.Media.SoundPlayer '{}').Play()",
+            chime.to_string_lossy().replace('\'', "''")
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
         let played = std::process::Command::new("paplay")
-            .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
+            .arg(&chime)
             .spawn()
             .is_ok();
         if !played {
-            let _ = std::process::Command::new("canberra-gtk-play")
-                .args(["-i", "message"])
+            let _ = std::process::Command::new("aplay")
+                .args(["-q"])
+                .arg(&chime)
                 .spawn();
         }
     }
@@ -2863,7 +3021,7 @@ fn play_chat_alert() {
 
 #[cfg(test)]
 mod alert_tests {
-    use super::should_play_chat_alert;
+    use super::{should_play_chat_alert, CHAT_CHIME};
 
     /// A background arrival rings; the message the reader is looking at does
     /// not.  Both halves matter: ringing over a focused window is noise, and
@@ -2874,6 +3032,16 @@ mod alert_tests {
         assert!(should_play_chat_alert(false, true));
         assert!(should_play_chat_alert(true, false));
         assert!(!should_play_chat_alert(true, true));
+    }
+
+    /// The bundled sound is a real WAV the platform players can open: a typo in
+    /// the include path or a truncated asset would otherwise only surface as
+    /// silence on a user's machine.
+    #[test]
+    fn the_chat_chime_is_a_wav_file() {
+        assert!(CHAT_CHIME.len() > 10_000);
+        assert_eq!(&CHAT_CHIME[0..4], b"RIFF");
+        assert_eq!(&CHAT_CHIME[8..12], b"WAVE");
     }
 }
 
@@ -3018,6 +3186,12 @@ fn main() {
             scan_devices,
             companion_status,
             configure_companion,
+            companion_remote_status,
+            companion_remote_configure,
+            companion_remote_qr,
+            phone_chat_list,
+            phone_chat_send,
+            phone_chat_read,
             get_settings,
             update_settings,
             translate_text,

@@ -69,6 +69,8 @@ export const fixtures: Record<string, unknown> = {
       "favorites.group_delete",
       "settings.get", "settings.update",
       "companion.status", "companion.qr",
+      "companion.remote_status", "companion.remote_configure", "companion.remote_qr",
+      "phone_chat.list", "phone_chat.send", "phone_chat.read",
       "backups.list", "backups.create", "backups.restore",
       "history.export", "history.import", "clipboard.copy",
       "translate.text", "ai.profiles", "ai.profiles.update",
