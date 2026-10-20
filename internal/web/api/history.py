@@ -345,6 +345,11 @@ def delete_item(body, history):
 
     entry_id = data.get("entry_id")
     if entry_id is not None:
+        # Only a scalar id: anything else (an object, a list) went straight
+        # into the SQLite bind and answered 500 from a malformed body rather
+        # than 400.
+        if isinstance(entry_id, (dict, list, tuple, bool)):
+            return {"ok": False, "error": "invalid entry_id"}, 400
         count = history.batch_delete([entry_id])
         return {"ok": count > 0}, 200
 

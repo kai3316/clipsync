@@ -1880,6 +1880,15 @@ class Discovery:
                 except Exception:
                     link_alive = False
             if link_alive or (browser_lists and not answered_round):
+                # A live TCP link is positive evidence the device is there, and
+                # it is the case this function's own comment claimed was vouched
+                # for.  It used to fall through to ``lost`` anyway once the
+                # stale timer ran out — so a peer whose mDNS multicast is
+                # filtered (a VPN, a router with IGMP snooping) while its TCP
+                # connection stayed up was reported gone every three minutes,
+                # and its row flipped offline and back on its own.
+                if link_alive:
+                    continue
                 since = stale_since.get(pid, now)
                 if now - since < PRESENCE_STALE_TIMEOUT_SECONDS:
                     stale.append(pid)
@@ -2311,7 +2320,15 @@ class Discovery:
         # Read the hashed device_id from TXT records.
         peer_id_hash = ""
         if b"device_id_hash" in props:
-            peer_id_hash = props[b"device_id_hash"].decode("utf-8")
+            # Decoded leniently: this is another machine's bytes, and the
+            # browser callback that reaches here has no try/except around it,
+            # so a TXT record holding anything but UTF-8 threw straight into
+            # the zeroconf thread.  A peer that announces undecodable garbage
+            # is simply a peer with no id.
+            raw_hash = props[b"device_id_hash"]
+            peer_id_hash = (
+                raw_hash.decode("utf-8", errors="replace") if isinstance(raw_hash, bytes) else ""
+            )
 
         # Skip our own service by comparing the hashed identity.
         if peer_id_hash == self._device_id_hash:

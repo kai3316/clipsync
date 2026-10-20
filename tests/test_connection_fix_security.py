@@ -296,3 +296,62 @@ def test_a_bad_key_state_stops_the_reconnect_loop_and_notifies():
     assert seen == [("Device B", "dev-b", C.CRYPTO_MISMATCH_PASSWORD)]
     manager._running = False
     manager._pending_sockets.clear()
+
+
+# ------------------------------- health of a connection that has not started
+
+
+class _OpenSocket:
+    """A socket with nothing to read and no error on it, for `health_check`."""
+
+    def settimeout(self, value):
+        pass
+
+    def setsockopt(self, *args):
+        pass
+
+    def getsockopt(self, level, option):
+        return 0
+
+    def recv(self, size):
+        return b""
+
+    def shutdown(self, how):
+        pass
+
+    def close(self):
+        pass
+
+
+def test_a_connection_that_has_not_started_is_not_reported_dead():
+    """An unstarted connection is open, not dead.
+
+    The transport now registers a connection and starts it only after the
+    tiebreaker has decided whether to keep it — so that one which loses the
+    race never hands its frames to the application.  That leaves a window in
+    which a connection is in `_peers` without having been started, and
+    `health_check` answered False for it, which is what made a tiebreaker keep
+    a connection the peer had already decided to drop: each end stopped the
+    half the other was keeping, and no link survived long enough to carry an
+    unpair notice.  The socket is open — TLS and the identity exchange are
+    both behind it — so "not started yet" has to read as alive.
+    """
+    connection = C.PeerConnection("dev-b", "Device B", _OpenSocket())
+
+    assert connection._recv_thread is None
+    assert connection.health_check() is True
+
+
+def test_a_connection_that_was_started_and_stopped_is_reported_dead():
+    """The same flag after `stop()` still means what it always meant."""
+    connection = C.PeerConnection(
+        "dev-b",
+        "Device B",
+        _SockBuf(_framed([])),
+        pairing_mgr=_PinnedPairing("", paired=True),
+    )
+    _run_recv_loop(connection)
+    assert connection._recv_thread is not None
+
+    connection.stop()
+    assert connection.health_check() is False

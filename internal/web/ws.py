@@ -40,6 +40,14 @@ _MAX_MESSAGE_BYTES = 1024 * 1024
 # The stuck client still self-evicts via send_bytes failing.
 _BROADCAST_SEND_TIMEOUT = 1.0
 
+# How many pings one client may send in a window before the connection is
+# dropped.  Answering them is cheap, but each one used to refresh the liveness
+# clock, so a client doing nothing else held a thread and a socket for as long
+# as it kept pinging.  A browser answers *our* ping with a pong, which is the
+# direction that genuinely proves the peer is there.
+_CONTROL_WINDOW = 10.0
+_CONTROL_MAX_PER_WINDOW = 30
+
 
 class WebSocketClient:
     """Represents a single connected WebSocket client."""
@@ -63,6 +71,9 @@ class WebSocketClient:
         # message-reassembly loop knows the frame it just consumed was not part
         # of the message and waits for the next one instead of returning.
         self._last_was_control = False
+        # Ping budget: see _spend_control_budget.
+        self._control_window_start = time.monotonic()
+        self._control_in_window = 0
         # A stalled client (phone asleep, cable pulled) must not block a
         # broadcast forever: bound every send/recv on this socket so
         # sendall() raises instead of blocking indefinitely.  This also
@@ -192,10 +203,11 @@ class WebSocketClient:
         final = (first_byte & 0x80) != 0
         masked = (second_byte & 0x80) != 0
         payload_len = second_byte & 0x7F
-        # Any successfully-read frame proves the connection is alive —
-        # browsers auto-answer our ping with a pong, which lands here and
-        # refreshes last_recv even though we discard the payload.
-        self.last_recv = time.monotonic()
+        # A pong is proof the peer is there, and a data frame is work it did.
+        # A ping is neither: it is a request for us to answer, and refreshing
+        # the liveness clock on one let a client keep a connection the idle
+        # sweep exists to retire by doing nothing but pinging.  Charged to a
+        # per-window budget below and never to last_recv.
 
         # Handle extended payload length
         if payload_len == 126:
@@ -247,17 +259,42 @@ class WebSocketClient:
             self._closed = True
             return None, None, False, False
         if opcode == _OP_PING:
+            # Answered, but counted: a client that sends nothing but pings used
+            # to hold a thread and a socket indefinitely, because every ping
+            # refreshed last_recv and the idle sweep never saw it as stale.
+            if not self._spend_control_budget():
+                logger.debug("WS ping flood from %s — closing", self.addr[0])
+                self._fail_connection(1002, "too many control frames")
+                return None, None, False, False
             self._send_frame(_OP_PONG, payload)
             self._last_was_control = True
             return None, None, False, False
         if opcode == _OP_PONG:
+            # The peer answered: the connection is genuinely alive.
+            self.last_recv = time.monotonic()
             self._last_was_control = True
             return None, None, False, False
         if opcode in (_OP_TEXT, _OP_BINARY, _OP_CONT):
+            self.last_recv = time.monotonic()
             return payload, opcode, final, masked
         logger.debug("WS unknown opcode: %d", opcode)
         self._fail_connection(1002, "unknown opcode")
         return None, None, False, False
+
+    def _spend_control_budget(self) -> bool:
+        """Charge one ping against a per-window allowance.
+
+        Without this a client could keep a thread, a socket and a broadcast
+        slot for as long as it liked by sending nothing but pings: each one was
+        answered, and each one refreshed ``last_recv``, so the idle sweep that
+        retires dead connections could never see it as dead.
+        """
+        now = time.monotonic()
+        if now - self._control_window_start > _CONTROL_WINDOW:
+            self._control_window_start = now
+            self._control_in_window = 0
+        self._control_in_window += 1
+        return self._control_in_window <= _CONTROL_MAX_PER_WINDOW
 
     def _fail_connection(self, code: int, reason: str) -> None:
         """Close with a status code, as §7.1.7 requires for a protocol error."""
@@ -414,6 +451,40 @@ class WebSocketManager:
     def on_client_attached(self, cb):
         self._on_client_attached = cb
 
+    def _origin_ok(self, request_headers: dict[str, str]) -> bool:
+        """Whether this handshake may proceed, judged on its origin.
+
+        Same rule as the state-changing HTTP routes.  A browser always sends
+        ``Origin`` on a WebSocket handshake and there is no preflight, so a
+        page from another host could otherwise open a socket here and sit on
+        the live clipboard, device and chat streams — carrying the token, or
+        carrying nothing at all when the user has cleared it.
+
+        A client that sends no ``Origin`` is not a browser, and is left to the
+        token check the caller makes first, exactly as ``_write_origin_ok``
+        leaves an origin-less POST.
+        """
+        origin = (
+            request_headers.get("origin")
+            or request_headers.get("sec-websocket-origin")
+            or ""
+        )
+        if not origin:
+            # A browser always names its origin, so an absent one is not a
+            # browser and cannot be a cross-site page — it is left to the
+            # token.  But with the token cleared there is nothing left to
+            # authenticate against, and a WebSocket hands over the live
+            # clipboard, device and chat streams for as long as it stays open,
+            # so in exactly that state the origin is required.
+            return bool(getattr(self._cfg, "web_token", ""))
+        from internal.web.server import _origin_matches_host
+
+        return _origin_matches_host(
+            origin,
+            request_headers.get("host", ""),
+            getattr(self._cfg, "web_port", None),
+        )
+
     def handle_handshake(
         self, sock: socket.socket, addr: tuple, request_headers: dict[str, str]
     ) -> WebSocketClient | None:
@@ -424,6 +495,18 @@ class WebSocketManager:
         key = request_headers.get("sec-websocket-key", "")
         if not key:
             logger.debug("WS handshake: missing Sec-WebSocket-Key from %s", addr[0])
+            return None
+
+        # Same-origin when the client says where it came from: a browser will
+        # open a WebSocket to any host from any page and there is no
+        # preflight.  See `_origin_ok` for why an absent origin is not this
+        # check's business.
+        if not self._origin_ok(request_headers):
+            logger.warning(
+                "WS handshake from %s refused: origin %r is not this server",
+                addr[0],
+                request_headers.get("origin") or request_headers.get("sec-websocket-origin") or "",
+            )
             return None
 
         # Compute accept key
@@ -779,11 +862,6 @@ class WebSocketManager:
                 "status": status or "",
             },
         )
-
-    @property
-    def client_count(self) -> int:
-        with self._lock:
-            return len(self._clients)
 
     def shutdown(self):
         """Close all connections and clear client list."""

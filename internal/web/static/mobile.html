@@ -1583,7 +1583,7 @@ body.light .upload-btn {
     tVectorImage: ZH ? '矢量图' : 'Vector Image',
     tRichText: ZH ? '富文本' : 'Rich Text',
     loadFailHint: ZH ? '请确认手机与电脑在同一 Wi-Fi，且 ClipSync 正在运行。' : 'Make sure your phone is on the same Wi-Fi as the computer and ClipSync is running.',
-    uploadTooLarge: ZH ? '文件过大（最大 128 MB）' : 'File too large (128 MB max)',
+    uploadTooLarge: ZH ? '文件过大（最大 32 MB）' : 'File too large (32 MB max)',
     uploadCancel: ZH ? '取消' : 'Cancel',
     uploadCancelled: ZH ? '已取消' : 'Cancelled',
     tokenExpired: ZH ? '访问令牌已更改，请重新扫描电脑上的二维码' : 'The access token changed — re-scan the QR code on your computer',
@@ -1811,7 +1811,7 @@ body.light .upload-btn {
   var historyItems = [];
   var uploadXhr = null;
   var pollTimer = null;
-  var MAX_UPLOAD_BYTES = 128 * 1024 * 1024; // 128 MB — matches the server cap.
+  var MAX_UPLOAD_BYTES = 32 * 1024 * 1024; // 32 MB — matches the server cap.
 
   /* ── Tab switching ─────────────────────────────────────────── */
 
@@ -2730,7 +2730,7 @@ body.light .upload-btn {
     var total = 0;
     for (var i = 0; i < files.length; i++) total += files[i].size;
     // Pre-flight check: the server buffers the whole body and hard-caps at
-    // 128 MB — reject oversized selections before starting the upload.  Leave
+    // 32 MB — reject oversized selections before starting the upload.  Leave
     // a 64 KB headroom so multipart boundaries / headers never push the actual
     // request body past the server's Content-Length cap.
     if (total > MAX_UPLOAD_BYTES - 64 * 1024) {
@@ -3569,7 +3569,7 @@ body.light .upload-btn {
   function uploadChatAttachment(file) {
     if (!file || !chatFileSession) return;
     // Same pre-flight cap as the Files tab: the server buffers whole bodies
-    // up to 128 MB — reject oversized picks before burning the bandwidth.
+    // up to 32 MB — reject oversized picks before burning the bandwidth.
     if (file.size > MAX_UPLOAD_BYTES - 64 * 1024) {
       showToast(T.uploadTooLarge, true);
       chatFileInput.value = '';

@@ -619,10 +619,6 @@ def download_latest_release(
     (localized) message describing the problem — e.g. that no release asset
     exists for this platform.  Never raises.
     """
-    import os
-
-    from internal.i18n import T
-
     try:
         data = _fetch_latest_release(timeout=60.0)
         if not data:

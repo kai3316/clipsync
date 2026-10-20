@@ -32,7 +32,12 @@ from internal.config.config import (
     config_dir,
     config_lock,
 )
-from internal.data.logs import stage_collected_log, write_share_copy
+from internal.data.logs import (
+    hold_share,
+    release_share,
+    stage_collected_log,
+    write_share_copy,
+)
 from internal.infrastructure.persistence.relay_delivery import RelayDeliveryQueue
 from internal.infrastructure.runtime.internet_pairing import (
     InternetPairingService,
@@ -189,6 +194,13 @@ def _reject_reason_name(reason) -> str:
 _CONNECT_FAILURE_REASONS = frozenset(
     {"unreachable", "timeout", "tls", "closed", "identity", "crypto", "port", "other"}
 )
+
+# How long after startup the clipboard monitor is asked whether it actually
+# came up, and how long the one restart gets to prove itself.  Bounded by the
+# monitor's own startup: it has decided by the time this fires, and two checks
+# is the whole budget — a monitor that is still broken after a restart is a
+# fault to report, not a loop to run.
+_CAPTURE_CHECK_DELAY = 3.0
 
 
 def _short_fingerprint(certificate_pem):
@@ -405,6 +417,9 @@ class LanRuntime:
         self._stop_event = threading.Event()
         self._start_done = threading.Event()
         self._maintenance = None
+        # The timed-pause resume thread, kept apart from `_maintenance` so
+        # teardown can wait for it too.  See `_restore_timed_pause`.
+        self._pause_thread = None
         self._cleanup_thread = None
         self._cleanup_ok = False
         self._started = set()
@@ -652,11 +667,14 @@ class LanRuntime:
         # built before the store is guaranteed to exist, and because the answer
         # ("these paths, or this reason") is a policy the store should own.
         self._clip_file_source = None
-        # device_id -> (entry_id asked for, monotonic deadline), the ledger of
-        # what this machine has actually requested.  The manager asks rather
-        # than tracks because the sender writes the `clip_file` label on its own
-        # frames — see `FileTransferManager.set_clip_file_guard`.
-        self._clip_file_outstanding: dict[str, tuple[str, float]] = {}
+        # device_id -> (entry_id asked for, monotonic deadline, request_id).
+        # The manager asks rather than tracks because the sender writes the
+        # `clip_file` label on its own frames — see
+        # `FileTransferManager.set_clip_file_guard`.
+        self._clip_file_outstanding: dict[str, tuple[str, float, str]] = {}
+        # Peers whose log is currently being read and sent, so one peer cannot
+        # start a thread per frame.  See `_on_log_request`.
+        self._log_serving: set[str] = set()
         self.chat = ChatManager(
             config.device_id,
             config.device_name,
@@ -748,10 +766,15 @@ class LanRuntime:
             if float(getattr(self.config, "timed_pause_until", 0.0) or 0.0) != deadline:
                 return
             self.resume_sync()
-        self._maintenance = threading.Thread(
+        # Its own field, not `_maintenance`: `start()` writes the state-loop
+        # thread into that one, which lost this handle — so `_cleanup` never
+        # joined it and a pause due after teardown still ran `resume_sync()`
+        # (rewriting config, persisting and publishing) against a stopped
+        # runtime.
+        self._pause_thread = threading.Thread(
             target=resume_when_due, daemon=True, name="clipsync-pause-resume"
         )
-        self._maintenance.start()
+        self._pause_thread.start()
 
     def _restore_peers(self):
         # Hash aliases are identified only by the protocol hash, never by a
@@ -782,6 +805,16 @@ class LanRuntime:
                     self._state, self._state
                 )
             return "running" if self.config.sync_enabled else "paused"
+
+    @property
+    def clipboard_capture_error(self) -> str:
+        """Why this machine will not notice its own clipboard changing, or "".
+
+        Surfaced rather than only logged: the monitor's startup runs on its own
+        thread, so a refused window or a refused clipboard listener used to
+        leave a runtime that reported ``running`` while capturing nothing.
+        """
+        return self.sync.clipboard_capture_error()
 
     def devices(self):
         with self._lock:
@@ -2712,6 +2745,14 @@ class LanRuntime:
             logger.info("Refusing a log request from %s: sharing is off", str(pid)[:12])
             self._answer_log_request(pid, "log_denied", "disabled")
             return
+        # One in flight per peer.  Every request used to start a thread that
+        # read and rewrote the whole log, so a device repeating the frame set
+        # this machine's thread count and disk IO entirely at its own discretion.
+        with self._lock:
+            if pid in self._log_serving:
+                logger.debug("Log request from %s already being served", str(pid)[:12])
+                return
+            self._log_serving.add(pid)
         # Building the copy reads and rewrites the whole log; it runs on its own
         # thread so the connection's receive loop is not held for it.
         threading.Thread(
@@ -2723,11 +2764,19 @@ class LanRuntime:
 
     def _serve_peer_log(self, pid: str) -> None:
         """Answer a log request with a redacted copy of this machine's log."""
-        copy = write_share_copy(self.config)
-        if copy is None:
-            self._answer_log_request(pid, "log_denied", "no_log")
-            return
+        copy = None
         try:
+            copy = write_share_copy(self.config)
+            if copy is None:
+                self._answer_log_request(pid, "log_denied", "no_log")
+                return
+            try:
+                # Held for the whole send: a prune triggered by another peer's
+                # request deleted the file out from under a transfer still
+                # reading it, and the asking device got a truncated log or none.
+                hold_share(copy)
+            except Exception:
+                logger.debug("Could not hold the log copy", exc_info=True)
             self.file_transfer.send_file(
                 str(copy),
                 lambda data: self.transport.send_to_peer(pid, data),
@@ -2736,6 +2785,11 @@ class LanRuntime:
         except Exception:
             logger.warning("Failed to serve the log to %s", str(pid)[:12], exc_info=True)
             self._answer_log_request(pid, "log_denied", "failed")
+        finally:
+            if copy is not None:
+                release_share(copy)
+            with self._lock:
+                self._log_serving.discard(pid)
 
     def _answer_log_request(self, pid: str, msg_type: str, reason: str) -> None:
         try:
@@ -3598,6 +3652,7 @@ class LanRuntime:
             for peer in self.pairing.get_paired_peers():
                 self._connect(peer.device_id)
             self._refresh()
+            self._watch_clipboard_capture()
         except PortInUseError:
             # The one start failure with an actionable cause: another ClipSync
             # (often a sidecar that has not released ownership yet) or another
@@ -3620,6 +3675,58 @@ class LanRuntime:
         finally:
             self._start_done.set()
         self._publish("sync.state.changed", {"sync_state": self.sync_state})
+
+    def _watch_clipboard_capture(self) -> None:
+        """Notice — and repair once — a clipboard monitor that never came up.
+
+        A monitor builds its window on a thread of its own, so `sync.start()`
+        returns before anybody knows whether it worked.  A refused window class
+        or a refused clipboard listener therefore left a runtime that reported
+        itself `running` and captured nothing: the app looked healthy and
+        simply never synced a local copy, and the only cure anyone found was
+        quitting and reopening it.
+
+        Delayed rather than immediate, because the verdict does not exist until
+        the monitor's own thread has run; the wait is the monitor's business to
+        keep short (see `WindowsClipboardMonitor._register_listener`).
+        """
+        self._clipboard_capture_check(1, delay=_CAPTURE_CHECK_DELAY)
+
+    def _clipboard_capture_check(self, attempt: int, delay: float = 0.0) -> None:
+        def check() -> None:
+            if self._stop_event.is_set():
+                return
+            error = self.sync.clipboard_capture_error()
+            if not error:
+                return
+            if attempt == 1:
+                # One restart, because the common cause is a desktop that had
+                # only just come back — the window the monitor needs was not
+                # there a second ago and is now.
+                logger.warning(
+                    "Clipboard capture did not start (%s); restarting the monitor", error
+                )
+                try:
+                    self.sync.restart_monitor()
+                except Exception:
+                    logger.exception("Restarting the clipboard monitor failed")
+                self._clipboard_capture_check(2, delay=_CAPTURE_CHECK_DELAY)
+                return
+            logger.error("Clipboard capture is still unavailable: %s", error)
+            self._publish(
+                "runtime.error",
+                {
+                    "code": "CLIPBOARD_CAPTURE_UNAVAILABLE",
+                    "message": "This device is not capturing its own clipboard",
+                },
+            )
+
+        if delay > 0:
+            timer = threading.Timer(delay, check)
+            timer.daemon = True
+            timer.start()
+        else:
+            check()
 
     def stop(self) -> bool:
         with self._lock:
@@ -3814,6 +3921,11 @@ class LanRuntime:
                     "LAN runtime teardown: %s took %.1fs (%s)",
                     name, elapsed, "ok" if ok else "incomplete",
                 )
+        # The pause's own stop signal, so a resume scheduled past teardown
+        # does not wake and call `resume_sync()` against a stopped runtime.
+        self._stop_event.set()
+        if self._pause_thread is not None and self._pause_thread.ident is not None:
+            self._pause_thread.join(min(remaining(), 2.0))
         if self._maintenance is not None and self._maintenance.ident is not None:
             # Bounded, and the one wait here that used to be unbounded: the loop
             # parks on a refresh interval, so it should exit promptly -- and if it
@@ -4801,8 +4913,14 @@ class LanRuntime:
         code = str(reason or "other")
         if code not in _CONNECT_FAILURE_REASONS:
             code = "other"
-        failures = self._address_failures.get(real, 0) + 1
-        self._address_failures[real] = failures
+        # The streak is counted inside the lock.  Read-modify-write across an
+        # unlocked gap loses counts when two dials fail together, and
+        # `_peer_found` / `_refresh` clear this same dict under the lock — so a
+        # stale-address decision was reached from a number another thread had
+        # already reset.
+        with self._lock:
+            failures = self._address_failures.get(real, 0) + 1
+            self._address_failures[real] = failures
         if (
             source in ("saved", "persisted")
             and code in ("unreachable", "timeout", "closed")
@@ -4813,8 +4931,9 @@ class LanRuntime:
             # likely moved (DHCP, Wi-Fi switch, VPN), so stop dialing it.  One
             # failure is not enough -- a sleeping peer with no mDNS must keep
             # being retried, which is the whole reason the slow ladder exists.
-            self._address_failures.pop(real, None)
-            self._connect_sources.pop(real, None)
+            with self._lock:
+                self._address_failures.pop(real, None)
+                self._connect_sources.pop(real, None)
             forget = getattr(self.transport, "forget_saved_address", None)
             if forget is not None:
                 try:

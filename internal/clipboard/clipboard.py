@@ -4,7 +4,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import replace
 
-from internal.clipboard.format import ClipboardContent, ContentType
+from internal.clipboard.format import ClipboardContent, ContentType, strip_html
 
 
 class ClipboardReader(ABC):
@@ -31,16 +31,15 @@ class ClipboardWriter(ABC):
 
 
 def _html_to_plain_text(data: bytes) -> bytes:
-    """Reduce an HTML payload to its visible text (best effort)."""
-    import html as _html
-    import re
+    """Reduce an HTML payload to its visible text (best effort).
 
-    text = data.decode("utf-8", errors="replace")
-    # Drop style/script blocks with their content, then remaining tags.
-    text = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<[^>]*>", " ", text)
-    text = _html.unescape(text)
-    return re.sub(r"[ \t]+", " ", text).strip().encode("utf-8")
+    Delegates to :func:`format.strip_html`, which is the single implementation.
+    This module used to carry its own, and the two disagreed on the result: it
+    left comments in and collapsed only spaces and tabs, so the newlines of the
+    source survived — one text here for the sync payload, another in the
+    history preview, for the same clip.
+    """
+    return strip_html(data.decode("utf-8", errors="replace")).encode("utf-8")
 
 
 def strip_rich_formats(content: ClipboardContent) -> ClipboardContent:
@@ -92,6 +91,17 @@ class ClipboardMonitor(ABC):
     # returns None and no OS query is made.
     source_tracking_enabled: bool = True
 
+    # Why this monitor is not delivering clipboard changes, or None while it is.
+    #
+    # Set by the platform adapters that can fail *after* `start()` returned:
+    # a Windows monitor builds its message-only window on its own thread, so a
+    # refused window class or a refused `AddClipboardFormatListener` happens
+    # long after the caller was told the monitor had started.  Recording it
+    # here — rather than only in the log — is what lets the rest of the app say
+    # "local capture is not running" instead of reporting itself healthy while
+    # nothing is ever captured.
+    last_error: str | None = None
+
     # Longest the monitor can go between two clipboard polls, in seconds --
     # the worst case for how long a change can sit unnoticed.  A caller that
     # suppresses the monitor across a write (SyncManager, so a remote write
@@ -128,6 +138,13 @@ class ClipboardMonitor(ABC):
             return get_active_app_info()
         except Exception:
             return None
+
+    def monitor_error(self) -> str | None:
+        """Why no clipboard change will ever arrive, or None while capture works.
+
+        None means "came up and is listening", not merely "was asked to start".
+        """
+        return self.last_error
 
     @abstractmethod
     def start(self, callback):

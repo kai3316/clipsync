@@ -44,8 +44,12 @@ def _plain() -> ClipboardContent:
 
 def _age_last_add(h, seconds: float) -> None:
     """Back-date the coalesce bookkeeping so the next same-key add falls
-    outside DEDUP_WINDOW but stays inside FLAVOR_MERGE_WINDOW."""
-    h._last_dedup_time = time.time() - seconds
+    outside DEDUP_WINDOW but stays inside FLAVOR_MERGE_WINDOW.
+
+    The window is measured on the monotonic clock (a wall-clock step must not
+    look like a fresh capture), so that is the field to age.
+    """
+    h._last_dedup_mono = time.monotonic() - seconds
     h._entries[0]["timestamp"] = time.time() - seconds
 
 
@@ -70,7 +74,7 @@ class TestFlavorMergeEdges:
         its own entry (existing dedup semantics unchanged)."""
         h = self._hist(tmp_path)
         h.add(_rich())
-        h._last_dedup_time = time.time() - 200
+        h._last_dedup_mono = time.monotonic() - 200
         h._entries[0]["timestamp"] = time.time() - 200
         h.add(_plain())
 
@@ -84,7 +88,7 @@ class TestFlavorMergeEdges:
         """Only text-body keys merge; different images stay distinct."""
         h = self._hist(tmp_path)
         h.add(_content({ContentType.IMAGE_PNG: b"\x89PNG-one"}))
-        h._last_dedup_time = time.time() - 10
+        h._last_dedup_mono = time.monotonic() - 10
         h._entries[0]["timestamp"] = time.time() - 10
         h.add(_content({ContentType.IMAGE_PNG: b"\x89PNG-two"}))
         assert len(h.get_all()) == 2

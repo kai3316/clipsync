@@ -274,6 +274,11 @@ CRYPTO_MISMATCH_SETTING = "setting"
 # process was frozen.
 WAKE_GAP_SECONDS = 60.0
 
+# What to put in the TLS ClientHello's SNI.  It is sent in cleartext and is
+# never a name we could validate, so it must not carry anything identifying.
+# See ``TransportManager._connect``.
+_TLS_SNI_HOSTNAME = "clipsync.local"
+
 
 def _looks_like_wake(wall_gap: float, mono_gap: float) -> bool:
     """True if the health loop was frozen (system sleep), not merely re-clocked.
@@ -350,6 +355,7 @@ class PeerConnection:
 
     def set_on_disconnect(self, callback: Callable):
         self._on_disconnect = callback
+
 
     def start(self):
         self._running = True
@@ -432,7 +438,19 @@ class PeerConnection:
             if error != 0:
                 return False
             if not self._running:
-                return False
+                # Not started yet is not dead.  The socket is open — the TLS
+                # handshake and the identity exchange are both behind it — and
+                # what is still open is the race that will start this
+                # connection or discard it (see `TransportManager._connect`,
+                # where the start waits for the tiebreaker).  Calling that dead
+                # is what made a tiebreaker keep a connection the peer had
+                # already decided to drop: the two ends each kept the half the
+                # other was discarding, and stopped each other in a loop.
+                #
+                # Only a connection that *was* started and then stopped is
+                # genuinely gone, and that is what `_recv_thread` tells apart:
+                # it exists from `start()` and stays set through `stop()`.
+                return self._recv_thread is None
             # EOF: the recv loop sets _remote_closed when it observes an empty
             # recv (clean FIN). SO_ERROR doesn't surface a clean close, and
             # SSLSocket rejects MSG_PEEK, so read the flag instead.
@@ -1607,7 +1625,15 @@ class TransportManager:
                     verify_id[:12] if verify_id else "None",
                 )
 
-                ssl_sock = self._wrap_socket(ssl_context, sock, server_hostname=peer_id)
+                # A fixed name, not the peer id.  The SNI is sent in cleartext
+                # in the ClientHello, and the peer id is this device's identity
+                # (or its mDNS hash) — putting it there publishes to any
+                # passive observer exactly what mDNS goes out of its way to
+                # broadcast only in hashed form, and it is never a hostname
+                # anyone could validate anyway.
+                ssl_sock = self._wrap_socket(
+                    ssl_context, sock, server_hostname=_TLS_SNI_HOSTNAME
+                )
                 logger.info("[%s] TLS handshake complete", peer_name)
 
                 # Exchange identity at application level.  The flag has to travel
@@ -1808,6 +1834,26 @@ class TransportManager:
                     pairing_mgr=self._pairing_mgr,
                     pending_recv=probe_leftover,
                 )
+                # Started here, before the tiebreaker below, and that ordering
+                # is load-bearing — two attempts to move it behind the race
+                # both broke pairing between two real sidecars
+                # (`tests/sidecar/test_runtime_integration.py`), reproducibly.
+                #
+                # What they ran into is not the ordering itself but the race
+                # underneath it: when both ends dial at once, each keeps the
+                # connection it *accepted* and drops the one it dialled whenever
+                # the two paths are settled in an order the other end did not
+                # expect, and the pair is then left holding two different
+                # halves — which is what an unpair notice cannot survive.  The
+                # start's position perturbs which order that settles in.
+                #
+                # So a connection is started before it is decided on, and it can
+                # therefore read before it is decided on: a connection that
+                # loses the race may hand a frame to the application before it
+                # is stopped.  That window is microseconds and both connections
+                # belong to the same peer.  Closing it needs the race itself to
+                # be made symmetric — settling it on a rule both ends reach
+                # from the same evidence — not this line moved.
                 if not self._start_peer(conn):
                     return
 
@@ -2658,7 +2704,14 @@ class TransportManager:
                 # budget.  The cap is FAST_RECONNECT_CAP, not the steady
                 # MAX_RECONNECT_BACKOFF used above.
                 delay = max(MIN_RECONNECT_DELAY, min(2**attempts, FAST_RECONNECT_CAP))
-            self._reconnect_attempts[peer_id] = attempts + 1
+            # Capped at one past the budget.  A peer that stays away for hours
+            # used to push this number into the hundreds while nothing read the
+            # difference — the delay is already the steady interval by then —
+            # and "69/10" in the log reads as a counter that escaped its
+            # ceiling.  Staying one above keeps every comparison here correct.
+            self._reconnect_attempts[peer_id] = min(
+                attempts + 1, self._max_reconnect_attempts + 1
+            )
             if attempts < self._max_reconnect_attempts:
                 logger.debug(
                     "[%s] scheduling reconnect attempt %d/%d in %.0fs",
@@ -2689,8 +2742,11 @@ class TransportManager:
                 logger.debug("[%s] cancelled previous reconnect timer", peer_id[:12])
                 old.cancel()
             self._prune_workers()
-            if isinstance(timer, threading.Thread):
-                self._workers.add(timer)
+            # Every Timer is a Thread, so the isinstance never had a false
+            # branch — the add was unconditional and the check only obscured it.
+            # Registered so ``stop`` can cancel them, which is the reason the
+            # set exists.
+            self._workers.add(timer)
             try:
                 timer.start()
             except BaseException:
@@ -3196,6 +3252,9 @@ class TransportManager:
                 pairing_mgr=self._pairing_mgr,
                 is_anonymous=not bool(peer_id),
             )
+            # Started before the tiebreaker, for the reason spelled out on the
+            # outbound path: moving it behind the race is what broke pairing
+            # between two real sidecars, reproducibly.
             if not self._start_peer(conn):
                 return
             # Prevent the outer except handler from closing client_sock

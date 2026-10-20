@@ -36,11 +36,6 @@ def _ensure_db() -> None:
     _repository().ensure_db()
 
 
-def _run_migrations(conn) -> None:
-    FavoritesRepository.run_migrations(conn)
-    conn.commit()
-
-
 def _maybe_migrate() -> int:
     return _repository().maybe_migrate()
 

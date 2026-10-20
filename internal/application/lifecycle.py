@@ -7,6 +7,10 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# How long stop() waits for a deferred start before tearing down without it.
+# See ApplicationLifecycle.stop().
+DEFERRED_JOIN_TIMEOUT = 10.0
+
 
 @dataclass(frozen=True)
 class Resource:
@@ -31,6 +35,11 @@ class ApplicationLifecycle:
         self._workers: list[threading.Thread] = []
         self._lock = threading.RLock()
         self.state = "created"
+        # Deferred starts that failed, as (name, error message).  A deferred
+        # start has no caller to raise into, so without somewhere to put the
+        # failure the only trace was a log line nobody surfaces.  The hook
+        # below writes here; a host can override it to publish an event.
+        self.deferred_failures: list[tuple[str, str]] = []
 
     def start(self) -> None:
         with self._lock:
@@ -103,11 +112,14 @@ class ApplicationLifecycle:
         worker.start()
 
     def _on_deferred_failure(self, resource: Resource, error: BaseException) -> None:
-        """Hook for a subclass that can report a background start failure.
+        """Record a background start failure.  Override to publish it.
 
-        The base implementation has nowhere to report to; it has already logged
-        and released the resource by the time this runs.
+        The base implementation has nowhere to raise to — the thread that
+        failed is the only one involved — so it records the failure where the
+        host can read it instead of leaving a log line as the only trace.
         """
+        with self._lock:
+            self.deferred_failures.append((resource.name, str(error)))
         return None
 
     def stop(self) -> bool:
@@ -117,7 +129,19 @@ class ApplicationLifecycle:
         with self._lock:
             workers = list(self._workers)
         for worker in workers:
-            worker.join()
+            # Bounded.  A deferred start blocks inside whatever it is starting
+            # (mDNS registration waiting on a firewall prompt, a companion
+            # binding a port), and stop() is also what a failed start calls —
+            # so an unbounded join turns one startup failure into a process
+            # that never exits and never says why.
+            worker.join(timeout=DEFERRED_JOIN_TIMEOUT)
+            if worker.is_alive():
+                logger.warning(
+                    "Deferred start %r is still running after %.0fs; continuing "
+                    "teardown without it",
+                    worker.name,
+                    DEFERRED_JOIN_TIMEOUT,
+                )
 
         with self._lock:
             if self.state == "stopped":

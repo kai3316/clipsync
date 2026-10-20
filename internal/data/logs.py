@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -372,10 +373,34 @@ def write_share_copy(cfg, path: Path | str | None = None) -> Path | None:
     return target
 
 
+# Log copies currently being read by an outgoing transfer.  A share copy is
+# written, then streamed to a peer; a prune that ran during a long transfer
+# deleted the file out from under it and the peer received a truncated or
+# missing log.  Registered by `share_log_copy` callers via `hold_share` /
+# `release_share`.
+_IN_FLIGHT_SHARES: set[Path] = set()
+_IN_FLIGHT_LOCK = threading.Lock()
+
+
+def hold_share(path: Path) -> None:
+    """Mark a share copy as in use so a prune cannot remove it."""
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT_SHARES.add(path)
+
+
+def release_share(path: Path) -> None:
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT_SHARES.discard(path)
+
+
 def _prune_shares(target_dir: Path) -> None:
     """Drop copies left by transfers that never finished."""
     cutoff = time.time() - SHARE_MAX_AGE
+    with _IN_FLIGHT_LOCK:
+        in_flight = set(_IN_FLIGHT_SHARES)
     for stale in target_dir.glob("clipsync-*.log"):
+        if stale in in_flight:
+            continue
         try:
             if stale.stat().st_mtime < cutoff:
                 stale.unlink()

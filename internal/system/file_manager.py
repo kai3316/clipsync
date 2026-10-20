@@ -55,7 +55,11 @@ def reveal_folder(file_path: str) -> tuple[bool, str]:
         if sys.platform == "win32":
             # explorer.exe directly instead of os.startfile(): a file
             # association could otherwise launch a second app instance.
-            subprocess.Popen(["explorer", folder])
+            # Closed rather than left to the GC: the Popen object holds a
+            # process handle until it is collected, and "reveal in folder" is
+            # cheap enough to press repeatedly.
+            with subprocess.Popen(["explorer", folder]):
+                pass
         elif sys.platform == "darwin":
             subprocess.run(["open", folder], check=True)
         else:

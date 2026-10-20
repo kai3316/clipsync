@@ -67,15 +67,6 @@ def get_active_app_info() -> dict | None:
     return info
 
 
-def _clear_cache() -> None:
-    """Drop the cached answer (tests, and any caller that needs a live reading)."""
-    global _cache_value, _cache_expires, _cache_valid
-    with _cache_lock:
-        _cache_value = None
-        _cache_expires = 0.0
-        _cache_valid = False
-
-
 def is_app_allowed(app_info: dict | None, cfg) -> bool:
     """Check whether clipboard content from *app_info* should be
     captured, based on the app-filter configuration in *cfg*.

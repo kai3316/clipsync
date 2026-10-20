@@ -379,12 +379,12 @@ def netpair_key(secret: str, password: str = "") -> bytes:
     if password:
         keying = keying + b"\x00" + password.encode("utf-8")
     prk = hmac.new(b"clipsync-netpair-salt", keying, hashlib.sha256).digest()
-    key = b""
-    i = 1
-    while len(key) < 32:
-        key = hmac.new(prk, b"clipsync-netpair-key" + bytes([i]), hashlib.sha256).digest()
-        i += 1
-    return key[:32]
+    # One block, spelt as one block.  This used to be a `while len(key) < 32`
+    # loop that overwrote `key` instead of appending to it, so it ran exactly
+    # once and the counter it incremented was dead — correct by accident, and
+    # indistinguishable at a glance from the multi-block expansion the loop
+    # shape promises.
+    return hmac.new(prk, b"clipsync-netpair-key" + b"\x01", hashlib.sha256).digest()[:32]
 
 
 def netpair_session_key(secret: str, shared: bytes, password: str = "") -> bytes:
@@ -402,12 +402,10 @@ def netpair_session_key(secret: str, shared: bytes, password: str = "") -> bytes
     if password:
         keying = keying + b"\x00" + password.encode("utf-8")
     prk = hmac.new(b"clipsync-netpair-dh-salt", keying, hashlib.sha256).digest()
-    key = b""
-    i = 1
-    while len(key) < 32:
-        key = hmac.new(prk, b"clipsync-netpair-dh-key" + bytes([i]), hashlib.sha256).digest()
-        i += 1
-    return key[:32]
+    # One block, spelt as one block — see netpair_static_key.
+    return hmac.new(
+        prk, b"clipsync-netpair-dh-key" + b"\x01", hashlib.sha256
+    ).digest()[:32]
 
 
 def netpair_passphrase_error(pw: str) -> str | None:
@@ -470,6 +468,26 @@ def pack_envelope(
     return json.dumps(env, separators=(",", ":")).encode("ascii")
 
 
+def _envelope_replay_key(blob: bytes) -> str:
+    """The identity a replayed envelope is recognised by.
+
+    Everything that is not the ciphertext — ``ts`` above all — is a field a
+    third party can rewrite in place, and a hash over the whole envelope turns
+    every such rewrite into a value the cache has never seen.  Keying on the
+    ciphertext alone means an edit cannot buy a fresh identity.  A blob that
+    does not parse as one of our envelopes falls back to the whole-bytes hash,
+    which is the identity it had before and is not weaker for this purpose.
+    """
+    try:
+        env = json.loads(blob.decode("ascii"))
+        data = env.get("data") if isinstance(env, dict) else None
+        if isinstance(data, str) and data:
+            return hashlib.sha256(data.encode("ascii", errors="ignore")).hexdigest()
+    except Exception:
+        pass
+    return hashlib.sha256(blob).hexdigest()
+
+
 def open_envelope_ex(blob: bytes, key: bytes, now: float) -> tuple[bytes | None, str]:
     """Decrypt+validate an envelope, also reporting why it failed.
 
@@ -488,19 +506,24 @@ def open_envelope_ex(blob: bytes, key: bytes, now: float) -> tuple[bytes | None,
     if not isinstance(ts, (int, float)) or abs(now - float(ts)) > RELAY_TS_WINDOW:
         logger.debug("Relay envelope rejected (timestamp out of window)")
         return None, "window"
-    # A ``mac`` that is present must authenticate.  Its absence is a v1
-    # envelope from a build that predates the field, which has to stay
-    # readable; a value of the wrong shape, or ``null``, is an edit and is
-    # refused rather than treated as the legacy case.
-    if "mac" in env:
-        mac = env.get("mac")
-        if (
-            not isinstance(mac, str)
-            or not mac.isascii()
-            or not hmac.compare_digest(mac, _timestamp_mac(key, float(ts)))
-        ):
-            logger.debug("Relay envelope rejected (timestamp MAC mismatch)")
-            return None, "auth"
+    # The ``mac`` is mandatory, not optional-authenticated.
+    #
+    # It used to be read as "present means it must authenticate, absent means
+    # a v1 build that predates the field".  That made the whole replay defence
+    # a field an attacker deletes: stripping ``mac`` let a recorded envelope
+    # through unauthenticated, and because ``ts`` is the one plaintext field
+    # the attacker can rewrite, sliding it into a fresh window made that
+    # recording acceptable as new.  A timestamp nobody authenticated is worth
+    # exactly as much as no check at all, so an envelope without a MAC is now
+    # refused outright.  Both ends of every exchange are this build.
+    mac = env.get("mac")
+    if (
+        not isinstance(mac, str)
+        or not mac.isascii()
+        or not hmac.compare_digest(mac, _timestamp_mac(key, float(ts)))
+    ):
+        logger.debug("Relay envelope rejected (missing or bad timestamp MAC)")
+        return None, "auth"
     try:
         ct = base64.b64decode(env.get("data", ""))
     except Exception:
@@ -1403,7 +1426,13 @@ class RelayTransport:
         under the transport's lock because the receive callbacks share it.
         """
         now = time.time()
-        blob_hash = hashlib.sha256(blob).hexdigest()
+        # Keyed on the ciphertext, not on the whole blob.  The blob carries
+        # ``ts``, which is exactly the field an attacker rewrites to slide a
+        # recorded envelope into a fresh window: hashing the blob gave every
+        # such edit a hash the cache had never seen, so the one defence left
+        # after the MAC was stripped was defeated by the same edit.  The
+        # ciphertext is the part they cannot touch without the channel key.
+        blob_hash = _envelope_replay_key(blob)
         keep_until = now + RELAY_TS_WINDOW
         try:
             ts = json.loads(blob).get("ts")

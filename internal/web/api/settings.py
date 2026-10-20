@@ -423,6 +423,41 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
                 return {"ok": False, "error": "netpair_password_" + err}, 400
         data["netpair_password"] = pw
 
+    # The receive directory is where every phone upload, download, listing and
+    # delete is confined to — so it is the one path field whose value decides
+    # what "confined" means.  Unvalidated, a token holder pointed it at any
+    # directory on the host and then used the ordinary file endpoints on it.
+    # Empty means "not configured" (the caller keeps the default) and passes.
+    if "file_receive_dir" in data:
+        value = data["file_receive_dir"]
+        if not isinstance(value, str):
+            return {"ok": False, "error": "file_receive_dir_type"}, 400
+        from internal.web.api.security import is_safe_receive_dir
+
+        ok, why = is_safe_receive_dir(value)
+        if not ok:
+            logger.warning("Rejected file_receive_dir outside allowed roots (%s)", why)
+            return {"ok": False, "error": "file_receive_dir_" + why}, 400
+        data["file_receive_dir"] = value.strip()
+
+    # The translation endpoint is fetched by this machine, so an unvalidated
+    # value turns the app into a request proxy into its own network — loopback
+    # services, router admin pages, cloud metadata — and the response is
+    # returned to whoever set it.
+    if "translate_url" in data:
+        value = data["translate_url"]
+        if not isinstance(value, str):
+            return {"ok": False, "error": "translate_url_type"}, 400
+        value = value.strip()
+        if value:
+            from internal.web.api.security import is_safe_outbound_url
+
+            ok, why = is_safe_outbound_url(value)
+            if not ok:
+                logger.warning("Rejected translate_url (%s)", why)
+                return {"ok": False, "error": "translate_url_" + why}, 400
+        data["translate_url"] = value
+
     # The single app password ("password" special action) keeps the same
     # strength rules the netpair passphrase had — the unified
     # encryption_password is just as sensitive, so a weak value must be

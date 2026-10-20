@@ -28,6 +28,23 @@ LIBRETRANSLATE_URL = "https://libretranslate.com/translate"
 MYMEMORY_URL = "https://api.mymemory.translated.net/get"
 REQUEST_TIMEOUT = 15  # seconds
 
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects instead of following them.
+
+    The endpoint is checked before it is dialled, but a redirect is a second
+    destination that check never saw — a public-looking host that answers
+    ``302`` to ``http://169.254.169.254/`` walks straight past it.  Returning
+    None makes urllib raise the ``HTTPError`` for the 3xx, which the caller
+    already turns into an ordinary "service unavailable".
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
 SUPPORTED_LANGUAGES = {
     "auto": "Auto-detect",
     "en": "English",
@@ -89,6 +106,17 @@ def translate_text(
     if url == LIBRETRANSLATE_URL and not api_key:
         return _translate_mymemory(text, target_lang, source_lang)
 
+    # Checked here as well as on write: the endpoint also comes from the config
+    # file, and this machine is the one that fetches it — an unvalidated value
+    # makes the app a request proxy into its own loopback, LAN or cloud
+    # metadata service, with the answer handed back to whoever set it.
+    from internal.web.api.security import is_safe_outbound_url
+
+    ok, why = is_safe_outbound_url(url)
+    if not ok:
+        logger.warning("Refusing to translate via an unsafe endpoint (%s)", why)
+        return {"ok": False, "error": "Translation endpoint not allowed: " + why}
+
     return _translate_libretranslate(url, api_key, text, target_lang, source_lang)
 
 
@@ -115,7 +143,7 @@ def _translate_libretranslate(
 
     try:
         req = urllib.request.Request(url, data=request_body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with _NO_REDIRECT_OPENER.open(req, timeout=REQUEST_TIMEOUT) as resp:
             result = json.loads(resp.read().decode("utf-8"))
 
         if not isinstance(result, dict) or not isinstance(result.get("translatedText"), str):

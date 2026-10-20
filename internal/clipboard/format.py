@@ -12,15 +12,38 @@ def strip_html(text: str) -> str:
     """Remove HTML tags, style/script blocks, comments, and unescape entities.
 
     Single source of truth for turning an HTML payload into visible text —
-    every history/preview path shares it so the same payload renders the same
-    preview wherever it is displayed.
+    every path that needs the visible text shares it, so the same payload
+    reads the same wherever it is read: a history preview, and the TEXT body
+    an HTML-only clip is reduced to when it is synced as plain text.
     """
     import html as _html
 
     text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    plain = re.sub(r"<[^>]*>", "", text)
+
+    def _drop_tag(match: "re.Match[str]") -> str:
+        """A tag run, as the whitespace it does or does not stand for.
+
+        Where tags sit between two word characters they are a word boundary on
+        the rendered page, and removing them outright joined the two words:
+        ``<span>4111</span><span>1111</span>`` became one run of digits, which
+        reads wrong in a preview and hands the content filter a card number
+        with its grouping — and so its recognisable shape — destroyed.  Beside
+        punctuation a tag is not a boundary, and ``<b>Hello</b>, world`` has to
+        keep reading ``Hello, world`` rather than ``Hello , world``.
+
+        Matched as a *run* of tags, not one at a time, because the boundary
+        usually sits between two of them: in ``</span><span>`` the closing tag
+        is followed by another tag, so judged alone it would look like the end
+        of the text and get no space at all.
+        """
+        start, end = match.span()
+        before = text[start - 1] if start else ""
+        after = text[end] if end < len(text) else ""
+        return " " if before.isalnum() and after.isalnum() else ""
+
+    plain = re.sub(r"(?:<[^>]*>)+", _drop_tag, text)
     plain = _html.unescape(plain)
     plain = re.sub(r"\s+", " ", plain)
     return plain.strip()
@@ -105,7 +128,12 @@ def decode_paths(raw: bytes) -> list[str]:
 # like a scheme but is a path.  Both are only asked of a line that is not a
 # ``file:`` address; see `file_url_paths`.
 _URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
-_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+# A device-letter path in a URL slot: "C:\docs" or "C:/docs".  Public because
+# `file_ref.file_name` asks the same question of the same bytes; it used to
+# carry its own copy of this pattern.
+WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+# Kept: the private name is what every call site in this module spells.
+_WINDOWS_DRIVE = WINDOWS_DRIVE
 
 
 def file_url_paths(raw: bytes) -> list[str]:

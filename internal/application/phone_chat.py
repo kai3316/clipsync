@@ -77,12 +77,19 @@ class PhoneChatStore:
 
     def messages(self, after_id: int = 0, reader: str = "") -> dict:
         with self._lock:
+            marked = False
             if reader:
                 # Reading is what the reader saw; both clients poll, so a
                 # message's read flag means "the other side has polled past it".
                 for message in self._state["messages"]:
-                    if message.get("sender") != reader:
+                    if message.get("sender") != reader and not message.get("read"):
                         message["read"] = True
+                        marked = True
+            # Persisted, because the unread badge is the thing the reader looks
+            # at and a sidecar restart used to put every message back to
+            # unread — the flag lived only in memory.
+            if marked:
+                self._save()
             items = [
                 dict(m) for m in self._state["messages"]
                 if int(m.get("id", 0)) > int(after_id)

@@ -1065,6 +1065,12 @@ export function createApplicationStore() {
       unlisten = off;
       await refresh();
     } catch (error) {
+      // Reset: `started` is what makes start() a no-op, so leaving it true
+      // after a failed subscribe means neither `start()` nor `reconnect()`
+      // ever subscribes again — and every event (device up/down, pairing,
+      // transfers, notices) stays silent for the rest of the window's life.
+      // This is the one failure here that cannot recover on its own.
+      started = false;
       if (!disposed) setError(error);
     }
   }
@@ -1087,6 +1093,13 @@ export function createApplicationStore() {
       } finally {
         if (!disposed) state.pending = false;
       }
+    }
+    // A subscribe that failed left no listener, so a plain refresh here would
+    // repaint the snapshot and never deliver another event.  Re-run start(),
+    // which is a no-op only once it has actually subscribed.
+    if (unlisten === undefined) {
+      await start();
+      return;
     }
     await refresh();
   }

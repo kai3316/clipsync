@@ -17,6 +17,7 @@ import mimetypes
 import os
 import posixpath
 import re
+import shutil
 import socket
 import socketserver
 import sys
@@ -28,6 +29,12 @@ from io import BytesIO
 
 from internal.i18n import T
 from internal.platform import decode_console_output
+
+# Device names Windows will not let a file be called.  Shared with the file
+# transfer's own sanitiser rather than spelled again here: two copies of the
+# blocklist is two chances for one of them to miss a name the other catches,
+# and the upload path and the transfer path have to refuse the same names.
+from internal.sync.file_transfer import _WINDOWS_RESERVED_NAMES
 from internal.transport.discovery import get_all_local_addresses
 
 logger = logging.getLogger(__name__)
@@ -36,6 +43,10 @@ logger = logging.getLogger(__name__)
 # every static asset request; re-reading and re-parsing the locale JSON file
 # each time is wasteful.
 _i18n_cache: dict[str, str] = {}
+# Guards the cache: every static-asset request may reach it from its own
+# connection thread, and building a locale reads and parses a JSON file, so
+# two threads can both miss and both do that work.
+_i18n_cache_lock = threading.Lock()
 
 
 def _escape_script_json(json_text: str) -> str:
@@ -72,21 +83,37 @@ def _get_upload_dir(cfg=None) -> str:
             d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
     else:
         d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
-    os.makedirs(d, exist_ok=True)
+
+    # Re-checked on every use, not only when the setting is written: the value
+    # also comes from a config file a user (or another process) can edit
+    # directly, and every handler here lists/downloads/deletes inside whatever
+    # this returns.
+    from internal.web.api.security import is_safe_receive_dir
+
+    if not is_safe_receive_dir(d)[0]:
+        logger.warning(
+            "file_receive_dir %r is outside the allowed roots — falling back to the default",
+            d,
+        )
+        d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
+
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        # Called from a GET handler that sits outside the dispatch try, so an
+        # unwritable receive directory used to drop the connection with a
+        # traceback instead of answering.  The callers each fail their own way
+        # from here (an empty listing, a 404 on download).
+        logger.warning("Upload directory is not usable: %s", d, exc_info=True)
     return d
 
 
 # ── Upload filename sanitisation ─────────────────────────────────
 
-_WINDOWS_RESERVED_NAMES = {
-    "CON",
-    "PRN",
-    "AUX",
-    "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
-
+# `_WINDOWS_RESERVED_NAMES` is imported at the top of this file rather than
+# spelled again here: two copies of a device-name blocklist is two chances for
+# one of them to miss a name the other catches, and the upload path and the
+# transfer path must refuse the same names.
 
 def _sanitize_upload_filename(name: str) -> str:
     """Sanitize an upload filename (ported from the P2P file-transfer
@@ -412,8 +439,17 @@ def _validate_token(path: str, expected_token: str, headers=None) -> bool:
     if bearer:
         candidates.append(bearer)
     candidates.extend(_query_tokens(path))
-    # Constant-time comparison to avoid leaking token bytes via timing.
-    return any(hmac.compare_digest(candidate, expected_token) for candidate in candidates)
+    # Compared as bytes: ``compare_digest`` on two str raises TypeError when
+    # either side holds a non-ASCII character, and both sides here come
+    # straight off the wire (``?token=`` and the Bearer header).  That call
+    # sits outside the dispatch try, so a request carrying ``?token=ü`` used to
+    # escape as an unhandled exception and drop the connection — and a token
+    # that ever contained a non-ASCII character locked every request out.
+    expected = expected_token.encode("utf-8", errors="replace")
+    return any(
+        hmac.compare_digest(candidate.encode("utf-8", errors="replace"), expected)
+        for candidate in candidates
+    )
 
 
 def _authority_parts(value: str) -> tuple[str, int] | None:
@@ -551,9 +587,14 @@ def _empty_token_origin_is_local(
 
 # Upper bound on a single request body read.  Guards against a malicious or
 # buggy client sending a huge Content-Length and wedging a worker thread
-# waiting on bytes that never arrive.  Web uploads are the only large body
-# this server accepts and are capped well below this.
-_MAX_BODY_BYTES = 128 * 1024 * 1024
+# waiting on bytes that never arrive.
+#
+# 32 MiB, not 128.  Every accepted body is read into memory in one buffer
+# before an endpoint looks at it, and there are 64 connection slots, so the old
+# cap was a peak of several GB held at once for bodies no endpoint needs — the
+# only large body this server accepts is a web upload, and that is bounded by
+# the transfer size a phone can practically send.
+_MAX_BODY_BYTES = 32 * 1024 * 1024
 
 
 def _read_request_body(handler) -> bytes:
@@ -671,6 +712,48 @@ class _CompanionHTTPServer(ThreadingHTTPServer):
         host, port = self.server_address[:2]
         self.server_name = host
         self.server_port = port
+
+
+# How long the elevated firewall script is left on disk before it is swept.
+# See `_remove_later`.
+_FIREWALL_SCRIPT_SWEEP_DELAY = 120.0
+
+# Directories waiting for the delayed sweep, so a shutdown inside the delay
+# can still clean them up.  See `_remove_later`.
+_pending_removals: set[str] = set()
+_pending_removals_lock = threading.Lock()
+
+
+def _remove_later(directory: str) -> None:
+    """Delete a directory after a delay, on a daemon thread.  Never raises.
+
+    The elevated process reads the script after ``ShellExecuteW`` returns and
+    there is no completion signal to wait for, so the delete has to be
+    deferred — but a script that runs as Administrator should not be left
+    behind indefinitely either.  ``sweep_pending_removals`` runs the same
+    cleanup immediately, for a shutdown that happens inside the delay.
+    """
+
+    def sweep() -> None:
+        with _pending_removals_lock:
+            _pending_removals.discard(directory)
+        shutil.rmtree(directory, ignore_errors=True)
+
+    with _pending_removals_lock:
+        _pending_removals.add(directory)
+    timer = threading.Timer(_FIREWALL_SCRIPT_SWEEP_DELAY, sweep)
+    timer.daemon = True
+    timer.start()
+
+
+def sweep_pending_removals() -> None:
+    """Run every deferred directory cleanup now.  Never raises."""
+    with _pending_removals_lock:
+        pending = list(_pending_removals)
+        _pending_removals.clear()
+    for directory in pending:
+        with contextlib.suppress(Exception):
+            shutil.rmtree(directory, ignore_errors=True)
 
 
 class WebServer:
@@ -1319,12 +1402,17 @@ class WebServer:
         ports = [port]
         if web_port and web_port != port:
             ports.append(web_port)
+        import ctypes
         import os as _os
         import tempfile as _tempfile
 
-        bat = _os.path.join(
-            _tempfile.gettempdir(), "clipsync_firewall_{}.bat".format("_".join(map(str, ports)))
-        )
+        # A name nobody can predict, in a directory only this user can write.
+        # The old form was `clipsync_firewall_<ports>.bat` in the shared temp
+        # directory: predictable, world-writable, and left behind — so anything
+        # running as this user could replace the file between it being written
+        # and being run elevated.
+        directory = _tempfile.mkdtemp(prefix="clipsync_fw_")
+        bat = _os.path.join(directory, "repair.bat")
         try:
             # Overwrite any pre-existing file so nothing stale runs elevated.
             with open(bat, "w", encoding="utf-8") as _f:
@@ -1348,6 +1436,12 @@ class WebServer:
             return result > 32 and result != 1223
         except Exception:
             return False
+        finally:
+            # Swept on a delay, because the elevated process reads the file
+            # after this call returns and there is no completion signal for a
+            # ShellExecute.  A script that runs as Administrator should not sit
+            # in a temp directory indefinitely.
+            _remove_later(directory)
 
     # ── Start / Stop ────────────────────────────────────────────
 
@@ -1600,7 +1694,8 @@ class WebServer:
 
                 locale = cfg.language if cfg.language in _Handler._available_locales() else "en"
 
-                cached = _i18n_cache.get(locale)
+                with _i18n_cache_lock:
+                    cached = _i18n_cache.get(locale)
                 if cached is not None:
                     return cached
 
@@ -1637,7 +1732,8 @@ class WebServer:
                 # inject it here so the web UI never carries its own copy.
                 translations["settings_window.about_version"] = "v" + __version__
                 result = json.dumps(translations, ensure_ascii=False)
-                _i18n_cache[locale] = result
+                with _i18n_cache_lock:
+                    _i18n_cache[locale] = result
                 return result
 
             def _drain_rejected_body(inner_self, limit: int = 65536) -> None:  # noqa: N805
@@ -2422,6 +2518,9 @@ class WebServer:
                         # Body not consumed — close the connection rather than
                         # leave unread bytes for the next request on this socket.
                         inner_self.close_connection = True
+                        # 413, and not 200 with ok:false: no caller could tell
+                        # the difference by status code, so a client had to
+                        # parse the body to learn an upload had been refused.
                         inner_self._send_json(
                             {
                                 "ok": False,
@@ -2429,7 +2528,7 @@ class WebServer:
                                     "web.upload_too_large", limit=_MAX_BODY_BYTES // (1024 * 1024)
                                 ),
                             },
-                            200,
+                            413,
                         )
                         return
                     # A short read means the connection dropped mid-upload —
@@ -2517,7 +2616,11 @@ class WebServer:
                     logger.info("Web upload: %s (%d bytes) -> %s", safe_name, len(fdata), dest)
                     if is_chat_upload:
                         # A chat staging upload must not trigger the received-
-                        # file notification / sound / Files record.
+                        # file notification / sound / Files record — and this
+                        # branch is what keeps it out of the `elif` below, so
+                        # it is not a placeholder for code that was never
+                        # written.  Removing it forwards every staged chat
+                        # file to a peer.
                         pass
                     elif target_device and target_device != cfg.device_id and on_forward_file:
                         # The forward callback returns False when the target
@@ -2611,6 +2714,12 @@ class WebServer:
                         chat_start_session=chat_start_session,
                         on_history_change=on_history_change,
                         on_favorites_change=on_favorites_change,
+                        # Chat's mute route is a POST, and the four dispatch
+                        # call sites each spell their own argument list: this
+                        # one left both out, so `set_chat_muted` arrived as
+                        # None and /api/chat/mute answered 503 on every call.
+                        get_chat_muted=get_chat_muted,
+                        set_chat_muted=set_chat_muted,
                     )
                     inner_self.send_response(status)
                     inner_self.send_header("Content-Type", content_type)
@@ -2780,6 +2889,20 @@ class WebServer:
         )
         self._device_thread.start()
         logger.info("Web companion listening on http://%s:%d", self._get_lan_ip(), port)
+        if not getattr(cfg, "web_token", ""):
+            # Intentional, but it has to be visible: with no token every GET
+            # and the WebSocket are open to anything on the LAN that can reach
+            # this port -- clipboard history, the file listing and downloads,
+            # the log.  Writes stay gated on a same-origin, IP-literal browser
+            # source (see ``_empty_token_origin_is_local``); reads do not,
+            # because the phone companion is the reason the token can be
+            # cleared at all.  Saying so is what lets a user who cleared it on
+            # an untrusted network notice.
+            logger.warning(
+                "Web token is empty — read access (history, files, log) and the "
+                "WebSocket are unauthenticated for anyone who can reach port %d",
+                port,
+            )
         return True
 
     def _device_broadcast_loop(self) -> None:
@@ -2825,6 +2948,10 @@ class WebServer:
                 logger.debug("Web server server_close failed", exc_info=True)
             self._httpd = None
         self._thread = None
+        # A shutdown inside `_FIREWALL_SCRIPT_SWEEP_DELAY` would otherwise let
+        # the daemon timer die with the process and leave an elevated script
+        # on disk.  Run the deferred cleanups now.
+        sweep_pending_removals()
 
     # ── Network helpers ──────────────────────────────────────────
 

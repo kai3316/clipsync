@@ -398,7 +398,8 @@ class ClipboardHistoryDB:
         self._lock = threading.RLock()
         self._enc_mgr = enc_mgr
         self._last_dedup_key: str = ""
-        self._last_dedup_time: float = 0.0
+        # Monotonic: the coalesce window must survive a wall-clock step.
+        self._last_dedup_mono: float = 0.0
         self._next_id: int = 0
         self._conn: sqlite3.Connection | None = None
 
@@ -792,11 +793,18 @@ class ClipboardHistoryDB:
         dedup_key = _make_dedup_key(content)
         now = time.time()
         captured_at = now
+        # The coalesce window is measured on the monotonic clock.  On the wall
+        # clock a single backwards step (NTP correction, sleep resume) makes
+        # "time since the last capture" negative, which is always inside the
+        # window: from then on every different clip that happened to follow
+        # another within the window was treated as a re-capture of it and
+        # merged away.
+        mono = time.monotonic()
 
         with self._lock:
             if (
                 dedup_key == self._last_dedup_key
-                and now - self._last_dedup_time < self.DEDUP_WINDOW
+                and mono - self._last_dedup_mono < self.DEDUP_WINDOW
             ):
                 # Same primary content within the tight coalesce window.
                 # A capture that adds a format the surviving entry lacks
@@ -825,7 +833,7 @@ class ClipboardHistoryDB:
                 # stored rather than dropped.  Returning None here lost the
                 # first clip copied after a "clear history".
             self._last_dedup_key = dedup_key
-            self._last_dedup_time = now
+            self._last_dedup_mono = mono
 
             # Same-text re-copy beyond the coalesce window: merge into the
             # newest entry (keeping its richer flavors) instead of stacking
@@ -834,9 +842,13 @@ class ClipboardHistoryDB:
             # different hash there is genuinely different content.
             if dedup_key.startswith("text:") and self._entries:
                 top = self._entries[0]
+                # A negative age means the wall clock moved backwards since the
+                # row was written; that is never evidence that this copy is a
+                # re-copy of it, so it must not merge.
+                age = now - (top.get("timestamp") or 0.0)
                 if (
                     self._stored_text_key(top) == dedup_key
-                    and now - (top.get("timestamp") or 0.0) < self.FLAVOR_MERGE_WINDOW
+                    and 0.0 <= age < self.FLAVOR_MERGE_WINDOW
                 ):
                     self._merge_into_top(top, content, source_app, captured_at)
                     # The same row, re-stamped: an offer names it either way.
@@ -990,10 +1002,19 @@ class ClipboardHistoryDB:
         self._update_row(entry.get("entry_id"), **fields)
 
     def get_all(self) -> list[dict]:
-        """Return all entries, pinned first, then newest first within each group."""
+        """Return all entries, pinned first, then newest first within each group.
+
+        Each row is copied.  These used to be the live dicts, so a caller that
+        was reading one — a web thread serialising the list — had its iteration
+        interrupted by the capture thread merging a flavor into that same row,
+        and ``dictionary changed size during iteration`` answered the request
+        with a 500.  The copy is shallow on purpose: ``types`` stays the lazy
+        mapping, so listing a history does not read the payload column that is
+        very nearly the whole database.
+        """
         with self._lock:
-            pinned = [e for e in self._entries if e.get("pinned")]
-            unpinned = [e for e in self._entries if not e.get("pinned")]
+            pinned = [dict(e) for e in self._entries if e.get("pinned")]
+            unpinned = [dict(e) for e in self._entries if not e.get("pinned")]
             return pinned + unpinned
 
     def close(self) -> None:
@@ -1091,7 +1112,7 @@ class ClipboardHistoryDB:
         with self._lock:
             self._entries.clear()
             self._last_dedup_key = ""
-            self._last_dedup_time = 0.0
+            self._last_dedup_mono = 0.0
             self._delete_all_rows()
             self._vacuum_db()
 

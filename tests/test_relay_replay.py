@@ -26,6 +26,7 @@ from internal.transport.relay import (
     ENVELOPE_VERSION,
     RELAY_TS_WINDOW,
     RelayTransport,
+    _envelope_replay_key,
     open_envelope_ex,
     pack_envelope,
 )
@@ -131,18 +132,24 @@ def test_editing_the_timestamp_fails_the_mac(delta):
     assert open_envelope_ex(json.dumps(env).encode("ascii"), KEY, now) == (None, "auth")
 
 
-def test_a_v1_envelope_without_a_mac_still_opens():
-    """A build that predates the field sends the original three fields."""
+def test_an_envelope_without_a_mac_is_refused():
+    """A MAC is what binds ``ts``; stripping it must not open the envelope.
+
+    It used to: the absence was read as "a v1 build predates the field", and a
+    recorded envelope with its ``mac`` deleted and its ``ts`` slid forward was
+    accepted as new.  The timestamp is the one field a third party can rewrite
+    in place, so an envelope that does not authenticate it is refused.
+    """
     now = time.time()
     env = json.loads(pack_envelope(b"frame", KEY, now))
     env.pop("mac")
 
     blob = json.dumps(env, separators=(",", ":")).encode("ascii")
 
-    assert open_envelope_ex(blob, KEY, now) == (b"frame", "")
+    assert open_envelope_ex(blob, KEY, now) == (None, "auth")
 
 
-def test_an_old_build_envelope_still_routes_without_a_mac():
+def test_an_envelope_without_a_mac_never_routes():
     routed: list[bytes] = []
     transport = a_transport(routed)
     now = time.time()
@@ -151,7 +158,40 @@ def test_an_old_build_envelope_still_routes_without_a_mac():
 
     deliver(transport, json.dumps(env).encode("ascii"))
 
-    assert routed == [b"frame"]
+    assert routed == []
+
+
+def test_rewriting_the_timestamp_does_not_buy_a_fresh_identity():
+    """The replay cache keys on the ciphertext, not on the whole envelope.
+
+    Hashing the blob let the same edit that defeats the timestamp window
+    (rewrite ``ts``) also defeat the cache, because the new ``ts`` made a new
+    hash.  The ciphertext is the part an attacker without the channel key
+    cannot change, so it is the identity a replay is recognised by.
+    """
+    now = time.time()
+    blob = pack_envelope(b"frame", KEY, now)
+    env = json.loads(blob)
+    env["ts"] = env["ts"] + 5.0
+    edited = json.dumps(env, separators=(",", ":")).encode("ascii")
+
+    assert _envelope_replay_key(blob) == _envelope_replay_key(edited)
+
+
+def test_a_rerecorded_envelope_is_still_a_replay_even_inside_the_window():
+    routed: list[bytes] = []
+    transport = a_transport(routed)
+    now = time.time()
+    blob = pack_envelope(b"frame", KEY, now)
+    deliver(transport, blob)
+
+    # Same ciphertext, new timestamp, new MAC computed by nobody: the cache
+    # must recognise the bytes it already routed.
+    env = json.loads(blob)
+    env["ts"] = env["ts"] + 5.0
+    deliver(transport, json.dumps(env, separators=(",", ":")).encode("ascii"))
+
+    assert len(routed) == 1
 
 
 @pytest.mark.parametrize("mac", [None, 123, "", "not-a-mac", "\u00e9" * 64])

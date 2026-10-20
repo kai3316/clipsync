@@ -148,13 +148,14 @@ def import_history_json(filepath: str, history: _HistoryType) -> int:
         return 0
 
     existing = history.get_all()
+    dedup = _dedup_index(existing)
     imported = 0
 
     # Export files are ordered newest-first and _insert_imported() prepends
     # each entry, so walk the file in reverse to keep the original order —
     # forward iteration used to leave the restored history oldest-first.
     for item in reversed(data):
-        if _is_duplicate(item, existing):
+        if _is_duplicate(item, dedup):
             continue
         # Build a minimal entry compatible with ClipboardHistory.add()
         # ClipboardHistory.add() expects a ClipboardContent, but we only
@@ -174,6 +175,11 @@ def import_history_json(filepath: str, history: _HistoryType) -> int:
         }
         _insert_imported(history, entry)
         imported += 1
+        # Added to the set the next row is compared against: the index was
+        # built before the import, so two records in one file that shared a
+        # preview and fell inside the window both went in — the second never
+        # saw the first.
+        _remember(entry, dedup)
 
     _finalize_import(history, imported)
 
@@ -263,6 +269,7 @@ def import_history_csv(filepath: str, history: _HistoryType) -> int:
         return 0
 
     existing = history.get_all()
+    dedup = _dedup_index(existing)
     imported = 0
 
     with src.open("r", encoding="utf-8", newline="") as f:
@@ -271,7 +278,7 @@ def import_history_csv(filepath: str, history: _HistoryType) -> int:
         # _insert_imported() prepends, so backwards iteration keeps order.
         rows = reversed(list(reader))
         for row in rows:
-            if _is_duplicate(row, existing):
+            if _is_duplicate(row, dedup):
                 continue
             entry = {
                 "timestamp": _coerce_csv_float(row.get("timestamp"), time.time()),
@@ -290,6 +297,9 @@ def import_history_csv(filepath: str, history: _HistoryType) -> int:
             }
             _insert_imported(history, entry)
             imported += 1
+            # See the JSON import: without this a file holding the same clip
+            # twice imports it twice.
+            _remember(entry, dedup)
 
     _finalize_import(history, imported)
 
@@ -369,8 +379,33 @@ def export_history_markdown(history: _HistoryType, filepath: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _is_duplicate(item: dict, existing: list[dict]) -> bool:
-    """Return True if *item* duplicates an existing entry (same preview
+def _dedup_index(existing) -> dict[str, list[float]]:
+    """Group the entries already present by preview, for `_is_duplicate`.
+
+    A duplicate is only ever "same preview, within five seconds", so a lookup
+    keyed on the preview is what the check actually needs.  Scanning the whole
+    list per item made an import quadratic, and now that an import adds to the
+    set it compares against, that cost is paid on every row.
+    """
+    index: dict[str, list[float]] = {}
+    for e in existing:
+        _remember(e, index)
+    return index
+
+
+def _remember(item: dict, index: dict[str, list[float]]) -> None:
+    """Add *item* to a dedup index."""
+    preview = (item.get("text_preview") or "").strip()
+    try:
+        ts = float(item.get("timestamp", 0))
+    except (TypeError, ValueError):
+        return
+    if preview and ts:
+        index.setdefault(preview, []).append(ts)
+
+
+def _is_duplicate(item: dict, index: dict[str, list[float]]) -> bool:
+    """Return True if *item* duplicates an indexed entry (same preview
     within the dedup window)."""
     preview = (item.get("text_preview") or "").strip()
     try:
@@ -379,13 +414,7 @@ def _is_duplicate(item: dict, existing: list[dict]) -> bool:
         ts = 0.0
     if not preview or not ts:
         return False
-    for e in existing:
-        if (e.get("text_preview") or "").strip() != preview:
-            continue
-        e_ts = float(e.get("timestamp", 0))
-        if abs(ts - e_ts) <= _DEDUP_WINDOW:
-            return True
-    return False
+    return any(abs(ts - other) <= _DEDUP_WINDOW for other in index.get(preview, ()))
 
 
 # Human-readable content-type labels for the Markdown export.

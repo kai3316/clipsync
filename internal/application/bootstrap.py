@@ -134,6 +134,9 @@ class SidecarApplication:
         # opens a socket on the first tick, which both breaks the mode's promise
         # and leaves a request in flight at exit.
         self._update_checks = update_checks
+        # Timers from _defer, cancelled on the stop path.
+        self._defer_lock = threading.Lock()
+        self._defer_timers: list[threading.Timer] = []
         self.runtime = None
         self.companion = None
         self._companion_factory = companion_factory
@@ -370,6 +373,9 @@ class SidecarApplication:
     def _stop_runtime(self):
         if self.runtime is None:
             return True
+        # Before the subsystems go: a deferred reconfigure still waiting on its
+        # 0.4s timer would call back into a companion this is tearing down.
+        self._cancel_deferred()
         stopped = False
         for attempt in range(self.RUNTIME_STOP_ATTEMPTS):
             stopped = self.runtime.stop() is not False
@@ -855,6 +861,16 @@ class SidecarApplication:
             "sync_state": self.runtime.sync_state if self.runtime is not None else "not_started",
             "runtime_error": (
                 getattr(self.runtime, "_last_error", "") if self.runtime is not None else ""
+            ),
+            # Why this machine will not notice its own clipboard changing, or
+            # "" when capture is live.  Kept apart from `health`: the runtime
+            # starts, stays usable for receiving and reports itself running,
+            # so the only way a user could ever learn that local capture never
+            # came up used to be that nothing was syncing.
+            "clipboard_capture_error": (
+                getattr(self.runtime, "clipboard_capture_error", "")
+                if self.runtime is not None
+                else ""
             ),
             # Every name here is a method the dispatcher routes, and nothing
             # else: the window turns some of these strings into controls it
@@ -1582,12 +1598,27 @@ class SidecarApplication:
             return
         self._request_host_restart("factory_reset")
 
-    @staticmethod
-    def _defer(callback, delay=0.4):
-        """Run *callback* shortly on its own thread (never the HTTP handler)."""
+    def _defer(self, callback, delay=0.4):
+        """Run *callback* shortly on its own thread (never the HTTP handler).
+
+        The timer is kept and cancelled on shutdown.  A deferred reconfigure
+        that outlived the stop it was scheduled around restarted the companion
+        listener after the app had already released it, and a factory reset
+        deferred a restart the runtime was concurrently tearing down.
+        """
         timer = threading.Timer(delay, callback)
         timer.daemon = True
+        with self._defer_lock:
+            self._defer_timers.append(timer)
         timer.start()
+
+    def _cancel_deferred(self) -> None:
+        """Drop every pending deferred callback (called on the stop path)."""
+        with self._defer_lock:
+            timers = list(self._defer_timers)
+            self._defer_timers.clear()
+        for timer in timers:
+            timer.cancel()
 
     def _persist_config(self, message):
         try:
@@ -1664,6 +1695,9 @@ class SidecarApplication:
         needs released before it will unlink the data files — and clears the
         data directory; the shell restarts the app afterwards.
         """
+        # Cancel first: a pending deferred reconfigure would otherwise restart
+        # the companion listener after these services have been released.
+        self._cancel_deferred()
         if self.config is None:
             raise ApplicationError("APP_LOCKED", "Unlock ClipSync to reset ClipSync")
         if self.lifecycle.stop() is False:
@@ -1758,6 +1792,9 @@ class SidecarApplication:
         return {"items": items}
 
     def _close(self) -> None:
+        # First: a deferred reconfigure still pending would restart the
+        # companion listener after these services have been released.
+        self._cancel_deferred()
         self.updates.stop()
         if self._repository is not None:
             self._repository.close()

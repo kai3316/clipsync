@@ -7,6 +7,10 @@ from pathlib import Path
 
 from internal.platform.process import pid_running
 
+# Written into the marker so a leftover one can be told apart from a legacy
+# application's.  See `_legacy_owner_running`.
+SIDECAR_MARKER_OWNER = "tauri-sidecar-v1"
+
 
 class DataInUseError(RuntimeError):
     """Another process or legacy lock owns the selected data directory."""
@@ -20,7 +24,16 @@ def _legacy_owner_running(marker: dict) -> bool:
     orphan.  The pids are the only way to tell the two apart.  Either pid
     counts: a live tray with a dead main process is still a legacy instance
     holding the directory.
+
+    A marker *this* sidecar wrote is never legacy, whatever its pid says.  Pids
+    are recycled, so a stale marker from a previous run can name a pid that a
+    different process now holds — and reading it as "the legacy app is running"
+    locked the application out of its own data directory with
+    "Close the legacy ClipSync application first", until the file was removed
+    by hand.
     """
+    if marker.get("owner") == SIDECAR_MARKER_OWNER:
+        return False
     return any(pid_running(marker.get(key)) for key in ("pid", "tray_pid"))
 
 
@@ -79,7 +92,10 @@ class InstanceLock:
         token = uuid.uuid4().hex
         descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump({"pid": os.getpid(), "owner": "tauri-sidecar-v1", "token": token}, stream)
+            json.dump(
+                {"pid": os.getpid(), "owner": SIDECAR_MARKER_OWNER, "token": token},
+                stream,
+            )
         self._token = token
 
     def stop(self) -> None:

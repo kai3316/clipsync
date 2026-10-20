@@ -302,6 +302,7 @@ class CompanionTunnel:
         while not self._stop.is_set() and self._brokers:
             broker = self._brokers[index % len(self._brokers)]
             index += 1
+            client = None
             try:
                 client = self._client_factory(broker)
                 with self._lock:
@@ -313,23 +314,56 @@ class CompanionTunnel:
                 # already reported itself and the next broker gets a turn.
                 while not self._stop.is_set() and self._connected_broker:
                     self._stop.wait(1.0)
-                if self._stop.is_set():
-                    return
             except Exception as exc:
                 logger.info("Companion tunnel: %s unavailable (%s)", broker.url, exc)
                 with self._lock:
                     self._error = str(exc)
-                self._stop.wait(2.0)
+            finally:
+                # Released either way.  Each round used to drop the previous
+                # client without disconnecting it, and paho's client is a
+                # network thread plus a socket that keeps trying to reconnect
+                # on its own — so a broker that stayed down leaked one of each
+                # every couple of seconds, and "down" was also the state that
+                # made the loop spin fastest.
+                if client is not None:
+                    self._release_client(client)
+                with self._lock:
+                    self._connected_broker = None
+                    if self._client is client:
+                        self._client = None
+            if self._stop.is_set():
+                return
+            self._stop.wait(2.0)
+
+    def _release_client(self, client) -> None:
+        """Stop and disconnect one paho client, never raising."""
+        try:
+            client.loop_stop()
+        except Exception:
+            logger.debug("Companion tunnel loop_stop failed", exc_info=True)
+        try:
+            client.disconnect()
+        except Exception:
+            logger.debug("Companion tunnel disconnect failed", exc_info=True)
 
     def _default_client(self, broker: _Broker) -> Any:
         import paho.mqtt.client as mqtt
 
-        client = mqtt.Client(
-            transport="websockets",
-            client_id=f"clipsync-comp-{uuid.uuid4().hex[:10]}",
-            clean_session=True,
-            protocol=mqtt.MQTTv311,
-        )
+        kwargs = {
+            "transport": "websockets",
+            "client_id": f"clipsync-comp-{uuid.uuid4().hex[:10]}",
+            "clean_session": True,
+            "protocol": mqtt.MQTTv311,
+        }
+        try:
+            # paho 2.0 made ``callback_api_version`` a required first argument;
+            # 2.1 defaulted it and only warns.  The declared floor is
+            # ``paho-mqtt>=2.0``, so a 2.0.x install raises ValueError here —
+            # inside ``_connect_loop``'s catch, which reported it as "broker
+            # unavailable" and left the tunnel dead with no usable reason.
+            client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1, **kwargs)
+        except TypeError:
+            client = mqtt.Client(**kwargs)
         client.ws_set_options(path=broker.path)
         if broker.secure:
             client.tls_set()
@@ -484,7 +518,27 @@ class CompanionTunnel:
                 response = None
         if response is None:
             response = self._perform(request_id, method, path, frame)
-        raw = self._seal(response)
+        try:
+            raw = self._seal(response)
+        except ValueError:
+            # The response itself is over the frame budget.  It used to escape
+            # as an exception into the message callback's catch-all, which
+            # logged and returned — so the phone's request simply hung until it
+            # timed out, with nothing to distinguish it from a dead tunnel.
+            # Answer 413 instead, like the two size checks inside _perform.
+            logger.warning(
+                "Companion tunnel response for %s %s exceeds the frame budget",
+                method,
+                path,
+            )
+            response = {
+                "v": PROTOCOL_VERSION,
+                "type": "res",
+                "id": request_id,
+                "status": 413,
+                "body": "",
+            }
+            raw = self._seal(response)
         with self._lock:
             self._seen[request_id] = raw
             while len(self._seen) > DEDUPE_CAPACITY:

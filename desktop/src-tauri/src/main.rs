@@ -53,6 +53,19 @@ impl Host {
     async fn bridge(&self) -> Result<Arc<Bridge>, BridgeError> {
         let mut slot = self.bridge.lock().await;
         match &*slot {
+            // A bridge `stop()` has finished with is over, and nothing inside
+            // the process brings it back: every later call fails on the
+            // `stopping` flag, and `supervise` deliberately leaves a stopping
+            // bridge alone because a quit, a restart and a factory reset all
+            // stop one on purpose.  An update whose installer then failed to
+            // launch therefore used to leave a running app answering every
+            // command with "unavailable" until it was quit and reopened.
+            //
+            // Replacing it here means no later path has to remember to.  The
+            // check is `is_stopped`, not `is_stopping`: a stop still in flight
+            // still owns the data directory, and starting beside it is exactly
+            // the collision `stop()` exists to avoid.
+            Slot::Live(bridge) if bridge.is_stopped() => {}
             Slot::Live(bridge) => return Ok(bridge.clone()),
             Slot::Failed(error) => return Err(error.clone()),
             Slot::Idle => {}
@@ -103,6 +116,33 @@ impl Host {
         if let Some(bridge) = bridge {
             bridge.stop().await;
         }
+    }
+}
+
+/// Bring the sidecar back after an update that stopped it and then failed.
+///
+/// Every Windows update route stops the sidecar first — the installer cannot
+/// overwrite files a live process holds open — and `Bridge::stop` is one-way:
+/// it marks the bridge stopping, which makes every later call fail
+/// (`bridge.rs`), and `supervise` deliberately does not relaunch a bridge that
+/// is stopping, because a quit, a restart and a factory reset all stop one on
+/// purpose.  So an update whose installer never launched left a running app
+/// that answered every command with "unavailable", with nothing in the process
+/// able to bring the sidecar back: the failure was only ever cleared by
+/// quitting the app and starting it again.
+///
+/// Recovering here is what makes a failed update cost the retry the card
+/// already offers, rather than a restart of the whole application.
+async fn recover_after_failed_update(app: &tauri::AppHandle) {
+    let host = app.state::<Host>();
+    if let Err(error) = host.restart_bridge().await {
+        // Nothing to draw this on: the update card is the one on screen and it
+        // is already showing its own failure.  The window's next command
+        // reports the sidecar as unavailable with a retry of its own.
+        eprintln!(
+            "sidecar did not come back after a failed update: {}",
+            error.code
+        );
     }
 }
 
@@ -2132,10 +2172,12 @@ async fn update_install(
 ///   archive that names the running version is `up_to_date`; anything else is
 ///   revealed for the reader rather than run.
 /// * `Err(_)` -- the manifest could not be read (offline, rate-limited).  That
-///   is exactly the condition a peer-sent blob exists for: a `peer_verified`
-///   blob whose transferred signature verifies against the embedded key and
-///   whose signed version is newer may install.  Anything else -- no signature,
-///   a failing one, an older version -- is revealed, never run.
+///   is exactly the condition a peer-sent blob exists for: a blob that matched
+///   the released digest (`verified == "release"`) or the sender's digest
+///   (`verified == "peer_verified"`), whose transferred signature verifies
+///   against the embedded key and whose signed version is newer, may install.
+///   Anything else -- no signature, a failing one, an older version -- is
+///   revealed, never run.
 #[tauri::command]
 async fn update_install_ready(
     app: tauri::AppHandle,
@@ -2281,6 +2323,21 @@ fn offline_signed_update(
     (&claimed > current).then_some((file_name, version))
 }
 
+/// Whether a staged archive's transferred signature may authorise an offline install.
+///
+/// The sidecar publishes `verified = "release"` when the bytes matched the
+/// published release digest, and `"peer_verified"` when they matched only the
+/// sending device's digest.  Both are stronger than "unverified": the signature
+/// is still checked against the embedded key below, so the release-digest case
+/// must not be thrown away just because GitHub's manifest has become
+/// unreachable between the download and the install.  That was the macOS
+/// report: the peer transfer carried 408 signature bytes, the bytes had matched
+/// the release digest, and this branch nevertheless opened Finder on every
+/// attempt.
+fn offline_install_is_authorised(verified: &str, signature: &str) -> bool {
+    matches!(verified, "release" | "peer_verified") && !signature.is_empty()
+}
+
 /// The answer for a staged file this build will not install on its own: leave
 /// it where the card can point at it and let the reader decide.
 /// Tell the sidecar what this host decided about a staged update, so it reaches the log.
@@ -2375,6 +2432,7 @@ async fn install_verified_update(
         emit_update_state(app, json!({"phase": "installing", "version": version}));
         if let Err(err) = update.install(bytes) {
             emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
+            recover_after_failed_update(app).await;
             return Err(err.into());
         }
         // macOS/Linux only swap files here; bringing the new build up is ours.
@@ -2414,8 +2472,8 @@ async fn run_verified_installer(
 /// A staged archive is installed from the bytes already on this disk only after
 /// it is tied to the release signing key.  With the manifest in reach that tie
 /// is `update.signature`; with the manifest unreachable it is the signature the
-/// peer transfer carried (`state.signature`), and only a `peer_verified` blob
-/// whose signed version is newer than this build may use it.  Everything else
+/// peer transfer carried (`state.signature`), and a `release` or `peer_verified`
+/// blob whose signed version is newer than this build may use it.  Everything else
 /// -- no signature, a failing one, an older version, an old sender -- is only
 /// revealed, never run.
 ///
@@ -2527,13 +2585,11 @@ pub(crate) async fn install_staged_update(
             }
         }
         // Offline: the manifest is unreachable, which is exactly the case a
-        // peer-sent blob exists for.  Only a peer_verified blob that carries a
-        // signature verifying against the embedded key, and whose signed
-        // version is newer than this build, may install; all else is manual.
+        // peer-sent blob exists for.  A blob that matched the release digest or
+        // the sender's digest, and whose transferred signature verifies against
+        // the embedded key with a newer version, may install; all else is manual.
         Err(err) => {
-            // The manifest is unreachable, which is the case a peer-sent blob exists for -- and the
-            // case where the transferred signature is the only thing that can authorise an install.
-            if verified != "peer_verified" || peer_signature.is_empty() {
+            if !offline_install_is_authorised(&verified, &peer_signature) {
                 note_install_decision(
                     bridge,
                     "no_usable_signature",
@@ -2639,6 +2695,9 @@ async fn run_staged_installer(
             Ok(child) => child,
             Err(err) => {
                 emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
+                // The sidecar is already stopped (see above), and nothing else
+                // will bring it back on its own.
+                recover_after_failed_update(app).await;
                 return Err(BridgeError::new("UPDATE_ERROR", &err.to_string()));
             }
         };
@@ -2727,6 +2786,10 @@ async fn fetch_and_install(
 
     if let Err(err) = update.install(&bytes) {
         emit_update_state(app, json!({"phase": "failed", "error": err.to_string()}));
+        // Reached only where the install did not hand the process to the
+        // installer: on Windows a successful one never returns.  The sidecar is
+        // already stopped, so it has to be brought back here.
+        recover_after_failed_update(app).await;
         return Err(err.into());
     }
     // Unreachable on Windows: a successful install hands the process to the
@@ -4130,6 +4193,16 @@ mod tests {
             None,
             "no transferred signature is a manual install"
         );
+    }
+
+    #[test]
+    fn a_release_verified_peer_update_may_install_offline() {
+        assert!(offline_install_is_authorised("release", "signature"));
+        assert!(offline_install_is_authorised("peer_verified", "signature"));
+        assert!(!offline_install_is_authorised("release", ""));
+        assert!(!offline_install_is_authorised("peer_verified", ""));
+        assert!(!offline_install_is_authorised("no_release_info", "signature"));
+        assert!(!offline_install_is_authorised("hash_mismatch", "signature"));
     }
 
     #[test]

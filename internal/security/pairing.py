@@ -23,6 +23,7 @@ Threats addressed:
 
 import datetime
 import hashlib
+import hmac
 import logging
 import secrets
 import threading
@@ -357,7 +358,15 @@ class PairingManager:
             peer = self._peers.get(device_id)
             if not peer:
                 return False
-            return peer.fingerprint.replace(":", "").upper() == fingerprint.replace(":", "").upper()
+            # Constant-time: the length of the matching prefix is observable in
+            # the time a short-circuiting `==` takes, and both sides of this
+            # comparison are secrets the caller is checking, not labels being
+            # sorted.  Compared as bytes because `compare_digest` on two str
+            # raises on a non-ASCII character.
+            return hmac.compare_digest(
+                peer.fingerprint.replace(":", "").upper().encode("utf-8"),
+                str(fingerprint or "").replace(":", "").upper().encode("utf-8"),
+            )
 
     # -- handshake proof of key possession -----------------------------
     #
@@ -620,7 +629,9 @@ class PairingManager:
             attempts.append(now)
             self._pairing_attempts[peer_id] = attempts
 
-            if expected == code:
+            if hmac.compare_digest(
+                str(expected or "").encode("utf-8"), str(code or "").encode("utf-8")
+            ):
                 self._pairing_attempts.pop(peer_id, None)
                 # Two-sided confirmation: keep the pending entry so the UI can
                 # show "waiting for the other device".  Only mark the peer as

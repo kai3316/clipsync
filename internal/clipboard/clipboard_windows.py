@@ -28,6 +28,19 @@ from internal.clipboard.format import (
 
 logger = logging.getLogger(__name__)
 
+# Largest image `_ClipboardWriter._set_image` will decode and convert.  A peer
+# supplies the payload, and each conversion allocates width*height*4 more than
+# once before the BMP buffer; unbounded, one large image was enough to take the
+# process down.  4096x4096 matches the cap `emf.render_emf_to_png` already uses.
+_MAX_IMAGE_PIXELS = 4096 * 4096
+
+# How many times a refused `AddClipboardFormatListener` is retried, and how long
+# to wait between two of them.  Short and few on purpose: this runs on the
+# monitor's own thread before its message pump, and `stop()` waits for that
+# pump — so the whole retry has to stay well inside the 5 s `stop()` allows.
+_LISTENER_ATTEMPTS = 3
+_LISTENER_RETRY_DELAY = 0.5
+
 # Win32 API bindings
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -780,6 +793,21 @@ class _ClipboardWriter(ClipboardWriter):
             return
         try:
             img = Image.open(BytesIO(data))
+            width, height = img.size
+            # Bounded before anything is allocated.  A peer controls this
+            # payload, and the conversions below ask for width*height*4 bytes
+            # twice over (RGBA plus the flattened copy) before the BMP buffer
+            # and the clipboard copy: a 20000x20000 image is 1.6 GB per pass.
+            # `emf.render_emf_to_png` already caps its own renders at the same
+            # order of magnitude; this path had no cap at all.
+            if width * height > _MAX_IMAGE_PIXELS:
+                logger.warning(
+                    "Refusing a %dx%d image (over %d pixels) on the clipboard",
+                    width,
+                    height,
+                    _MAX_IMAGE_PIXELS,
+                )
+                return
             alpha_dib = None
             if img.mode in ("RGBA", "LA") or (
                 img.mode == "P" and "transparency" in img.info
@@ -921,24 +949,87 @@ class WindowsClipboardMonitor(ClipboardMonitor):
     # placeholder for a number that was never filled in.
     max_poll_interval = 0.0
 
+    def _register_listener(self) -> bool:
+        """Ask for WM_CLIPBOARDUPDATE, and try again a bounded number of times.
+
+        A refusal is usually transient — a desktop that has only just come back
+        is the common one, which is exactly what an update's own relaunch is —
+        but the wait is bounded and short, because this runs on the thread that
+        `stop()` is waiting to reach its pump.
+        """
+        for attempt in range(1, _LISTENER_ATTEMPTS + 1):
+            if user32.AddClipboardFormatListener(self._hwnd):
+                return True
+            logger.warning(
+                "AddClipboardFormatListener failed (attempt %d/%d)",
+                attempt,
+                _LISTENER_ATTEMPTS,
+            )
+            if attempt < _LISTENER_ATTEMPTS:
+                time.sleep(_LISTENER_RETRY_DELAY)
+        self._failure = (
+            f"AddClipboardFormatListener failed after {_LISTENER_ATTEMPTS} attempts"
+        )
+        return False
+
     def __init__(self):
         self._running = False
         self._thread = None
         self._callback = None
         self._hwnd = None
+        # Set once _message_loop has reached the pump (or given up), so stop()
+        # can tell "no window yet" from "no window ever".  A stop that lands
+        # in between used to find _hwnd still None and post nothing, leaving
+        # the thread parked in GetMessageW for the life of the process.
+        self._ready = threading.Event()
+        # Why local capture will not happen, set from the monitor thread. Read
+        # through `monitor_error()`; see `ClipboardMonitor.last_error`.
+        self._failure: str | None = None
 
     def start(self, callback):
         logger.info("WindowsClipboardMonitor starting")
         self._callback = callback
         self._running = True
+        self._failure = None
+        self._ready.clear()
         self._thread = threading.Thread(target=self._message_loop, daemon=True)
         self._thread.start()
+
+    def monitor_error(self) -> str | None:
+        """Why no clipboard change will arrive, or None while capture is live.
+
+        A monitor that has not reached its pump yet answers None: it is
+        starting, not broken, and the window exists by the time `stop()` can be
+        called.  A monitor that gave up names the step that was refused.
+        """
+        return self._failure
 
     def stop(self):
         logger.info("WindowsClipboardMonitor stopping")
         self._running = False
+        # Wait for the window: it is created on the thread this call is
+        # stopping, so a stop issued right after start() saw _hwnd as None and
+        # posted no WM_DESTY — and a message-only window with no message to
+        # pump never returns from GetMessageW.
+        self._ready.wait(timeout=5.0)
         if self._hwnd:
             user32.PostMessageW(self._hwnd, WM_DESTROY, 0, 0)
+        elif not self._ready.is_set():
+            # Still no window after the wait and no signal it gave up either:
+            # there is nothing to post to and no way to make the pump return.
+            # The thread is a daemon, so the process can still exit; say so
+            # rather than leaving a silent non-stop.
+            logger.warning(
+                "Clipboard monitor never reached its message pump; it cannot be stopped"
+            )
+        # Joining is what makes "stopped" true rather than merely requested:
+        # without it the listener stays registered and callbacks keep firing
+        # after the owner has moved on.
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+            if thread.is_alive():
+                logger.warning("Clipboard monitor thread did not exit on stop")
 
     def _message_loop(self):
         hinstance = kernel32.GetModuleHandleW(None)
@@ -954,8 +1045,16 @@ class WindowsClipboardMonitor(ClipboardMonitor):
 
         atom = user32.RegisterClassW(ctypes.byref(wndclass))
         if not atom:
-            logger.error("Failed to register window class")
-            return
+            # Not fatal on its own, and not decided here: a class this process
+            # registered on an earlier run of this thread is already there —
+            # the monitor is restarted by the capture-repair path, and Windows
+            # refuses the second registration — and every other refusal leaves
+            # no usable class at all.  `CreateWindowExW` below settles both:
+            # it succeeds when a usable class exists under this name and fails
+            # when none does, so no error code is needed to tell them apart.
+            logger.warning(
+                "RegisterClassW refused the window class; letting CreateWindowExW decide"
+            )
 
         # Create message-only window
         HWND_MESSAGE = -3  # noqa: N806
@@ -975,15 +1074,36 @@ class WindowsClipboardMonitor(ClipboardMonitor):
         )
 
         if not self._hwnd:
+            # No window class under this name, or one that cannot be used:
+            # without a window there is nothing to post a clipboard update to
+            # and nothing for `stop()` to destroy, so capture is over.
+            self._failure = "CreateWindowExW failed (no message-only window)"
             logger.error("Failed to create message-only window")
+            self._ready.set()
             return
 
         logger.info("Message-only window created successfully")
-        # Register for clipboard updates
-        if not user32.AddClipboardFormatListener(self._hwnd):
-            logger.error("Failed to register clipboard format listener")
-        else:
+        # Register for clipboard updates.  Retried, because this is the one
+        # step that can be refused transiently — most often on a desktop that
+        # has only just come back (an update's relaunch, a session reconnect) —
+        # and the old code kept going into the pump on a failure, which left a
+        # process that looked healthy and never captured anything.
+        if self._register_listener():
             logger.info("Clipboard format listener registered")
+        else:
+            # The pump still runs: writes to the clipboard are unaffected, and
+            # a window that can still be destroyed is what lets `stop()` end
+            # the thread.  What is lost is only capture, and it is recorded so
+            # the app can say so.
+            logger.error(
+                "Clipboard format listener was not registered after %d attempts — "
+                "local clipboard changes will not be captured",
+                _LISTENER_ATTEMPTS,
+            )
+
+        # Published before the pump starts: a stop() that arrives from here on
+        # has a window to post to, and one that arrived earlier stops waiting.
+        self._ready.set()
 
         # Message pump
         msg = _MSG()
@@ -996,6 +1116,12 @@ class WindowsClipboardMonitor(ClipboardMonitor):
 
         user32.RemoveClipboardFormatListener(self._hwnd)
         user32.DestroyWindow(self._hwnd)
+        # The class is this process's own, and a monitor that is restarted —
+        # the repair path in `LanRuntime` — registers it again from a fresh
+        # thread.  Left registered, that second `RegisterClassW` fails with
+        # "class already exists", so repairing a broken monitor would replace
+        # one failure with another and report it as a new fault.
+        user32.UnregisterClassW(class_name, hinstance)
 
     def _window_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_CLIPBOARDUPDATE:

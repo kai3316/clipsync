@@ -60,8 +60,22 @@ def test_reveal_folder_uses_the_platform_command(
     system, command, monkeypatch, tmp_path
 ):
     calls = []
+
+    class _FakeProc:
+        """Stands in for Popen, which the code now closes as a context manager."""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
     monkeypatch.setattr(file_manager.sys, "platform", system)
-    monkeypatch.setattr(file_manager.subprocess, "Popen", lambda args: calls.append(args))
+    monkeypatch.setattr(
+        file_manager.subprocess,
+        "Popen",
+        lambda args: (calls.append(args), _FakeProc())[1],
+    )
     monkeypatch.setattr(
         file_manager.subprocess, "run", lambda args, check=False: calls.append(args)
     )

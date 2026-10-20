@@ -25,9 +25,9 @@ keeps the wire's spelling independent of the sender's file system.
 
 import json
 import os
-import re
 import unicodedata
 
+from internal.clipboard.format import WINDOWS_DRIVE as _WINDOWS_DRIVE
 from internal.clipboard.format import decode_text, encode_path
 
 # Bumped only if the shape below changes incompatibly.  A peer that does not
@@ -48,7 +48,9 @@ MAX_NAME_CHARS = 255
 _UNITS = ("B", "KB", "MB", "GB", "TB")
 
 # A device-letter path in a URL slot: "C:\docs" or "C:/docs".
-_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+# One spelling, in `format`, shared with the file-URL reader there — two
+# copies of the same pattern would drift, and a drift here decides whether a
+# path is recognised as local at all.
 
 
 def file_name(path: str) -> str:

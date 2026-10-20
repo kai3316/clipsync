@@ -108,10 +108,14 @@ class SyncManager:
         # Linux/macOS) lands after suppression expires and is re-broadcast as
         # a fresh local copy.
         #
-        # Read from the parameter, not from ``self._monitor``: a caller that
-        # hands this constructor no monitor at all gets 0.0, exactly as the
-        # getattr over None did before.
-        self._max_poll_interval = monitor.max_poll_interval if monitor is not None else 0.0
+        # Read from the monitor this object actually ended up with.  It used to
+        # be read from the constructor *parameter*, so a caller that passed no
+        # monitor — and therefore got ``create_monitor()``, which on Linux and
+        # macOS polls — recorded 0.0 instead of that monitor's real interval.
+        # The write-suppression window built from it then expired before a
+        # re-encoded read-back (BMP/TIFF -> PNG) came off the clipboard, and
+        # that read-back was broadcast again as a fresh local copy.
+        self._max_poll_interval = float(getattr(self._monitor, "max_poll_interval", 0.0) or 0.0)
         self._last_local_copy_time: float = 0.0
         # Non-zero while a local capture is in flight.  The crossed-write
         # check below reads it: the debounce window is measured from the
@@ -198,6 +202,32 @@ class SyncManager:
         """
         self._on_write_error = callback
 
+    def restart_monitor(self) -> None:
+        """Restart the clipboard monitor alone, leaving sync state untouched.
+
+        Used when the monitor came up broken: `stop()` here would also turn
+        sync off, which is not what a caller trying to *restore* capture
+        wants.  Safe to call only while this manager is started — the
+        monitor's callback is re-registered from the one already in use.
+        """
+        self._monitor.stop()
+        self._monitor.start(self._on_clipboard_change)
+
+    def clipboard_capture_error(self) -> str:
+        """Why local clipboard changes will never reach this manager, or "".
+
+        Asked of the monitor rather than tracked here: whether capture works is
+        the monitor's own business, and on Windows it is decided on the
+        monitor's thread well after ``start()`` returned.
+        """
+        reader = getattr(self._monitor, "monitor_error", None)
+        if not callable(reader):
+            return ""
+        try:
+            return reader() or ""
+        except Exception:
+            return ""
+
     def _notify_history_change(self) -> None:
         """Invoke the optional history-change callback (e.g. to push a
         `history_updated` event to connected web clients).  Never raises."""
@@ -228,6 +258,10 @@ class SyncManager:
 
     def stop(self):
         with self._lock:
+            # Stopping is a pause that does not end: a monitor callback, a
+            # debounce timer or a capture already in flight must not keep
+            # writing history or broadcasting after the owner let this go.
+            self._enabled = False
             if self._pending_timer is not None:
                 self._pending_timer.cancel()
                 self._pending_timer = None
@@ -330,11 +364,16 @@ class SyncManager:
             if self._dedup_seen(content_hash):
                 return self._outcome(True, reason="duplicate", history=True)
 
-            # Receive-side rate limit: a peer must not be able to flood the
-            # local clipboard with writes.  Drop messages once the per-window
-            # budget of distinct writes is exhausted.  Retryable: the frame is
+            # Receive-side rate limit ... Retryable: the frame is
             # fine, the budget is the only thing in the way.
-            now = time.time()
+            #
+            # Measured on the monotonic clock.  A wall-clock window stops
+            # being drained the moment the clock steps backwards (NTP
+            # correction, sleep resume): the age of the oldest entry goes
+            # negative, nothing is ever popped, the deque stays at its cap and
+            # every clip from every peer is reported rate-limited from then
+            # on — a permanent, silent loss of the remote clipboard.
+            now = time.monotonic()
             while (
                 self._remote_apply_times and now - self._remote_apply_times[0] > REMOTE_RATE_WINDOW
             ):
@@ -435,7 +474,7 @@ class SyncManager:
         # Count this write toward the rate limit AND record loop-prevention
         # state only now that it actually landed.
         with self._lock:
-            self._remote_apply_times.append(time.time())
+            self._remote_apply_times.append(time.monotonic())
             self._dedup_ring_remember(content_hash)
             self._last_local_hash = content_hash
             self._last_hash_ts = time.monotonic()
@@ -456,21 +495,30 @@ class SyncManager:
         content.transport = "relay" if via_relay else "lan"
         content_hash = content.hash_key()
         recorded = False
-        if not self._history_recorded(content_hash) and self._history is not None:
-            try:
-                self._history.add(content)
-                recorded = True
-            except Exception:
-                logger.debug("Failed to add remote content to history", exc_info=True)
-        else:
-            recorded = self._history_recorded(content_hash)
-        if recorded:
-            self._history_only_remember(content_hash)
-            self._notify_history_change()
+        # One critical section for the whole check-then-record.  These two
+        # used to run outside the lock while the transport threads deliver —
+        # LAN and relay both, and a redelivery crossing a first arrival is
+        # exactly what `_on_needs_resend` produces.  Both helpers rebuild the
+        # list they are handed, so two callers interleaving lost one another's
+        # entry: the "already recorded" answer went missing and the same clip
+        # was written to history twice.
         with self._lock:
-            # Remember the content even when the clipboard write is still owed:
-            # the redelivery is the same content, and it must apply the
-            # clipboard, not stack a second row.
+            already = self._history_recorded(content_hash)
+            if not already and self._history is not None:
+                try:
+                    self._history.add(content)
+                    recorded = True
+                except Exception:
+                    logger.debug(
+                        "Failed to add remote content to history", exc_info=True
+                    )
+            else:
+                recorded = already
+            if recorded:
+                self._history_only_remember(content_hash)
+            # Remembered even when the clipboard write is still owed: the
+            # redelivery carries the same content and must apply the clipboard,
+            # not stack a second row.
             self._history_only_remember(content_hash)
             if not retryable:
                 # A retryable drop is coming back for the clipboard write, so it
@@ -478,6 +526,8 @@ class SyncManager:
                 # accepted (settled) history-only row does enter the ring, so a
                 # further duplicate is recognised as already here.
                 self._dedup_ring_remember(content_hash)
+        if recorded:
+            self._notify_history_change()
         return self._outcome(
             not retryable,
             reason=reason,
@@ -591,19 +641,29 @@ class SyncManager:
         ask = self._on_needs_resend
         if ask is None:
             return False
-        now = time.monotonic()
-        self._resend_tried = [
-            (h, ts) for h, ts in self._resend_tried if now - ts <= DEDUP_RING_TTL
-        ]
-        if any(h == content_hash for h, _ in self._resend_tried):
-            return False
-        try:
-            if not ask(content):
+        # One attempt per content per window, decided under the lock; the
+        # question itself is asked outside it (see the caller).
+        with self._lock:
+            now = time.monotonic()
+            self._resend_tried = [
+                (h, ts) for h, ts in self._resend_tried if now - ts <= DEDUP_RING_TTL
+            ]
+            if any(h == content_hash for h, _ in self._resend_tried):
                 return False
+            self._resend_tried.append((content_hash, now))
+        try:
+            allowed = bool(ask(content))
         except Exception:
             logger.debug("on_needs_resend failed", exc_info=True)
+            allowed = False
+        if not allowed:
+            with self._lock:
+                self._resend_tried = [
+                    (h, ts)
+                    for h, ts in self._resend_tried
+                    if not (h == content_hash and ts == now)
+                ]
             return False
-        self._resend_tried.append((content_hash, now))
         # Said out loud because it is the difference between "the copy was
         # swallowed" and "the copy went out again": the report that led here was
         # only diagnosable from the code, and this line is what makes the next one
@@ -697,9 +757,23 @@ class SyncManager:
                 content_hash == self._last_local_hash
                 and time.monotonic() - self._last_hash_ts <= DEDUP_RING_TTL
             ) or self._dedup_seen(content_hash)
-            if duplicate and not self._resend_duplicate(content_hash, content):
-                return
 
+        if duplicate and not self._resend_duplicate(content_hash, content):
+            # Asked outside the lock.  The answer comes from the transport,
+            # which takes the transport lock on the way: holding this one while
+            # asking fixed an ordering between the two that any path holding
+            # them the other way round turns into a deadlock, and this lock is
+            # not re-entrant, so a callback that reaches back into the manager
+            # would wedge it on its own.  Asking costs a network enumeration,
+            # which also has no business running inside a critical section.
+            return
+
+        with self._lock:
+            # Re-read under the lock: the pause check and the dedup state below
+            # are only meaningful together, and the lock was released to ask
+            # the transport.
+            if not self._enabled:
+                return
             self._last_local_hash = content_hash
             self._last_hash_ts = time.monotonic()
 

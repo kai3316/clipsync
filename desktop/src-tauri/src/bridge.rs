@@ -288,6 +288,8 @@ pub struct Bridge {
     ready: watch::Sender<Option<Result<(), BridgeError>>>,
     session: Mutex<Option<String>>,
     stopping: std::sync::atomic::AtomicBool,
+    /// Set once [`Bridge::stop`] has finished; see [`Bridge::is_stopped`].
+    stopped: std::sync::atomic::AtomicBool,
     /// The tail of what the sidecar wrote to stderr, for explaining a failure
     /// that carries no reason of its own. See `explain`.
     stderr: StderrTail,
@@ -396,8 +398,14 @@ impl Bridge {
             pending: Mutex::new(HashMap::new()),
             ready,
             session: Mutex::new(None),
-            stopping: std::sync::atomic::AtomicBool::new(false),
-            stderr: StderrTail::default(),
+        stopping: std::sync::atomic::AtomicBool::new(false),
+        // Set only once `stop()` has finished with the child, which is what
+        // tells "being stopped right now" apart from "already gone".  The
+        // difference matters to the host: replacing a bridge that is still
+        // tearing down would start a second sidecar over a data directory the
+        // first one has not released yet.
+        stopped: std::sync::atomic::AtomicBool::new(false),
+        stderr: StderrTail::default(),
             stderr_drain: Mutex::new(None),
         });
         let startup = bridge.clone();
@@ -712,6 +720,16 @@ impl Bridge {
         self.stopping.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Whether `stop()` has finished and this bridge can never answer again.
+    ///
+    /// Read by the host before it hands a cached bridge to a command. Unlike
+    /// [`Self::is_stopping`] this is false while a stop is still running, so a
+    /// command that arrives during one waits rather than starting a second
+    /// sidecar over a data directory the first has not released.
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub(crate) fn remote_error(value: &Value) -> BridgeError {
         // Built through the error's own constructor so it is marked as the
         // sidecar's: that side worded the sentence in the user's language, and
@@ -883,6 +901,8 @@ impl Bridge {
             let _ = child.wait().await;
         }
         self.fail(BridgeError::unavailable());
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

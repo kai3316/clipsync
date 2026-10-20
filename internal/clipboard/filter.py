@@ -365,10 +365,14 @@ class ContentFilter:
                 continue
             filtered_types[ct] = self._redact(self._inspectable_text(ct, data)).encode("utf-8")
 
+        # Hoisted: it parses the offer once per call and does not depend on the
+        # format being looked at, but it sat inside the loop below and was
+        # re-evaluated (re-parsing the offer JSON) for every non-text format.
+        offered_names_sensitive = self._offered_names_sensitive(content)
         for ct, data in content.types.items():
             if ct in self._textual_types():
                 continue
-            if ct in HISTORY_ONLY_TYPES and self._offered_names_sensitive(content):
+            if ct in HISTORY_ONLY_TYPES and offered_names_sensitive:
                 # Nothing in this payload can be edited into something safe —
                 # the file arrives under its real name whatever the offer says
                 # — so an offer whose names match takes the whole offer off the

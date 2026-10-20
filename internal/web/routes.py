@@ -64,6 +64,13 @@ logger = logging.getLogger(__name__)
 UPDATE_CHECK_WALL_BOUND = 8.0
 
 
+# A staged chat upload that was never sent is cleared after this long.  Only
+# an explicit failure used to unlink the file: an upload the client followed
+# with /api/chat/file, or never followed at all, stayed in the system temp
+# directory for as long as the machine ran.
+CHAT_TMP_MAX_AGE = 3600.0
+
+
 def _chat_tmp_dir() -> str:
     """Return the directory purpose=chat web uploads land in (temp only).
 
@@ -76,7 +83,23 @@ def _chat_tmp_dir() -> str:
 
     d = os.path.join(tempfile.gettempdir(), "clipsync_chat_uploads")
     os.makedirs(d, exist_ok=True)
+    _prune_chat_tmp(d)
     return d
+
+
+def _prune_chat_tmp(d: str) -> None:
+    """Drop staged chat uploads nobody picked up.  Best effort, never raises."""
+    try:
+        cutoff = time.time() - CHAT_TMP_MAX_AGE
+        for name in os.listdir(d):
+            path = os.path.join(d, name)
+            try:
+                if os.path.isfile(path) and os.stat(path).st_mtime < cutoff:
+                    os.unlink(path)
+            except OSError:
+                continue
+    except OSError:
+        logger.debug("Could not sweep staged chat uploads", exc_info=True)
 
 
 def _json_response(data, status=200):
@@ -811,6 +834,11 @@ def _dispatch(
                     {"ok": False, "error": "only http/https URLs are allowed"}, 400
                 )
             target_device = data.get("device_id", "")
+            if not isinstance(target_device, str):
+                # A JSON object or list here used to reach the `[:12]` slice in
+                # the log line below and answer 500 on a request that was
+                # otherwise well formed.
+                return _json_response({"ok": False, "error": "invalid device_id"}, 400)
             if target_device and target_device != cfg.device_id and on_nav_url:
                 on_nav_url(url, target_device)
             else:

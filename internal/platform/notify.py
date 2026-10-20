@@ -4,6 +4,9 @@ import threading
 
 logger = logging.getLogger(__name__)
 
+# How long to wait for the pipe-sender thread to leave.  See _stop_sender.
+_SENDER_JOIN_TIMEOUT = 5.0
+
 
 class NotificationManager:
     def __init__(self):
@@ -59,6 +62,14 @@ class NotificationManager:
                 q.put((None, None))  # sentinel stops the loop
             except Exception:
                 pass
+            # Waited for, not merely signalled: the point of stopping it is
+            # that nothing writes to the old pipe afterwards.  A caller that
+            # swaps in a new pipe while the old thread is mid-write interleaves
+            # two senders on one file descriptor, which is exactly what the
+            # write lock in send_pipe cannot protect against.
+            thread.join(timeout=_SENDER_JOIN_TIMEOUT)
+            if thread.is_alive():
+                logger.warning("Notification pipe sender did not stop in time")
 
     def send_pipe(self, msg):
         """Send a picklable message over the macOS tray pipe, thread-safely.

@@ -373,17 +373,24 @@ class UpdateService:
     def _download_worker(self) -> None:
         dest_dir = tempfile.mkdtemp(prefix="clipsync_update_")
         try:
-            path, reason, version = updater.download_latest_release(
-                dest_dir, progress_cb=self._on_progress
-            )
-        except Exception as exc:
-            logger.exception("Update download failed")
-            path, reason, version = None, str(exc), ""
+            try:
+                path, reason, version = updater.download_latest_release(
+                    dest_dir, progress_cb=self._on_progress
+                )
+            except Exception as exc:
+                logger.exception("Update download failed")
+                path, reason, version = None, str(exc), ""
+            finally:
+                with self._lock:
+                    self._downloading = False
+            self._pending_version = version
+            self._finish(path, reason, "github")
         finally:
-            with self._lock:
-                self._downloading = False
-        self._pending_version = version
-        self._finish(path, reason, "github")
+            # The staging directory is only a waypoint: a successful download
+            # moves its file out, a failed one leaves a fragment behind, and
+            # either way the directory itself was never removed — one leaked
+            # temp directory per update check, for the life of the machine.
+            shutil.rmtree(dest_dir, ignore_errors=True)
 
     def finish_from_peer(
         self,
