@@ -2,13 +2,17 @@
 
 import contextlib
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
 
+from internal.application.use_cases.search import matcher as query_matcher
 from internal.config.config import _config_dir
 from internal.data.favorites_export import build_favorites_export as _build_favorites_export
 from internal.infrastructure.persistence.favorites import FavoritesRepository
+
+logger = logging.getLogger(__name__)
 
 _FAV_DB_PATH: str | None = None
 
@@ -68,10 +72,55 @@ def _string(data, name):
     return value
 
 
-def get_favorites():
+def get_favorites(query_str=None, group_str=None):
+    """The favourites library, optionally narrowed the way the window narrows it.
+
+    ``?q=`` searches a favourite's title and body; ``?group=`` keeps one group.
+    The matching is the window's own (``FavoritesUseCase.list``), so the phone
+    and the window agree on which rows a word finds.  The response keeps the
+    *full* body rather than the window's 256-char preview, because the phone
+    has no detail view to fetch it from.
+
+    ``total`` counts the matches and ``library_total`` the whole library, so a
+    phone can tell "this group is empty" from "nothing matches".
+    """
     try:
-        return {"favorites": _load_favorites()}, 200
+        repository = _repository()
+        entries = [_legacy_entry(entry) for entry in repository.get_all()]
+        groups = sorted(
+            {entry["group"] for entry in entries if entry.get("group")}
+            | set(repository.group_names())
+        )
+        group = str(group_str or "").strip()
+        # Same rule as the window's own favourites box — every term must be
+        # found, in the title or the body (see ``use_cases.search``).  Written
+        # against the shared module rather than repeated here, because the two
+        # boxes are the same box on two screens.
+        hit = query_matcher(query_str)
+        matches = [
+            entry
+            for entry in entries
+            if (not group or entry.get("group", "") == group)
+            and hit(entry.get("title", ""), entry.get("content", ""))
+        ]
+        # Counts stay over the whole library, not over the search: a count
+        # that moved while the reader typed would answer a question they did
+        # not ask.
+        group_counts = {name: 0 for name in groups}
+        for entry in entries:
+            if entry.get("group"):
+                group_counts[entry["group"]] = group_counts.get(entry["group"], 0) + 1
+        return {
+            "favorites": matches,
+            "total": len(matches),
+            "library_total": len(entries),
+            "groups": groups,
+            "group_counts": group_counts,
+        }, 200
     except Exception:
+        # A warning rather than an error: the route has already answered, and
+        # an unreadable favourites file on one machine is not an outage.
+        logger.warning("favorites list failed", exc_info=True)
         return {"ok": False, "error": "database error"}, 500
 
 

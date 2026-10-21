@@ -94,6 +94,11 @@ vi.mock("../src/api/bridge", () => ({
     phoneChatSend: vi.fn().mockResolvedValue({ ok: true }),
     phoneChatRead: vi.fn().mockResolvedValue({ ok: true }),
     companionRemoteStatus: vi.fn().mockResolvedValue({ enabled: true, token_set: true }),
+    // Saving remote access resolves with the status read that follows it, so
+    // the default answer is the same shape with the relays it kept.
+    companionRemoteConfigure: vi.fn().mockResolvedValue({ enabled: true, mode: "readonly",
+      brokers: [], default_brokers: [], page_url: "", token_set: true, connected: false,
+      broker: "", phone_online: false, phone_id: "", last_seen: 0, rx: 0, tx: 0, error: "" }),
     markChatRead: vi.fn().mockResolvedValue({ ok: true }),
     // "Connecting" is the quietest answer the invite can give: the sidecar
     // answers before its dial finishes, so a case about the row's own state
@@ -650,7 +655,7 @@ describe("history rendering", () => {
   it("requires confirmation to rotate the Companion token without applying an edited port", async () => {
     HTMLDialogElement.prototype.showModal = vi.fn();
     HTMLDialogElement.prototype.close = vi.fn();
-    const remote = { enabled: false, token_set: true, mode: "readonly" as const, brokers: [], page_url: "", connected: false, broker: "", phone_online: false, phone_id: "", last_seen: 0, rx: 0, tx: 0, error: "" };
+    const remote = { enabled: false, token_set: true, mode: "readonly" as const, brokers: [], default_brokers: [], page_url: "", connected: false, broker: "", phone_online: false, phone_id: "", last_seen: 0, rx: 0, tx: 0, error: "" };
     const running = { enabled: true, running: true, port: 8080, state: "running", access_url: "old-url", url: "old-url-plain", remote };
     vi.mocked(bridge.companionStatus).mockReset().mockResolvedValue(running);
     vi.mocked(bridge.configureCompanion).mockReset().mockResolvedValue({ ...running, access_url: "new-url" });
@@ -673,6 +678,56 @@ describe("history rendering", () => {
       await flushPromises();
       expect(bridge.configureCompanion).toHaveBeenCalledExactlyOnceWith(true, 8080, true, false);
       expect((app.get('[aria-label="手机访问地址"]').element as HTMLInputElement).value).toBe("new-url");
+    } finally { app.unmount(); }
+  });
+
+  it("saves the rest of the remote settings with the relay box left empty", async () => {
+    // The relay box is one field of four.  Disabling the only save button while
+    // it was empty meant clearing it to paste a new list also locked the page
+    // address and the permissions out of being saved -- and the sidecar has its
+    // own complaint for a request that carries no relay at all, which is the
+    // one the reader should get to see.
+    const remote = { enabled: true, token_set: true, mode: "readonly" as const,
+      brokers: ["wss://one.example:8084/mqtt"], default_brokers: ["wss://one.example:8084/mqtt", "wss://two.example:8084/mqtt"],
+      page_url: "https://companion.example/", connected: false, broker: "", phone_online: false,
+      phone_id: "", last_seen: 0, rx: 0, tx: 0, error: "" };
+    const running = { enabled: true, port: 8080, running: true, state: "running",
+      access_url: "old-url", url: "old-url-plain", remote };
+    vi.mocked(bridge.companionStatus).mockReset().mockResolvedValue({ ...running });
+    vi.mocked(bridge.companionRemoteConfigure).mockClear().mockResolvedValue({
+      ...remote, mode: "full", page_url: "https://saved.example/",
+      brokers: remote.default_brokers,
+    } as any);
+    vi.mocked(bridge.status).mockResolvedValue({ version: "test", health: "ready",
+      device_name: "Local", session_id: "s", seq: 0, sync_state: "not_started",
+      capabilities: ["companion.status"] } as any);
+    const app = mountOn("history");
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设备"]').trigger("click");
+      await flushPromises();
+      await openPanel(app, "手机 Companion");
+      await app.findAll("button").find(button => button.text() === "读取手机服务状态")!.trigger("click");
+      await flushPromises();
+      const box = app.get('[aria-label="中继服务器"]');
+      expect((box.element as HTMLInputElement).value).toBe("wss://one.example:8084/mqtt");
+      await box.setValue("");
+      const save = app.findAll("button").find(button => button.text() === "保存设置")!;
+      expect((save.element as HTMLButtonElement).disabled).toBe(false);
+      await save.trigger("click");
+      await flushPromises();
+      // No `brokers` key rather than an empty one: the save is silent about
+      // relays, which the sidecar reads as "keep the ones you have".
+      expect(vi.mocked(bridge.companionRemoteConfigure)).toHaveBeenCalledExactlyOnceWith(
+        expect.not.objectContaining({ brokers: expect.anything() }),
+      );
+      expect(vi.mocked(bridge.companionRemoteConfigure)).toHaveBeenCalledWith(
+        expect.objectContaining({ mode: "readonly", pageUrl: "https://companion.example/" }),
+      );
+      // A save that carried no relay list still has the last word on the box,
+      // so what the sidecar really holds is what is left on screen.
+      expect((app.get('[aria-label="中继服务器"]').element as HTMLInputElement).value)
+        .toBe("wss://one.example:8084/mqtt, wss://two.example:8084/mqtt");
     } finally { app.unmount(); }
   });
 
@@ -1133,10 +1188,10 @@ describe("history rendering", () => {
     expect(app.get('[aria-label="批量删除"]').attributes("disabled")).toBeDefined();
     await app.get('[aria-label="全选当前页"]').setValue(true);
     expect((app.get('[aria-label="选择记录 1"]').element as HTMLInputElement).checked).toBe(true);
-    await app.get('[aria-label="批量收藏"]').trigger("click");
+    await app.get('[aria-label="批量置顶"]').trigger("click");
     await flushPromises();
     expect(bridge.batchPinHistory).toHaveBeenLastCalledWith(["1"], true);
-    await app.get('[aria-label="批量取消收藏"]').trigger("click");
+    await app.get('[aria-label="批量取消置顶"]').trigger("click");
     await flushPromises();
     expect(bridge.batchPinHistory).toHaveBeenLastCalledWith(["1"], false);
     await app.get('[aria-label="批量删除"]').trigger("click");

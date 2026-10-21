@@ -257,6 +257,12 @@ header p { margin-top: 7px; font-size: 12px; }
 .toolbar select { max-width: 100%; min-width: 0; min-height: var(--control); padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
 .search { max-width: 420px; width: 100%; display: flex; align-items: center; gap: 8px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 0 12px; }
 .search input { border: 0; background: transparent; min-width: 0; width: 100%; height: var(--control); outline-offset: 0; }
+/* Out of the search box without selecting its contents and deleting them —
+   the one control in the toolbar whose only route out was the keyboard.  Sized
+   to the glyph rather than to --control: it sits inside the field's height, and
+   a full-size button there reads as a second thing beside the field. */
+.search-clear { width: 20px; height: 20px; min-width: 20px; min-height: 0; padding: 0; border: 0; border-radius: 50%; color: var(--muted); flex-shrink: 0; }
+.search-clear:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent-text); }
 .icon-button { width: var(--control); height: var(--control); min-width: var(--control); padding: 0; flex-shrink: 0; }
 /* Two sizes of control, and this is the second one.  The window had four: the
    36px icon button, a 30px one for the AI card's inventories, a 28px one beside

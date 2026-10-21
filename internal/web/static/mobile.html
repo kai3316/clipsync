@@ -62,6 +62,7 @@ try {
   --danger: #FF4060;
   --border: rgba(100,140,200,0.08);
   --border-strong: rgba(100,140,200,0.16);
+  --mark: rgba(34,211,238,0.26);
   --radius: 12px;
   --radius-sm: 8px;
   --font: "SF Pro Display", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -272,6 +273,18 @@ body::before {
   font-size: 10px;
   color: var(--fg-subtle);
   font-family: var(--font-mono);
+}
+
+/* A searched row says why it survived.  A highlighter pen rather than a badge:
+   the words stay where they were read, and the colour is a wash the text sits
+   on, so a row of matches does not turn into a row of labels. */
+.h-item__text mark,
+.fav-item__title mark,
+.fav-item__preview mark {
+  background: var(--mark);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
 }
 
 /* ── Send panel ─────────────────────────────────────────────── */
@@ -497,6 +510,7 @@ body.light {
   --danger: #BE123C;
   --border: rgba(30,50,90,0.10);
   --border-strong: rgba(30,50,90,0.18);
+  --mark: rgba(250,204,21,0.45);
 }
 
 body.light .header {
@@ -912,6 +926,140 @@ body.light .upload-btn {
 }
 .hist-clear:active { border-color: var(--danger); color: var(--danger); }
 
+/* ── History search + kind chips ────────────────────────────── */
+
+.hist-tools, .fav-tools { margin-bottom: 10px; }
+
+/* ── Relay status (remote mode) ─────────────────────────────── */
+
+.relay-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(251,191,36,0.35);
+  background: rgba(251,191,36,0.12);
+  color: #FBBF24;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+.relay-bar--ok {
+  border-color: rgba(0,229,153,0.35);
+  background: rgba(0,229,153,0.12);
+  color: var(--success);
+}
+.relay-bar__spinner {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: relay-spin 900ms linear infinite;
+}
+@keyframes relay-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .relay-bar__spinner { animation: none; opacity: 0.7; }
+}
+
+.search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  transition: border-color var(--fast);
+}
+.search-field:focus-within { border-color: var(--accent); }
+
+.search-field__icon { font-size: 13px; opacity: 0.7; flex-shrink: 0; }
+
+.search-field input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  /* ≥16px so iOS Safari does not auto-zoom when the field is focused. */
+  font-size: 16px;
+  font-family: var(--font);
+  outline: none;
+  -webkit-user-select: text;
+  /* The platform's own search-field chrome (WebKit's cancel button) is
+     replaced by .search-field__clear so both platforms look the same. */
+  -webkit-appearance: none;
+  appearance: none;
+}
+.search-field input::-webkit-search-cancel-button { display: none; }
+.search-field input::placeholder { color: var(--fg-subtle); }
+
+.search-field__clear {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--panel-2);
+  color: var(--fg-muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.search-field__clear[hidden] { display: none; }
+
+.chip-rail {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  overflow-x: auto;
+  /* Horizontal chip rail: no wrap, no scrollbar, and the last chip keeps its
+     full padding instead of being clipped by the scroll container. */
+  padding-bottom: 2px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.chip-rail::-webkit-scrollbar { display: none; }
+
+.chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 34px;
+  padding: 5px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 17px;
+  background: var(--panel);
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: all var(--fast);
+}
+.chip--active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-glow);
+}
+.chip:disabled { opacity: 0.4; cursor: default; }
+.chip__count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-subtle);
+}
+.chip--active .chip__count { color: var(--accent); opacity: 0.8; }
+.chip--sort { margin-left: auto; }
+
 /* ── Item modal: per-item utility row ───────────────────────── */
 
 .modal__utils {
@@ -933,12 +1081,28 @@ body.light .upload-btn {
   font-family: var(--font);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  /* Four of these share one row on a phone, so a label has to stay on one
+     line: wrapped, the shortest button becomes the tallest thing in the sheet
+     and the row changes height between clips. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: all var(--fast);
 }
 .modal__util:active { border-color: var(--accent); }
 .modal__util--danger { color: var(--danger); }
 .modal__util--danger:active { border-color: var(--danger); background: rgba(255,64,96,0.08); }
 .modal__util:disabled { opacity: 0.45; }
+
+/* The open button's label is fixed at two characters ("打开"), while the pin
+   one flips to "取消置顶" on a clip that is already pinned — four.  Sharing the
+   row in equal parts would ellipsise the long label on a 320 px screen, so
+   this button takes just its own width and the other three split the rest. */
+#histOpenBtn {
+  flex: 0 0 auto;
+  padding-left: 10px;
+  padding-right: 10px;
+}
 
 .modal__actions + .modal__actions { margin-top: 8px; }
 
@@ -1164,6 +1328,7 @@ body.light .upload-btn {
 
 .empty__icon { font-size: 34px; opacity: 0.45; }
 .empty__text { font-size: 13px; color: var(--fg-muted); font-weight: 500; }
+.empty__hint { font-size: 12px; color: var(--fg-subtle); font-weight: 400; }
 
 .skeleton {
   height: 52px;
@@ -1364,6 +1529,7 @@ body.light .upload-btn {
     --danger: #b3261e;
     --border: #d6e0da;
     --border-strong: #bccbc3;
+    --mark: rgba(202,158,20,0.32);
   }
 
   /* The old page leaned on glows and gradients for hierarchy; the desktop
@@ -1416,12 +1582,25 @@ body.light .upload-btn {
     <button class="tab" data-tab="settings" id="tabSettings"></button>
   </nav>
 
+  <!-- Remote mode only: what the relay tunnel is doing right now.  Hidden in
+       LAN mode, where there is no relay to report on. -->
+  <div class="relay-bar" id="relayBar" style="display:none" role="status" aria-live="polite"></div>
+
   <main class="content">
 
     <!-- History -->
     <section class="panel panel--active" id="panelHistory">
       <div class="hist-bar" id="histBar" style="display:none">
         <button class="hist-clear" id="histClearBtn"></button>
+      </div>
+      <div class="hist-tools" id="histTools" style="display:none">
+        <div class="search-field">
+          <span class="search-field__icon" aria-hidden="true">🔍</span>
+          <input id="histSearch" type="search" autocomplete="off" enterkeyhint="search"
+                 spellcheck="false" placeholder="" aria-label="">
+          <button class="search-field__clear" id="histSearchClear" type="button" hidden>×</button>
+        </div>
+        <div class="chip-rail" id="histChips" role="group" aria-label=""></div>
       </div>
       <div id="historyList"></div>
     </section>
@@ -1457,6 +1636,15 @@ body.light .upload-btn {
 
     <!-- Favorites -->
     <section class="panel" id="panelFavorites">
+      <div class="fav-tools" id="favTools" style="display:none">
+        <div class="search-field">
+          <span class="search-field__icon" aria-hidden="true">🔍</span>
+          <input id="favSearch" type="search" autocomplete="off" enterkeyhint="search"
+                 spellcheck="false" placeholder="" aria-label="">
+          <button class="search-field__clear" id="favSearchClear" type="button" hidden>×</button>
+        </div>
+        <div class="chip-rail" id="favChips" role="group" aria-label=""></div>
+      </div>
       <button class="fav-export" id="favExportBtn" style="display:none"></button>
       <div id="favoritesList"></div>
     </section>
@@ -1475,10 +1663,12 @@ body.light .upload-btn {
     <div class="modal__title" id="modalTitle"></div>
     <img class="modal__image" id="modalImage" alt="" style="display:none">
     <div class="modal__text" id="modalText"></div>
-    <!-- Per-item actions (desktop context-menu parity): pin / favorite /
-         delete on a compact row, then the full-width push-to-desktop
-         primary, then the original close/copy pair. -->
+    <!-- Per-item actions (desktop context-menu parity): open (only for a clip
+         that is a link) / pin / favorite / delete on a compact row, then the
+         full-width push-to-desktop primary, then the original close/copy
+         pair. -->
     <div class="modal__utils" id="modalUtils">
+      <button class="modal__util" id="histOpenBtn"></button>
       <button class="modal__util" id="histPinBtn"></button>
       <button class="modal__util" id="histFavBtn"></button>
       <button class="modal__util modal__util--danger" id="histDelBtn"></button>
@@ -1676,6 +1866,14 @@ body.light .upload-btn {
     favDeleteConfirm: ZH ? '删除这条收藏？' : 'Delete this favorite?',
     favDeleteFail: ZH ? '删除失败' : 'Failed to delete',
     favExport: ZH ? '⬇️ 导出全部为 Markdown' : '⬇️ Export all as Markdown',
+    favSearch: ZH ? '搜索收藏' : 'Search favorites',
+    favClearSearch: ZH ? '清除搜索' : 'Clear search',
+    favFilterLabel: ZH ? '按分组筛选收藏' : 'Filter favorites by group',
+    favGroupAll: ZH ? '全部' : 'All',
+    favNoMatch: ZH ? '没有匹配的收藏' : 'No favorites match',
+    favNoMatchHint: ZH
+      ? '多个关键词用空格分隔（需同时包含），或点「全部」看所有收藏。'
+      : 'Spaces separate terms and all must match, or tap All to see everything.',
     favExportDone: ZH ? '✓ 已导出 {n} 条收藏' : '✓ Exported {n} favorites',
     favExportFail: ZH ? '导出失败' : 'Export failed',
     setDeviceName: ZH ? '设备名称' : 'Device name',
@@ -1690,11 +1888,42 @@ body.light .upload-btn {
     histClearConfirm: ZH ? '清空全部剪贴板历史？此操作不可撤销。' : 'Clear ALL clipboard history? This cannot be undone.',
     histCleared: ZH ? '✓ 已清空' : '✓ Cleared',
     histClearFail: ZH ? '清空失败' : 'Failed to clear',
-    histPin: ZH ? '📌 固定' : '📌 Pin',
-    histUnpin: ZH ? '📍 取消固定' : '📍 Unpin',
-    histPinnedToast: ZH ? '✓ 已固定，将置顶显示' : '✓ Pinned to top',
-    histUnpinnedToast: ZH ? '✓ 已取消固定' : '✓ Unpinned',
-    histPinFail: ZH ? '固定失败' : 'Pin failed',
+    histSearch: ZH ? '搜索历史' : 'Search history',
+    histClearSearch: ZH ? '清除搜索' : 'Clear search',
+    histFilterLabel: ZH ? '按类型筛选历史记录' : 'Filter history by type',
+    histKindAll: ZH ? '全部' : 'All',
+    histKindText: ZH ? '文本' : 'Text',
+    histKindImage: ZH ? '图片' : 'Images',
+    histKindFile: ZH ? '文件' : 'Files',
+    histKindLink: ZH ? '链接' : 'Links',
+    histSortNewest: ZH ? '↓ 最新优先' : '↓ Newest',
+    histSortOldest: ZH ? '↑ 最旧优先' : '↑ Oldest',
+    relayConnecting: ZH ? '正在连接中继（{n}/{m}）…' : 'Connecting to relay ({n}/{m})…',
+    relayRetrying: ZH ? '中继暂时连不上，{s} 秒后重试' : 'Relay unreachable, retrying in {s}s',
+    relayReasonTimeout: ZH ? '连接超时' : 'timed out',
+    relayReasonRefused: ZH ? '被拒绝' : 'refused',
+    relayReasonClosed: ZH ? '连接断开' : 'disconnected',
+    relayReasonStale: ZH ? '无响应' : 'no response',
+    relayReasonOpen: ZH ? '无法打开' : 'could not open',
+    relayOnline: ZH ? '中继已连接' : 'Relay connected',
+    histNoMatch: ZH ? '没有匹配的历史记录' : 'No history matches',
+    // The only place the multi-term rule is explained, and the right place: it
+    // is a dead end that a rule the user did not know about can create.  Two
+    // words now have to *both* be there, which is what makes the hint worth the
+    // line rather than a "try another word" that repeats the problem.
+    histNoMatchHint: ZH
+      ? '多个关键词用空格分隔（需同时包含），或点「全部」看所有记录。'
+      : 'Spaces separate terms and all must match, or tap All to see everything.',
+    histPin: ZH ? '📌 置顶' : '📌 Pin to top',
+    histUnpin: ZH ? '📍 取消置顶' : '📍 Unpin',
+    histPinnedToast: ZH ? '✓ 已置顶' : '✓ Pinned to top',
+    histUnpinnedToast: ZH ? '✓ 已取消置顶' : '✓ Unpinned',
+    // A copied URL is the one clip a phone is expected to act on rather than
+    // read: the text is unselectable on this page (body is user-select:none),
+    // so without this the only ways out were the copy button and the desktop.
+    histOpenLink: ZH ? '🔗 打开' : '🔗 Open',
+    histOpenFail: ZH ? '这条内容不是可打开的链接' : 'This clip is not an openable link',
+    histPinFail: ZH ? '置顶失败' : 'Pin failed',
     histPush: ZH ? '📤 推送到电脑剪贴板' : '📤 Push to computer clipboard',
     histPushOk: ZH ? '✓ 已写入电脑剪贴板' : '✓ Written to the computer clipboard',
     histPushFail: ZH ? '推送失败' : 'Push failed',
@@ -1752,6 +1981,10 @@ body.light .upload-btn {
   // Remote mode cannot carry an upload body yet (and should not pretend it
   // can).  Hide the two entry points that would only fail; downloads, history
   // and the relay chat stay available.
+  // Declared before the subscription below, which may fire synchronously with
+  // the state the tunnel is already in.
+  var relayHideTimer = null;
+
   if (window.__CLIPSYNC_REMOTE__) {
     var remoteSettingsTab = document.getElementById('tabSettings');
     if (remoteSettingsTab) remoteSettingsTab.style.display = 'none';
@@ -1759,6 +1992,59 @@ body.light .upload-btn {
     if (remoteUploadBtn) remoteUploadBtn.style.display = 'none';
     var remoteFileInput = document.getElementById('fileInput');
     if (remoteFileInput) remoteFileInput.disabled = true;
+    // What the tunnel is doing, which is not something the page's two states
+    // (loaded / "load failed") could express: a phone still dialling relay #2
+    // used to look exactly like a computer that was switched off.
+    if (typeof window.__CLIPSYNC_REMOTE__.onState === 'function') {
+      window.__CLIPSYNC_REMOTE__.onState(showRelayState);
+    }
+  }
+
+  function relayReasonLabel(reason) {
+    return {
+      timeout: T.relayReasonTimeout,
+      refused: T.relayReasonRefused,
+      closed: T.relayReasonClosed,
+      stale: T.relayReasonStale,
+      open: T.relayReasonOpen,
+    }[reason] || '';
+  }
+
+  function relayLabel(info) {
+    if (!info) return '';
+    if (info.state === 'connecting') {
+      return T.relayConnecting
+        .replace('{n}', String(info.index || 1))
+        .replace('{m}', String(info.total || 1));
+    }
+    if (info.state === 'retrying') {
+      var text = T.relayRetrying.replace('{s}', String(info.delay || 0));
+      var why = relayReasonLabel(info.reason);
+      return why ? text + ' · ' + why : text;
+    }
+    if (info.state === 'online') return '✓ ' + T.relayOnline;
+    return '';
+  }
+
+  function showRelayState(info) {
+    var bar = document.getElementById('relayBar');
+    if (!bar || !info) return;
+    if (relayHideTimer) { clearTimeout(relayHideTimer); relayHideTimer = null; }
+    if (info.state === 'online') {
+      // Connected is the normal state: say so once, then get out of the way so
+      // a green band does not read as something that needs attention.
+      bar.className = 'relay-bar relay-bar--ok';
+      bar.textContent = relayLabel(info);
+      bar.style.display = 'flex';
+      relayHideTimer = setTimeout(function () { bar.style.display = 'none'; }, 2200);
+      return;
+    }
+    var text = relayLabel(info);
+    if (!text) { bar.style.display = 'none'; return; }
+    bar.className = 'relay-bar';
+    bar.innerHTML = '<span class="relay-bar__spinner" aria-hidden="true"></span><span></span>';
+    bar.lastChild.textContent = text;
+    bar.style.display = 'flex';
   }
   document.getElementById('tabHistory').textContent = T.tabHistory;
   document.getElementById('tabSend').textContent = T.tabSend;
@@ -1775,6 +2061,16 @@ body.light .upload-btn {
   document.getElementById('modalClose').textContent = T.close;
   document.getElementById('modalCopy').textContent = T.copy;
   document.getElementById('histClearBtn').textContent = T.histClear;
+  document.getElementById('histSearch').placeholder = T.histSearch;
+  document.getElementById('histSearch').setAttribute('aria-label', T.histSearch);
+  document.getElementById('histSearchClear').setAttribute('aria-label', T.histClearSearch);
+  document.getElementById('histSearchClear').title = T.histClearSearch;
+  document.getElementById('histChips').setAttribute('aria-label', T.histFilterLabel);
+  document.getElementById('favSearch').placeholder = T.favSearch;
+  document.getElementById('favSearch').setAttribute('aria-label', T.favSearch);
+  document.getElementById('favSearchClear').setAttribute('aria-label', T.favClearSearch);
+  document.getElementById('favSearchClear').title = T.favClearSearch;
+  document.getElementById('favChips').setAttribute('aria-label', T.favFilterLabel);
   document.title = T.title;
 
   /* ── DOM refs ──────────────────────────────────────────────── */
@@ -1784,11 +2080,19 @@ body.light .upload-btn {
   var historyList = document.getElementById('historyList');
   var histBar = document.getElementById('histBar');
   var histClearBtn = document.getElementById('histClearBtn');
+  var histTools = document.getElementById('histTools');
+  var histSearch = document.getElementById('histSearch');
+  var histSearchClear = document.getElementById('histSearchClear');
+  var histChips = document.getElementById('histChips');
   var fileList = document.getElementById('fileList');
   var chatView = document.getElementById('chatView');
   var transfersView = document.getElementById('transfersView');
   var favoritesList = document.getElementById('favoritesList');
   var favExportBtn = document.getElementById('favExportBtn');
+  var favTools = document.getElementById('favTools');
+  var favSearch = document.getElementById('favSearch');
+  var favSearchClear = document.getElementById('favSearchClear');
+  var favChips = document.getElementById('favChips');
   var favExportBusy = false;
   var settingsView = document.getElementById('settingsView');
   var toastEl = document.getElementById('toast');
@@ -1797,6 +2101,7 @@ body.light .upload-btn {
   var modalTitle = document.getElementById('modalTitle');
   var modalImage = document.getElementById('modalImage');
   var modalCopyBtn = document.getElementById('modalCopy');
+  var histOpenBtn = document.getElementById('histOpenBtn');
   var histPinBtn = document.getElementById('histPinBtn');
   var histFavBtn = document.getElementById('histFavBtn');
   var histDelBtn = document.getElementById('histDelBtn');
@@ -1849,7 +2154,7 @@ body.light .upload-btn {
       if (name === 'files') loadFiles();
       if (name === 'chat') loadChat();
       if (name === 'transfers') loadTransfers();
-      if (name === 'favorites') loadFavorites();
+      if (name === 'favorites') reloadFavorites();
       if (name === 'settings') loadSettings();
     });
   });
@@ -2034,9 +2339,253 @@ body.light .upload-btn {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  /* ── What a search box read, and the marks it leaves ─────────
+     The server owns the verdict (internal/application/use_cases/search.py):
+     whitespace separates terms, every term must be found, a quoted run counts
+     as one phrase.  This is the same reading for the one thing the server
+     cannot do — mark the words that made the row survive.  It matters because
+     a term may match a field the row does not show in the same place: the
+     words sit in the body, the application name in the meta line, so without
+     the mark a searched list reads as an arbitrary rearrangement of rows. */
+  var SEARCH_OPENERS = { '"': '"', '\u201c': '\u201d' };
+
+  function searchTerms(query) {
+    var text = String(query == null ? '' : query);
+    var out = [];
+    var buf = '';
+    var closer = '';
+    for (var i = 0; i < text.length; i++) {
+      var ch = text.charAt(i);
+      if (closer) {
+        if (ch === closer) {
+          if (buf) out.push(buf);
+          buf = '';
+          closer = '';
+        } else {
+          buf += ch;
+        }
+        continue;
+      }
+      if (SEARCH_OPENERS[ch]) {
+        if (buf) out.push(buf);
+        buf = '';
+        closer = SEARCH_OPENERS[ch];
+        continue;
+      }
+      // /\s/ already covers the full-width space an IME inserts.
+      if (ch === '\u201d' || /\s/.test(ch)) {
+        if (buf) out.push(buf);
+        buf = '';
+        continue;
+      }
+      buf += ch;
+    }
+    if (buf) out.push(buf);
+    return out
+      .map(function (term) { return term.toLowerCase(); })
+      .filter(function (term) { return !!term; });
+  }
+
+  // Escape everything but the terms: the text comes from a clipboard, so it is
+  // built as HTML only after every sliver has been through esc().  Longer terms
+  // are tried first so "note" inside "notes" does not win the split.
+  function highlightMarks(text, query) {
+    var raw = String(text == null ? '' : text);
+    var terms = searchTerms(query);
+    if (!terms.length) return esc(raw);
+    var pattern = terms
+      .slice()
+      .sort(function (a, b) { return b.length - a.length; })
+      .map(function (term) { return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); })
+      .join('|');
+    var re = new RegExp('(' + pattern + ')', 'gi');
+    var out = '';
+    var last = 0;
+    var match;
+    while ((match = re.exec(raw)) !== null) {
+      if (!match[0]) { re.lastIndex += 1; continue; }
+      out += esc(raw.slice(last, match.index)) + '<mark>' + esc(match[0]) + '</mark>';
+      last = match.index + match[0].length;
+    }
+    return out + esc(raw.slice(last));
+  }
+
   var historyLoading = false;
   var historyOffset = 0;
   var historyHasMore = true;
+  /* ── History search / kind / sort ─────────────────────────────
+     The phone's own copy of the window's history toolbar.  The server owns
+     the filtering (GET /api/history?q=&kind=&sort=), so these three are only
+     the request's parameters: changing any of them invalidates every loaded
+     page and reloads from offset 0.  `historyCounts` is the server's chip
+     badges and `historyHasAny` is `has_history` — whether there is any clip
+     at all, which is what keeps the chip rail on screen when a search
+     matches nothing. */
+  var historyQuery = '';
+  var historyKind = 'all';
+  var historySort = 'newest';
+  var historyCounts = null;
+  var historyHasAny = false;
+  /* Which request owns `historyItems`.  A 5s poll can still be in flight when
+     the reader changes the filter; that request is about the filter they just
+     left, so its rows are exactly the ones being filtered out.  Bumped by every
+     filter change and by every request sent, so an answer only writes if it is
+     still the newest. */
+  var historyRequestId = 0;
+  /* A filter change that arrived while a request was in flight.  `loadHistory`
+     refuses to overlap requests, so the change would otherwise be dropped and
+     wait for the next poll — up to five seconds of a chip that lies. */
+  var historyReloadPending = false;
+  var HIST_KINDS = [
+    { id: 'all', label: 'histKindAll', icon: '' },
+    { id: 'text', label: 'histKindText', icon: '' },
+    { id: 'image', label: 'histKindImage', icon: '' },
+    { id: 'file', label: 'histKindFile', icon: '' },
+    { id: 'link', label: 'histKindLink', icon: '' }
+  ];
+
+  // Every history GET goes through here so the calibration download and the
+  // load-more request cannot silently drop the active filter.
+  function historyUrl(opts) {
+    opts = opts || {};
+    var parts = ['limit=' + (opts.limit != null ? opts.limit : 30)];
+    if (opts.offset) parts.push('offset=' + opts.offset);
+    if (historyQuery) parts.push('q=' + encodeURIComponent(historyQuery));
+    if (historyKind && historyKind !== 'all') parts.push('kind=' + encodeURIComponent(historyKind));
+    if (historySort && historySort !== 'newest') parts.push('sort=' + encodeURIComponent(historySort));
+    return '/api/history?' + parts.join('&');
+  }
+
+  function historyFilterActive() {
+    return !!historyQuery || historyKind !== 'all' || historySort !== 'newest';
+  }
+
+  // Drop every loaded row and reload page 1.  Called when the query, the chip
+  // or the sort changes: the pages already in `historyItems` belong to the
+  // previous filter, so keeping them would show rows the filter excludes.
+  function reloadHistoryFromStart() {
+    historyItems.splice(0, historyItems.length);
+    historyOffset = 0;
+    historyHasMore = true;
+    _lastCalibMobile = null;
+    // Retire the request in flight before asking for a new one: whatever it is
+    // carrying belongs to the filter the reader just left, and applying it
+    // would put rows back that this filter excludes — and drag the chip
+    // highlight back to what the server echoed.
+    historyRequestId += 1;
+    historyReloadPending = true;
+    // Draw the empty list now.  The rows on screen are indexed against
+    // `historyItems`, which is empty from the line above: leaving them up until
+    // a request lands leaves live-looking rows that open nothing (`openItem`
+    // would read `historyItems[i]` as undefined), and a load that has to wait
+    // for an in-flight poll to finish would leave them up for seconds.
+    renderHistory();
+    loadHistory();
+  }
+
+  /* The rail is built once and then only updated.
+     It used to be rebuilt on every response — including the 5 second poll —
+     and the rebuild cost two things the reader had already chosen: the rail's
+     horizontal position (six chips do not fit on a phone, so it is scrolled)
+     and keyboard focus, which fell back to the body mid-tap.  Only the counts
+     and the highlight can actually change, so only they are written. */
+  var historyChipNodes = null;
+  var historySortNode = null;
+
+  function buildHistoryChips() {
+    historyChipNodes = {};
+    histChips.innerHTML = '';
+    HIST_KINDS.forEach(function (chip) {
+      var el = document.createElement('button');
+      el.type = 'button';
+      var label = document.createElement('span');
+      label.textContent = T[chip.label];
+      var countEl = document.createElement('span');
+      countEl.className = 'chip__count';
+      countEl.style.display = 'none';
+      el.appendChild(label);
+      el.appendChild(countEl);
+      el.addEventListener('click', function () {
+        if (historyKind === chip.id) return;
+        historyKind = chip.id;
+        renderHistoryChips();
+        reloadHistoryFromStart();
+      });
+      histChips.appendChild(el);
+      historyChipNodes[chip.id] = { el: el, countEl: countEl };
+    });
+    var sortEl = document.createElement('button');
+    sortEl.type = 'button';
+    sortEl.className = 'chip chip--sort';
+    sortEl.title = ZH ? '切换历史排序（最新 / 最旧）' : 'Toggle history order (newest / oldest)';
+    sortEl.addEventListener('click', function () {
+      historySort = historySort === 'newest' ? 'oldest' : 'newest';
+      renderHistoryChips();
+      reloadHistoryFromStart();
+    });
+    histChips.appendChild(sortEl);
+    historySortNode = sortEl;
+  }
+
+  function renderHistoryChips() {
+    // The rail needs something to filter: with no history at all there is no
+    // point to a chip row, so the whole toolbar hides with the list.
+    histTools.style.display = historyHasAny ? 'block' : 'none';
+    if (!historyHasAny) return;
+    if (!historyChipNodes) buildHistoryChips();
+    HIST_KINDS.forEach(function (chip) {
+      var node = historyChipNodes[chip.id];
+      if (!node) return;
+      var active = historyKind === chip.id;
+      // A chip whose count is 0 under the current search is still tappable —
+      // disabling it would strand the user on a filter they cannot switch
+      // away from if every other chip is also 0.
+      node.el.className = 'chip' + (active ? ' chip--active' : '');
+      node.el.setAttribute('aria-pressed', active ? 'true' : 'false');
+      var count = historyCounts ? historyCounts[chip.id] : null;
+      node.countEl.textContent = count == null ? '' : String(count);
+      // Hidden rather than empty: `.chip__count` carries its own spacing, and
+      // an empty one would sit there as a gap with nothing in it.
+      node.countEl.style.display = count == null ? 'none' : '';
+    });
+    historySortNode.textContent = historySort === 'newest' ? T.histSortNewest : T.histSortOldest;
+  }
+
+  var historySearchTimer = null;
+  histSearch.addEventListener('input', function () {
+    var value = histSearch.value || '';
+    histSearchClear.hidden = !value;
+    // Debounced: a 5s poll can land mid-typing, and one request per keystroke
+    // would race the poll for the same list.
+    if (historySearchTimer) clearTimeout(historySearchTimer);
+    historySearchTimer = setTimeout(function () {
+      historySearchTimer = null;
+      if (value.trim() === historyQuery) return;
+      historyQuery = value.trim();
+      reloadHistoryFromStart();
+    }, 250);
+  });
+  histSearch.addEventListener('search', function () {
+    // The platform's own "search" event (Enter, or WebKit's cancel button).
+    if (!histSearch.value) {
+      if (historySearchTimer) { clearTimeout(historySearchTimer); historySearchTimer = null; }
+      histSearchClear.hidden = true;
+      if (historyQuery) { historyQuery = ''; reloadHistoryFromStart(); }
+    }
+  });
+  histSearchClear.addEventListener('click', function () {
+    histSearch.value = '';
+    histSearchClear.hidden = true;
+    if (historySearchTimer) { clearTimeout(historySearchTimer); historySearchTimer = null; }
+    // Only the query: the button says "clear search", and a chip the reader
+    // picked on purpose is not part of what they asked to clear.
+    if (historyQuery) {
+      historyQuery = '';
+      reloadHistoryFromStart();
+    }
+    histSearch.focus();
+  });
+
   // Mobile has no store object, so it keeps its own copy of the load-more
   // cursor convention (offset = visible length pinned to total; hasMore =
   // length < total, preserved when total is unknown).  Keep in step with
@@ -2099,28 +2648,61 @@ body.light .upload-btn {
     return fresh.length;
   }
 
+  // Hand the single in-flight slot back, and say whether the response that just
+  // landed is still the one the list is waiting for.  A response that lost the
+  // race is dropped whole — not merged, and its echoed `kind`/`sort` not
+  // trusted — because the row it would add is filtered out by the chip the
+  // reader just chose, and the chip it would move back is the one they tapped.
+  function historySettled(requestId) {
+    historyLoading = false;
+    if (requestId !== historyRequestId) {
+      if (historyReloadPending) {
+        historyReloadPending = false;
+        loadHistory();
+      }
+      return false;
+    }
+    historyReloadPending = false;
+    return true;
+  }
+
   function loadHistory(silent, appendOffset) {
-    // Skip while a request is already in flight (poll ticks AND user-initiated
-    // loads) so slow responses can't overlap and render out of order.  A
-    // user-initiated load that arrives mid-flight simply waits for the next
-    // poll, which is already queued.
-    if (historyLoading) return;
+    // One request at a time (poll ticks, load-more and user-initiated loads all
+    // come through here), so slow responses cannot overlap and render out of
+    // order.  A load that arrives mid-flight leaves a note rather than
+    // disappearing: see `historyReloadPending`.
+    if (historyLoading) {
+      // Remember it rather than dropping it: a changed filter with nothing
+      // scheduled behind it is a list that stays empty until the next poll.
+      if (!silent) historyReloadPending = true;
+      return;
+    }
     historyLoading = true;
+    // The generation this response will be checked against when it lands.
+    var requestId = ++historyRequestId;
     var isAppend = (appendOffset !== undefined && appendOffset !== null);
     // Silent background refreshes and pagination appends keep the current list
     // on screen; only the user-initiated first load shows the skeleton.
     if (!silent && !isAppend) {
       historyList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
     }
-    var url = '/api/history?limit=30';
-    if (isAppend && appendOffset > 0) {
-      url += '&offset=' + appendOffset;
-    }
+    var url = historyUrl(isAppend && appendOffset > 0 ? { offset: appendOffset } : {});
     getJson(url)
       .then(function (data) {
-        historyLoading = false;
+        if (!historySettled(requestId)) return;
         var items = (data.items || []).slice(0, 30);
         var total = data.total != null ? data.total : null;
+        // The server's chip badges and "is there anything to filter".  Taken
+        // from every response, including appends, so the counts track rows
+        // added on the desktop while this page stays open.
+        if (data.counts) historyCounts = data.counts;
+        if (data.has_history != null) historyHasAny = !!data.has_history;
+        // Trust the server's echo over the local value: an unknown kind is
+        // answered as "all", and a chip highlighted for a filter the server
+        // ignored would be a lie.
+        if (data.kind) historyKind = data.kind;
+        if (data.sort) historySort = data.sort;
+        renderHistoryChips();
         if (isAppend) {
           // Append the next page, deduping against what is already loaded so a
           // raced poll + scroll can't show the same entry twice.
@@ -2169,8 +2751,17 @@ body.light .upload-btn {
               return;
             }
             historyLoading = true;
-            getJson('/api/history?limit=' + total)
+            // The calibration refetch must carry the active filter too, or it
+            // would replace a filtered list with every row on the machine.
+            getJson(historyUrl({ limit: total }))
               .then(function (calData) {
+                // The calibration is a second round trip, so the filter can
+                // have moved on inside it just as easily — and this branch
+                // rewrites the whole list from its answer.
+                if (requestId !== historyRequestId) {
+                  historyLoading = false;
+                  return;
+                }
                 historyLoading = false;
                 _lastCalibMobile = Date.now();
                 var calItems = (calData.items || []).slice(0, total);
@@ -2183,6 +2774,10 @@ body.light .upload-btn {
                 renderHistory();
               })
               .catch(function () {
+                if (requestId !== historyRequestId) {
+                  historyLoading = false;
+                  return;
+                }
                 historyLoading = false;
                 // Calibration failed — pin the cursor to min(length, total) so
                 // Load-more can't skip live entries (mirrors the shared
@@ -2209,7 +2804,7 @@ body.light .upload-btn {
         renderHistory();
       })
       .catch(function (err) {
-        historyLoading = false;
+        if (!historySettled(requestId)) return;
         // A 403 means the token this page was opened with is no longer valid
         // (it was regenerated / cleared) — tell the user to re-scan the QR
         // code, not to check Wi-Fi.  Surface it even on silent background
@@ -2229,19 +2824,38 @@ body.light .upload-btn {
     // The clear-all affordance only makes sense with something to clear.
     histBar.style.display = historyItems.length > 0 ? 'flex' : 'none';
     if (historyItems.length === 0) {
-      historyList.innerHTML = '<div class="empty"><div class="empty__icon">📋</div><div class="empty__text">' + esc(T.emptyHistory) + '</div></div>';
+      // "No history" and "nothing matches" are different dead ends: the first
+      // has nothing to suggest, the second has the filter itself as the way
+      // out, and the chip rail above is that way out.
+      if (historyFilterActive() && historyHasAny) {
+        historyList.innerHTML = '<div class="empty"><div class="empty__icon">🔍</div><div class="empty__text">' +
+          esc(T.histNoMatch) + '<br><span class="empty__hint">' + esc(T.histNoMatchHint) + '</span></div></div>';
+      } else {
+        historyList.innerHTML = '<div class="empty"><div class="empty__icon">📋</div><div class="empty__text">' + esc(T.emptyHistory) + '</div></div>';
+      }
       return;
     }
     historyList.innerHTML = '';
     historyItems.forEach(function (item, i) {
+      // `historyItems` is spliced empty the moment a filter changes, while the
+      // rows on screen live one more frame.  A hole in the array is not a row.
+      if (!item) return;
       var el = document.createElement('div');
       el.className = 'h-item';
       el.style.animation = 'none';
+      // Which machine this clip came from: the phone can be the only screen
+      // showing a history it did not capture, and "3 分钟前" alone does not
+      // say whether to look for it on the laptop or the desktop.
+      var source = (item.source_name || '').trim();
+      if (!source && item.source_device) source = String(item.source_device);
+      var meta = [];
+      if (source) meta.push(esc(source));
+      meta.push(esc(relTime(item.timestamp)));
       el.innerHTML =
         '<div class="h-item__icon">' + typeIcon(item.content_type) + '</div>' +
         '<div class="h-item__body">' +
-          '<div class="h-item__text">' + esc(previewText(item) || item.content_type || T.emptyPreview) + '</div>' +
-          '<div class="h-item__meta">' + (item.pinned ? '📌 ' : '') + esc(relTime(item.timestamp)) + '</div>' +
+          '<div class="h-item__text">' + highlightMarks(previewText(item) || item.content_type || T.emptyPreview, historyQuery) + '</div>' +
+          '<div class="h-item__meta">' + (item.pinned ? '📌 ' : '') + meta.join(' · ') + '</div>' +
         '</div>';
       el.addEventListener('click', function () { openItem(i); });
       historyList.appendChild(el);
@@ -2265,6 +2879,11 @@ body.light .upload-btn {
           historyItems.splice(0, historyItems.length);
           historyOffset = 0;
           historyHasMore = false;
+          // Nothing is left to filter, so the chip rail goes with the rows —
+          // otherwise a search box would sit above an empty list.
+          historyHasAny = false;
+          historyCounts = null;
+          renderHistoryChips();
           renderHistory();
           showToast(T.histCleared);
         } else {
@@ -2301,6 +2920,21 @@ body.light .upload-btn {
       } catch (e) { /* fall through */ }
     }
     return item.text_preview || '';
+  }
+
+  /* The URL a clip holds, if that is what it holds.
+     The same rule the desktop's opener applies (internal/system/about.py
+     `is_openable_url`): http(s), a host, no whitespace or control characters,
+     and short.  A clip is text the user did not type, so a newline in it must
+     not travel into whatever a browser makes of the string — and the phone has
+     to be stricter than the window, because there is no handler on the other
+     side to refuse it. */
+  function openableUrl(text) {
+    var url = String(text == null ? '' : text).trim();
+    if (!url || url.length > 2048) return '';
+    if (/\s/.test(url)) return '';
+    if (!/^https?:\/\/[^\s/?#]+/i.test(url)) return '';
+    return url;
   }
 
   // The backend stores image bytes under the "IMAGE" type (EMF under
@@ -2343,7 +2977,14 @@ body.light .upload-btn {
 
   function openItem(i) {
     var item = historyItems[i];
-    modalTitle.textContent = T.tabHistory + ' · ' + relTime(item.timestamp);
+    // The row that was tapped can already be gone: a filter change empties the
+    // list and repaints, and a tap that landed in between used to throw
+    // `Cannot read properties of undefined` and open nothing at all.
+    if (!item) return;
+    // Name the machine the clip came from in the title as well: the row's
+    // source is easy to miss once the modal covers the list.
+    var _src = (item.source_name || '').trim() || (item.source_device ? String(item.source_device) : '');
+    modalTitle.textContent = T.tabHistory + ' · ' + (_src ? _src + ' · ' : '') + relTime(item.timestamp);
     setModalContent(item);
     modalEl.classList.add('modal-mask--show');
     // Track which entry the modal shows by id — list indices shift between
@@ -2361,6 +3002,11 @@ body.light .upload-btn {
         : '/api/history/item?entry_id=';
       getJson(detail + encodeURIComponent(item.entry_id))
         .then(function (data) {
+          // The modal may have been closed, or opened onto another clip, while
+          // this was in flight — filling it now would show one entry's text
+          // under another entry's title, with the actions still pointing at
+          // whichever is open.
+          if (modalEntryId !== item.entry_id) return;
           if (isImage) {
             if (data && data.image) showImageModal(data.image);
             return;
@@ -2450,14 +3096,22 @@ body.light .upload-btn {
     histFavBtn.style.display = has ? '' : 'none';
     histDelBtn.style.display = has ? '' : 'none';
     histPushBtn.style.display = has ? '' : 'none';
+    var detail = has && modalDetailItem && modalDetailItem.entry_id === modalEntryId ? modalDetailItem : item;
+    // A link is offered as a link only while the modal is showing a clip that
+    // *is* one: the button appears once the detail payload says so, and goes
+    // away again for the next clip that is not.
+    var link = has ? openableUrl(getFullText(detail)) : '';
+    histOpenBtn.style.display = link ? '' : 'none';
+    // No entry_id means the server cannot address this row, so nothing below
+    // has an action to take.
     if (!has) return;
-    var detail = (modalDetailItem && modalDetailItem.entry_id === modalEntryId) ? modalDetailItem : item;
     var types = (detail && detail.types) || {};
     var isImageOnly = !!(types.IMAGE || types.IMAGE_EMF) && !types.TEXT;
     histPinBtn.textContent = item.pinned ? T.histUnpin : T.histPin;
     histFavBtn.textContent = T.histFav;
     histDelBtn.textContent = T.histDel;
     histPushBtn.textContent = T.histPush;
+    histOpenBtn.textContent = T.histOpenLink;
     histFavBtn.disabled = isImageOnly;
   }
 
@@ -2468,6 +3122,31 @@ body.light .upload-btn {
     modalActionBusy = true;
     fn(function done() { modalActionBusy = false; });
   }
+
+  histOpenBtn.addEventListener('click', function () {
+    if (modalEntryId === null) return;
+    var item = (modalDetailItem && modalDetailItem.entry_id === modalEntryId)
+      ? modalDetailItem
+      : findHistById(modalEntryId);
+    var url = item ? openableUrl(getFullText(item)) : '';
+    if (!url) {
+      showToast(T.histOpenFail, true);
+      return;
+    }
+    // An anchor rather than `window.open`: a popup blocker answers null, and a
+    // standalone PWA has no tab of its own to open into, while a link with
+    // target=_blank is the one form every mobile browser honours from a tap.
+    var link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    // The browser is coming to the front; leaving the sheet open would put the
+    // reader back inside a clip they have already left.
+    closeModal();
+  });
 
   histPinBtn.addEventListener('click', function () {
     modalAction(function (done) {
@@ -3941,6 +4620,120 @@ body.light .upload-btn {
 
   var favoritesItems = [];
   var favoritesLoading = false;
+  /* ── Favorites search + group chips ──────────────────────────
+     The phone's copy of the window's favourites toolbar.  Filtering is the
+     server's (GET /api/favorites?q=&group=); the group chips are drawn from
+     the library's own groups, and their counts are the library's — not the
+     search's — so a number does not move while the reader types. */
+  var favoritesQuery = '';
+  var favoritesGroup = '';
+  var favoritesGroups = [];
+  var favoritesGroupCounts = null;
+  var favoritesLibraryTotal = 0;
+  /* Which request owns `favoritesItems`, same shape as the history list's.
+     The stakes are lower here — the service never echoes the group back, so a
+     stale response cannot move a chip — but the failure is the same one the
+     server's `_clean_choice` exists to prevent: a rail that says "工作" over a
+     list of everything. */
+  var favoritesRequestId = 0;
+  var favoritesReloadPending = false;
+  /* The rail's nodes and the group names they were built from: the library's
+     groups can change under it, so it is rebuilt only when they do. */
+  var favoriteChipNodes = null;
+  var favoriteChipNames = null;
+
+  function favoritesUrl() {
+    var parts = [];
+    if (favoritesQuery) parts.push('q=' + encodeURIComponent(favoritesQuery));
+    if (favoritesGroup) parts.push('group=' + encodeURIComponent(favoritesGroup));
+    return '/api/favorites' + (parts.length ? '?' + parts.join('&') : '');
+  }
+
+  function favoritesFilterActive() {
+    return !!favoritesQuery || !!favoritesGroup;
+  }
+
+  function renderFavoritesChips() {
+    // With an empty library there is nothing to group or search.
+    favTools.style.display = favoritesLibraryTotal > 0 ? 'block' : 'none';
+    if (!favoritesLibraryTotal) return;
+    var names = favoritesGroups || [];
+    // Rebuilt only when the set of groups changed; a poll that brings the same
+    // groups must not reset the rail's scroll or drop focus (see the history
+    // rail's own note).
+    if (!favoriteChipNames || !sameNames(names, favoriteChipNames)) buildFavoriteChips(names);
+    favoriteChipNodes.forEach(function (node) {
+      var active = favoritesGroup === node.name;
+      node.el.className = 'chip' + (active ? ' chip--active' : '');
+      node.el.setAttribute('aria-pressed', active ? 'true' : 'false');
+      // 全部's number is the library, not a group's: it is the one chip whose
+      // count changes when a favourite is deleted anywhere.
+      var count = node.name === ''
+        ? favoritesLibraryTotal
+        : (favoritesGroupCounts ? favoritesGroupCounts[node.name] : null);
+      node.countEl.textContent = count == null ? '' : String(count);
+      node.countEl.style.display = count == null ? 'none' : '';
+    });
+  }
+
+  function sameNames(a, b) {
+    if (!b || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  function buildFavoriteChips(names) {
+    favChips.innerHTML = '';
+    favoriteChipNodes = [];
+    [''].concat(names).forEach(function (name) {
+      var el = document.createElement('button');
+      el.type = 'button';
+      var label = document.createElement('span');
+      label.textContent = name === '' ? T.favGroupAll : name;
+      var countEl = document.createElement('span');
+      countEl.className = 'chip__count';
+      el.appendChild(label);
+      el.appendChild(countEl);
+      el.addEventListener('click', function () {
+        if (favoritesGroup === name) return;
+        favoritesGroup = name;
+        renderFavoritesChips();
+        reloadFavorites();
+      });
+      favChips.appendChild(el);
+      favoriteChipNodes.push({ name: name, el: el, countEl: countEl });
+    });
+    favoriteChipNames = names.slice();
+  }
+
+  var favoritesSearchTimer = null;
+  favSearch.addEventListener('input', function () {
+    var value = favSearch.value || '';
+    favSearchClear.hidden = !value;
+    if (favoritesSearchTimer) clearTimeout(favoritesSearchTimer);
+    favoritesSearchTimer = setTimeout(function () {
+      favoritesSearchTimer = null;
+      if (value.trim() === favoritesQuery) return;
+      favoritesQuery = value.trim();
+      reloadFavorites();
+    }, 250);
+  });
+  favSearch.addEventListener('search', function () {
+    if (!favSearch.value) {
+      if (favoritesSearchTimer) { clearTimeout(favoritesSearchTimer); favoritesSearchTimer = null; }
+      favSearchClear.hidden = true;
+      if (favoritesQuery) { favoritesQuery = ''; reloadFavorites(); }
+    }
+  });
+  favSearchClear.addEventListener('click', function () {
+    favSearch.value = '';
+    favSearchClear.hidden = true;
+    if (favoritesSearchTimer) { clearTimeout(favoritesSearchTimer); favoritesSearchTimer = null; }
+    if (favoritesQuery) { favoritesQuery = ''; reloadFavorites(); }
+    favSearch.focus();
+  });
 
   function favIcon(f) {
     var content = ((f.content || '') + ' ' + (f.title || '')).trim();
@@ -3957,7 +4750,12 @@ body.light .upload-btn {
     // The one-click export only makes sense with something to export.
     favExportBtn.style.display = favoritesItems.length === 0 ? 'none' : 'flex';
     if (favoritesItems.length === 0) {
-      favoritesList.innerHTML = '<div class="empty"><div class="empty__icon">⭐</div><div class="empty__text">' + esc(T.favEmpty) + '</div></div>';
+      if (favoritesFilterActive() && favoritesLibraryTotal > 0) {
+        favoritesList.innerHTML = '<div class="empty"><div class="empty__icon">🔍</div><div class="empty__text">' +
+          esc(T.favNoMatch) + '<br><span class="empty__hint">' + esc(T.favNoMatchHint) + '</span></div></div>';
+      } else {
+        favoritesList.innerHTML = '<div class="empty"><div class="empty__icon">⭐</div><div class="empty__text">' + esc(T.favEmpty) + '</div></div>';
+      }
       return;
     }
     favoritesList.innerHTML = '';
@@ -3969,9 +4767,14 @@ body.light .upload-btn {
       el.innerHTML =
         '<div class="fav-item__icon">' + favIcon(f) + '</div>' +
         '<div class="fav-item__body">' +
-          '<div class="fav-item__title">' + esc(title) + '</div>' +
-          (preview ? '<div class="fav-item__preview">' + esc(preview) + '</div>' : '') +
-          '<div class="fav-item__meta">' + esc(favTypeLabel(f)) + ' · ' + esc(relTime(f.created)) + '</div>' +
+          '<div class="fav-item__title">' + highlightMarks(title, favoritesQuery) + '</div>' +
+          (preview ? '<div class="fav-item__preview">' + highlightMarks(preview, favoritesQuery) + '</div>' : '') +
+          // The group is how the phone's chip rail narrows the list, so a row
+          // that does not say which group it is in cannot be found again by
+          // looking at it.
+          '<div class="fav-item__meta">' +
+            (f.group ? esc(f.group) + ' · ' : '') +
+            esc(favTypeLabel(f)) + ' · ' + esc(relTime(f.created)) + '</div>' +
         '</div>' +
         '<button class="f-item__delete" title="' + esc(T.favDelete) + '">✕</button>';
       el.addEventListener('click', function () { favCopy(f); });
@@ -3983,18 +4786,52 @@ body.light .upload-btn {
     });
   }
 
+  // Same hand-off as the history list's `historySettled`.
+  function favoritesSettled(requestId) {
+    favoritesLoading = false;
+    if (requestId !== favoritesRequestId) {
+      if (favoritesReloadPending) {
+        favoritesReloadPending = false;
+        loadFavorites();
+      }
+      return false;
+    }
+    favoritesReloadPending = false;
+    return true;
+  }
+
+  // The rail or the search box moved: retire whatever is in flight and ask
+  // again.  The id bump is what makes the reply already on its way stale.
+  function reloadFavorites() {
+    favoritesRequestId += 1;
+    favoritesReloadPending = true;
+    loadFavorites();
+  }
+
   function loadFavorites(silent) {
-    if (favoritesLoading) return;
+    if (favoritesLoading) {
+      // Same contract as the history list: a filter change with nothing behind
+      // it leaves the rows answering a question the reader walked away from.
+      if (!silent) favoritesReloadPending = true;
+      return;
+    }
     favoritesLoading = true;
+    var requestId = ++favoritesRequestId;
     if (!silent) favoritesList.innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
-    getJson('/api/favorites')
+    getJson(favoritesUrl())
       .then(function (data) {
-        favoritesLoading = false;
+        if (!favoritesSettled(requestId)) return;
         favoritesItems = (data && data.favorites) || [];
+        // The library's groups and their counts come back with every list so
+        // the chips track changes made on the desktop.
+        if (data && data.groups) favoritesGroups = data.groups;
+        if (data && data.group_counts) favoritesGroupCounts = data.group_counts;
+        if (data && data.library_total != null) favoritesLibraryTotal = data.library_total;
+        renderFavoritesChips();
         renderFavorites();
       })
       .catch(function (err) {
-        favoritesLoading = false;
+        if (!favoritesSettled(requestId)) return;
         if (err && err.status === 403) notifyTokenExpired();
         if (!silent) {
           var msg = (err && err.status === 403) ? esc(T.tokenExpired) : esc(T.loadFail) + '<br>' + esc(failHint());
@@ -4038,7 +4875,10 @@ body.light .upload-btn {
         if (res.status === 403) { notifyTokenExpired(); return; }
         if (res.data && res.data.ok !== false) {
           showToast(T.favDeleted);
-          loadFavorites(true);
+          // A refresh, and the reader asked for it by deleting: if a poll is in
+          // flight this one has to be queued, or the row they just removed
+          // stays on screen until the next tick.
+          reloadFavorites();
         } else {
           showToast((res.data && res.data.error) || T.favDeleteFail, true);
         }

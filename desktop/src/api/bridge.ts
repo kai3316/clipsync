@@ -25,6 +25,8 @@ export interface CompanionRemoteStatus {
   token_set: boolean;
   mode: "readonly" | "full";
   brokers: string[];
+  /** What "restore defaults" restores; the sidecar owns the list. */
+  default_brokers: string[];
   page_url: string;
   connected: boolean;
   broker: string;

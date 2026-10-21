@@ -18,6 +18,7 @@ from io import BytesIO
 from typing import Protocol
 
 from internal.application.errors import ApplicationError
+from internal.application.use_cases.search import matcher as query_matcher
 from internal.clipboard import file_ref
 from internal.clipboard.format import (
     HISTORY_ONLY_TYPES,
@@ -284,18 +285,25 @@ def matches_kind(entry: dict, kind: str) -> bool:
 
 
 def searchable(entry: dict) -> str:
-    """The text a search query is matched against, lowercased.
+    """The text a search query is matched against, case-folded.
 
     Everything the row *shows*: the words, the kind, the device it synced from,
     the application it was copied in and that window's title.  The panel matched
     the first three and not the two source badges its row also displayed, so a
     user could see "chrome" on a row and get nothing for searching it — the one
     place this deliberately searches more than the panel did.
+
+    One string, joined rather than offered as fields, because this is what a
+    row *is* from the search box's side: the words on it do not have to arrive
+    in the same field to be the row the user meant.  How that string is read
+    (terms, quotes, which characters separate) is
+    ``internal.application.use_cases.search``'s business, shared with the
+    favourites box so the two cannot drift.
     """
     return " ".join(
         str(entry.get(field, ""))
         for field in ("text_preview", "content_type", "source_device", "source_app", "source_title")
-    ).lower()
+    ).casefold()
 
 
 # How much of a clip a window may read back in one response.  The IPC frame is
@@ -671,6 +679,11 @@ class HistoryUseCase:
         retention, and the alternative is a row whose badge the user can read
         but not search for.
 
+        *query* is read as terms, all of which must be found (see
+        ``internal.application.use_cases.search``) — the words a user remembers
+        about a clip sit in different fields and different orders far more often
+        than they appear as one run of characters.
+
         ``counts`` is the chip badges: how many entries each chip *would* show
         under the current search — the panel's own rule, so a chip's number is
         the number of rows clicking it yields, not a fixed total that stops
@@ -681,9 +694,9 @@ class HistoryUseCase:
         """
         entries = self.repository.get_all()
         has_history = bool(entries)
-        needle = query.strip().lower()
-        if needle:
-            entries = [entry for entry in entries if needle in searchable(entry)]
+        if query.strip():
+            hit = query_matcher(query)
+            entries = [entry for entry in entries if hit(searchable(entry))]
         counts = {
             name: sum(1 for entry in entries if matches_kind(entry, name)) for name in KINDS
         }

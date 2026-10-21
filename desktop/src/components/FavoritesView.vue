@@ -114,6 +114,16 @@ function selectGroup(group: string) {
   props.store.search(state.query, group);
 }
 
+/** Empty the search box from the field itself, keeping the caret where the
+ *  reader already was: clearing is the start of the next search, not the end
+ *  of the last one. */
+const searchInput = ref<HTMLInputElement | null>(null);
+function clearSearch() {
+  if (busy.value) return;
+  props.store.search("", state.group);
+  searchInput.value?.focus();
+}
+
 function startRename(group: string) {
   renaming.value = group;
   renameValue.value = group;
@@ -244,9 +254,10 @@ function report(saved: boolean) {
 
       <div v-if="tab === 'browse'" class="page-col">
         <div class="toolbar toolbar--inset">
-          <label class="search"><Search :size="17" /><input :aria-label="t('搜索收藏')" :placeholder="t('搜索收藏')"
+          <label class="search"><Search :size="17" /><input ref="searchInput" :aria-label="t('搜索收藏')" :placeholder="t('搜索收藏')"
             :value="state.query" maxlength="512" :disabled="busy"
-            @input="store.search(($event.target as HTMLInputElement).value)" /></label>
+            @input="store.search(($event.target as HTMLInputElement).value)"
+          /><button v-if="state.query" type="button" class="search-clear" :aria-label="t('清除搜索')" :title="t('清除搜索')" @click.prevent="clearSearch"><X :size="14" /></button></label>
           <button class="icon-button" :aria-label="t('刷新收藏')" :title="t('刷新收藏')" :disabled="busy || state.loading" @click="refreshNow"><RefreshCw :size="18" :class="{ spinning: state.loading }" /></button>
           <button :aria-label="t('新建收藏')" :disabled="busy" @click="editHere(store.create)"><Plus :size="18" />{{ t("新建") }}</button>
           <button class="icon-button" :aria-label="t('导出全部收藏')" :title="t('将全部收藏导出为 Markdown 文件')" :disabled="busy || !state.libraryTotal" @click="exportAll"><Download :size="18" /></button>

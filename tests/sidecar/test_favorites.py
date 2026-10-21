@@ -313,6 +313,95 @@ def test_a_batch_naming_nothing_stored_is_a_404(tmp_path, monkeypatch):
     assert status == 404 and body["ok"] is False
 
 
+def _phone_favorites(tmp_path, monkeypatch, *rows):
+    _phone_store(tmp_path, monkeypatch)
+    for title, content, group in rows:
+        web.add_favorite(
+            json.dumps({"title": title, "content": content, "group": group}).encode()
+        )
+    return web.get_favorites
+
+
+def test_the_phone_can_search_its_favorites(tmp_path, monkeypatch):
+    """The window filters through IPC and the phone has none, so the filtering
+    moved into the route.  A favourite's title and body are both searched,
+    case-insensitively — the window's own rule."""
+    get = _phone_favorites(
+        tmp_path, monkeypatch,
+        ("Alpha", "plain body", "work"),
+        ("Beta", "NEEDLE inside", "home"),
+    )
+    body, status = get(query_str="needle")
+    assert status == 200
+    assert [f["title"] for f in body["favorites"]] == ["Beta"]
+    assert body["total"] == 1
+    assert body["library_total"] == 2
+
+    # A word in the title counts as much as one in the body.
+    assert get(query_str="alpha")[0]["total"] == 1
+
+
+def test_a_phone_search_ships_the_whole_body_not_a_preview(tmp_path, monkeypatch):
+    """The window's list sends a 256-char preview because it has a detail
+    view to fetch the rest from.  The phone has no such route, so trimming
+    here would lose content the phone can never get back."""
+    long_body = "x" * 300
+    get = _phone_favorites(tmp_path, monkeypatch, ("Alpha", long_body, ""))
+    body, _ = get()
+    assert body["favorites"][0]["content"] == long_body
+
+
+def test_the_phone_can_narrow_to_one_group(tmp_path, monkeypatch):
+    get = _phone_favorites(
+        tmp_path, monkeypatch,
+        ("a", "1", "work"), ("b", "2", "home"), ("c", "3", "work"),
+    )
+    body, status = get(group_str="work")
+    assert status == 200
+    assert sorted(f["title"] for f in body["favorites"]) == ["a", "c"]
+    assert body["total"] == 2
+
+    # The sidebar's counts describe the library, not the search: a count that
+    # moved while the reader typed would answer a question they did not ask.
+    assert body["group_counts"] == {"work": 2, "home": 1}
+    assert body["groups"] == ["home", "work"]
+    assert body["library_total"] == 3
+
+
+def test_a_group_and_a_query_narrow_together(tmp_path, monkeypatch):
+    get = _phone_favorites(
+        tmp_path, monkeypatch,
+        ("a", "needle", "work"), ("b", "needle", "home"), ("c", "other", "work"),
+    )
+    body, _ = get(query_str="needle", group_str="work")
+    assert [f["title"] for f in body["favorites"]] == ["a"]
+
+    # Nothing matches both — the phone can tell that from "this group is
+    # empty" by comparing total against library_total.
+    assert get(query_str="needle", group_str="nope")[0]["total"] == 0
+
+
+def test_no_parameters_is_every_favorite(tmp_path, monkeypatch):
+    """The route's original contract: the phone's first paint asks for the
+    whole library."""
+    get = _phone_favorites(tmp_path, monkeypatch, ("a", "1", ""), ("b", "2", ""))
+    body, status = get()
+    assert status == 200
+    assert len(body["favorites"]) == 2
+    assert body["total"] == body["library_total"] == 2
+
+
+def test_a_broken_library_is_a_500_not_a_traceback(tmp_path, monkeypatch):
+    _phone_store(tmp_path, monkeypatch)
+
+    def boom():
+        raise RuntimeError("disk gone")
+
+    monkeypatch.setattr(web.FavoritesRepository, "get_all", boom)
+    body, status = web.get_favorites()
+    assert status == 500 and body["ok"] is False
+
+
 def test_reorder_keeps_the_positions_in_play_and_refuses_a_bad_list(use_case):
     """The slot set is fixed, so a row the client cannot see cannot move."""
     ids = [use_case.add(f"#{index}", str(index), "")["favorite"]["id"] for index in range(3)]

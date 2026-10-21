@@ -133,3 +133,48 @@ def test_remote_status_is_disabled_by_default():
     assert status["connected"] is False
     assert status["token_set"] is True
     assert status["error"] == ""
+
+
+def test_the_relay_list_is_editable_and_defaults_are_offered_alongside_it(monkeypatch):
+    """The window offers "restore defaults", so it needs the default list from
+    the same place the tunnel would fall back to -- a second copy in the
+    frontend is a list that drifts."""
+    from internal.config.config import DEFAULT_COMPANION_REMOTE_BROKERS
+
+    app = application()
+    monkeypatch.setattr(bootstrap, "save", lambda cfg, encryption: None)
+
+    status = app.companion_remote_status()
+    assert status["brokers"] == list(DEFAULT_COMPANION_REMOTE_BROKERS)
+    assert status["default_brokers"] == list(DEFAULT_COMPANION_REMOTE_BROKERS)
+
+    custom = ["wss://relay.example.com:8084/mqtt", "wss://backup.example.com:8084/mqtt"]
+    status = app.configure_companion_remote(brokers=custom)
+    assert status["brokers"] == custom
+    assert app.config.companion_remote_brokers == custom
+    # The defaults are a constant, not "whatever is configured now".
+    assert status["default_brokers"] == list(DEFAULT_COMPANION_REMOTE_BROKERS)
+
+
+def test_an_empty_relay_list_is_refused_rather_than_silently_disabling_remote(monkeypatch):
+    """An empty list would leave the tunnel with nothing to dial and no way to
+    say why, while the phone still shows a QR code that can never connect."""
+    app = application()
+    monkeypatch.setattr(bootstrap, "save", lambda cfg, encryption: None)
+    before = list(app.config.companion_remote_brokers)
+    for empty in ([], [""], ["   "]):
+        with pytest.raises(ApplicationError):
+            app.configure_companion_remote(brokers=empty)
+    assert app.config.companion_remote_brokers == before
+
+
+def test_the_qr_carries_the_edited_relay_list(monkeypatch):
+    """The phone learns its brokers from the QR fragment, so an edited list
+    that never reaches the code would be a setting that does nothing."""
+    app = application()
+    monkeypatch.setattr(bootstrap, "save", lambda cfg, encryption: None)
+    custom = ["wss://mine.example.com:8084/mqtt"]
+    app.configure_companion_remote(brokers=custom)
+
+    fields = parse_qs(app.companion_remote_qr()["url"].split("#", 1)[1])
+    assert json.loads(fields["b"][0]) == custom

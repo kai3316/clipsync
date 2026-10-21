@@ -8,6 +8,8 @@ import logging
 import time
 import uuid
 
+from internal.application.use_cases.history import KINDS, SORTS, matches_kind, searchable
+from internal.application.use_cases.search import matcher as query_matcher
 from internal.clipboard.format import decode_text
 from internal.config.config import FIELD_RULES, known_device_names
 
@@ -30,7 +32,28 @@ def _source_label(sid: str, device_names: dict, cfg) -> str:
     return name or device_names.get(cfg.device_id, "")
 
 
-def get_history(history, cfg, limit_str=None, offset_str=None):
+def _clean_choice(value, allowed, default):
+    """One of ``allowed``, or ``default`` for anything the caller invents.
+
+    A phone and the window share this endpoint, and a filter the server does
+    not know is worse than no filter: ``matches_kind`` answers an unrecognised
+    name with True, so an invented ``kind`` would show every row while the
+    client highlights a chip — a filter that looks applied and is not.  The
+    echo below is what lets the client's chip stay honest.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in allowed else default
+
+
+def get_history(
+    history,
+    cfg,
+    limit_str=None,
+    offset_str=None,
+    query_str=None,
+    kind_str=None,
+    sort_str=None,
+):
     """Return clipboard history list with device name mapping.
 
     Args:
@@ -40,6 +63,15 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
                    Overrides cfg.web_history_limit when present.
         offset_str: Optional string from ``?offset=N`` query param.
                     Number of items to skip.
+        query_str: Optional string from ``?q=`` — a case-insensitive search
+                   over everything a row shows (see ``searchable``).
+        kind_str: Optional string from ``?kind=`` — one of ``KINDS``.
+        sort_str: Optional string from ``?sort=`` — one of ``SORTS``.
+
+    The filtering is the window's own (``matches_kind`` / ``searchable`` /
+    pinned-first ordering), so a phone and the window agree on what 链接 means
+    and on which rows a word finds.  ``total`` is the number of *matching*
+    rows, so a phone paginating a filtered list stops at the right place.
     """
     items = history.get_all()
 
@@ -66,6 +98,27 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
                 offset = parsed
         except (ValueError, TypeError):
             pass
+
+    kind = _clean_choice(kind_str, KINDS, "all")
+    sort = _clean_choice(sort_str, SORTS, "newest")
+
+    # ``has_history`` answers "is there anything to filter", which is not the
+    # same as "did this search match" — a chip bar that vanishes the moment a
+    # typo matches nothing takes the way back out with it.
+    has_history = bool(items)
+    if str(query_str or "").strip():
+        hit = query_matcher(query_str)
+        items = [entry for entry in items if hit(searchable(entry))]
+    # Chip badges count the rows each chip *would* show under the current
+    # search, so the number on a chip is the number clicking it yields.
+    counts = {name: sum(1 for entry in items if matches_kind(entry, name)) for name in KINDS}
+    if kind != "all":
+        items = [entry for entry in items if matches_kind(entry, kind)]
+    # Two stable passes: the order asked for, then pinned floated to the top.
+    # A compound key would have to reverse the pinned half too, which drops
+    # pinned rows to the bottom in one of the two orders.
+    items.sort(key=lambda entry: entry.get("timestamp", 0), reverse=sort != "oldest")
+    items.sort(key=lambda entry: not entry.get("pinned", False))
 
     total = len(items)
     if offset > 0:
@@ -108,7 +161,16 @@ def get_history(history, cfg, limit_str=None, offset_str=None):
                 "paste_count": entry.get("paste_count", 0),
             }
         )
-    return {"items": result, "total": total, "offset": offset, "limit": limit}, 200
+    return {
+        "items": result,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "kind": kind,
+        "sort": sort,
+        "counts": counts,
+        "has_history": has_history,
+    }, 200
 
 
 def get_history_item(query_params, history, cfg):

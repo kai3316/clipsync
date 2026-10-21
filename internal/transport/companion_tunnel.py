@@ -58,6 +58,19 @@ MAX_INNER_BYTES = 32 * 1024
 MAX_ENVELOPE_BYTES = 60 * 1024
 REQUEST_TIMEOUT_SECONDS = 8.0
 HELLO_TTL_SECONDS = 90.0
+# How long one broker gets to answer CONNECT with a CONNACK.  This used to be a
+# flat two seconds, and two seconds is not enough for a public broker over a
+# phone tether: TLS plus CONNACK regularly takes longer, so a broker that would
+# have worked was abandoned mid-handshake, the loop moved to the next one, and
+# then to the third, and back again -- the tunnel spent its life rotating and
+# never connected.  Measured against broker.emqx.io from a phone hotspot, the
+# handshake often lands between three and six seconds.
+CONNECT_TIMEOUT_SECONDS = 12.0
+# Retry delays after consecutive failures, indexed by how many brokers have
+# just failed in a row.  A fixed two-second retry made the "everything is down"
+# case rotate as fast as the "one broker hiccuped" case, which is both the
+# least useful time to spin and the most visible one.
+RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0, 20.0)
 RATE_LIMIT_PER_MINUTE = 20
 DEDUPE_CAPACITY = 256
 
@@ -239,6 +252,11 @@ class CompanionTunnel:
         self._client: Any = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # Set by every CONNACK, successful or not, so the connect loop waits
+        # for an *answer* instead of a slice of wall-clock time.  Sticky, so a
+        # fake client that answers inside ``connect()`` is not missed.
+        self._connected_event = threading.Event()
+        self._connect_rc: int | None = None
         self._connected_broker = ""
         self._phone_id = ""
         self._last_seen = 0.0
@@ -262,6 +280,10 @@ class CompanionTunnel:
 
     def stop(self) -> None:
         self._stop.set()
+        # Release a loop parked on a broker that has not answered yet; the
+        # thread would otherwise sit out the whole connect timeout before
+        # noticing the stop.
+        self._connected_event.set()
         client, self._client = self._client, None
         if client is not None:
             try:
@@ -299,25 +321,60 @@ class CompanionTunnel:
 
     def _connect_loop(self) -> None:
         index = 0
+        failures = 0
         while not self._stop.is_set() and self._brokers:
             broker = self._brokers[index % len(self._brokers)]
             index += 1
             client = None
+            answered = False
             try:
+                # Cleared *before* any slow work, not immediately before the
+                # wait: ``stop()`` sets this event to release a loop that is
+                # parked, and clearing it after a construct+assign round trip
+                # leaves a window in which that release is thrown away, the
+                # wait below then runs its full timeout, and a broker gets
+                # dialled by a thread whose ``stop()`` has already returned.
+                self._connected_event.clear()
                 client = self._client_factory(broker)
+                if self._stop.is_set():
+                    return
                 with self._lock:
                     self._client = client
+                    self._connect_rc = None
                 client.connect(broker.host, broker.port, keepalive=30)
                 client.loop_start()
-                self._stop.wait(2.0)
-                # A healthy client stays with this loop; a failed one has
-                # already reported itself and the next broker gets a turn.
-                while not self._stop.is_set() and self._connected_broker:
-                    self._stop.wait(1.0)
+                # Wait for the broker's answer rather than for a fixed slice of
+                # time -- see CONNECT_TIMEOUT_SECONDS for why two seconds was
+                # the bug, not a tuning knob.
+                self._connected_event.wait(CONNECT_TIMEOUT_SECONDS)
+                if self._stop.is_set():
+                    return
+                with self._lock:
+                    code = self._connect_rc
+                if code is None:
+                    logger.info(
+                        "Companion tunnel: %s did not answer in %.0fs",
+                        broker.url,
+                        CONNECT_TIMEOUT_SECONDS,
+                    )
+                    with self._lock:
+                        self._error = "broker did not answer"
+                    failures += 1
+                elif code != 0:
+                    logger.info("Companion tunnel: %s refused (%s)", broker.url, code)
+                    failures += 1
+                else:
+                    answered = True
+                    failures = 0
+                    # A healthy client stays here; a disconnect clears
+                    # ``_connected_broker`` and the next broker gets a turn.
+                    while not self._stop.is_set() and self._connected_broker:
+                        self._stop.wait(1.0)
             except Exception as exc:
                 logger.info("Companion tunnel: %s unavailable (%s)", broker.url, exc)
                 with self._lock:
                     self._error = str(exc)
+                failures += 1
             finally:
                 # Released either way.  Each round used to drop the previous
                 # client without disconnecting it, and paho's client is a
@@ -328,12 +385,31 @@ class CompanionTunnel:
                 if client is not None:
                     self._release_client(client)
                 with self._lock:
-                    self._connected_broker = None
+                    # Empty, not None: this field is published as ``"broker"``
+                    # in ``status()`` and every other writer leaves a string
+                    # there, so a null would travel to a client whose type says
+                    # ``string`` — the kind of lie that only breaks once someone
+                    # calls ``.startsWith`` on it.
+                    self._connected_broker = ""
                     if self._client is client:
                         self._client = None
             if self._stop.is_set():
                 return
-            self._stop.wait(2.0)
+            # A connection that worked and then dropped retries immediately:
+            # the broker is reachable, so backing off would only stretch the
+            # outage.  A run of failures backs off, so three dead brokers are
+            # retried every twenty seconds rather than every two.
+            if answered:
+                self._stop.wait(1.0)
+            else:
+                # ``failures`` is at least 1 here — every path that leaves
+                # ``answered`` false increments it — and ``max`` says so out
+                # loud.  Relying on the caller was one refactor away from an
+                # index of -1, which Python answers with the *last* backoff:
+                # a twenty-second sleep where "retry now" was meant, and no
+                # error to notice it by.
+                step = min(max(failures, 1), len(RETRY_BACKOFF_SECONDS)) - 1
+                self._stop.wait(RETRY_BACKOFF_SECONDS[step])
 
     def _release_client(self, client) -> None:
         """Stop and disconnect one paho client, never raising."""
@@ -402,13 +478,20 @@ class CompanionTunnel:
     # -------------------------------------------------------------- MQTT callbacks
 
     def _on_connect(self, client, userdata, flags, rc=0, *extra) -> None:
-        if int(rc or 0) != 0:
-            with self._lock:
-                self._error = f"broker refused connection ({rc})"
-            return
+        code = int(rc or 0)
         with self._lock:
-            self._connected_broker = str(getattr(client, "_broker_url", "") or "")
-            self._error = ""
+            self._connect_rc = code
+            if code != 0:
+                self._error = f"broker refused connection ({code})"
+            else:
+                self._connected_broker = str(getattr(client, "_broker_url", "") or "")
+                self._error = ""
+        # Wake the connect loop either way: a refusal is an answer, and waiting
+        # out the full timeout on it would waste the whole budget before the
+        # next broker got a turn.
+        self._connected_event.set()
+        if code != 0:
+            return
         client.subscribe(self._up_topic, qos=1)
 
     def _on_disconnect(self, client, userdata, *args) -> None:

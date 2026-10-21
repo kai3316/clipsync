@@ -23,7 +23,13 @@ from internal.application.use_cases.history import (
 from internal.application.use_cases.overview import build_overview
 from internal.clipboard.format import ClipboardContent, ContentType
 from internal.clipboard.history_db import ClipboardHistoryDB
-from internal.config.config import config_dir, known_device_names, load, save
+from internal.config.config import (
+    DEFAULT_COMPANION_REMOTE_BROKERS,
+    config_dir,
+    known_device_names,
+    load,
+    save,
+)
 from internal.data.logs import export_log, read_log_tail, split_log_lines
 from internal.data.recovery import (
     config_problem,
@@ -569,6 +575,9 @@ class SidecarApplication:
             "token_set": bool(token),
             "mode": (cfg.companion_remote_mode if cfg else "readonly"),
             "brokers": list(cfg.companion_remote_brokers) if cfg else [],
+            # What "restore defaults" means, sent rather than re-typed in the
+            # window so the two lists cannot drift apart.
+            "default_brokers": list(DEFAULT_COMPANION_REMOTE_BROKERS),
             "page_url": cfg.companion_remote_page_url if cfg else "",
             "connected": False,
             "broker": "",

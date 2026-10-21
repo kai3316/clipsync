@@ -66,6 +66,19 @@ DEFAULT_HOTKEYS: dict[str, str] = {
 }
 
 
+# The public brokers remote phone access tries, in order.  These are
+# best-effort free services: any one of them can be down, rate-limiting or
+# blocked by a given mobile network, which is why the list exists at all and is
+# tried rather than picked from.  Named at module level so the window can offer
+# "restore defaults" from the same list instead of carrying a second copy that
+# drifts.
+DEFAULT_COMPANION_REMOTE_BROKERS = (
+    "wss://broker.emqx.io:8084/mqtt",
+    "wss://broker.hivemq.com:8884/mqtt",
+    "wss://test.mosquitto.org:8081/mqtt",
+)
+
+
 @dataclass
 class Config:
     # Schema version for one-way migrations on load. v1 configs stored
@@ -222,11 +235,7 @@ class Config:
     # (a private one, or one that is reachable on the user's network) without
     # moving clipboard sync.
     companion_remote_brokers: list[str] = field(
-        default_factory=lambda: [
-            "wss://broker.emqx.io:8084/mqtt",
-            "wss://broker.hivemq.com:8884/mqtt",
-            "wss://test.mosquitto.org:8081/mqtt",
-        ]
+        default_factory=lambda: list(DEFAULT_COMPANION_REMOTE_BROKERS)
     )
     # What a remote phone may do: ``readonly`` (default) can read history,
     # chats, files; ``full`` also adds push/pin/delete/chat actions.  The tunnel

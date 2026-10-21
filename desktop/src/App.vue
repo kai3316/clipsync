@@ -470,6 +470,10 @@ async function refreshCompanion() {
     companionPort.value = companion.value.port;
     companionRemotePage.value = companion.value.remote.page_url;
     companionRemoteMode.value = companion.value.remote.mode;
+    // A status read must not eat what the user is halfway through typing.
+    if (!companionRemoteBrokersDirty.value) {
+      companionRemoteBrokers.value = (companion.value.remote.brokers ?? []).join(", ");
+    }
   } catch (error) {
     if (generation === companionGeneration) store.setError(error);
   }
@@ -489,6 +493,10 @@ async function configureCompanion(enabled: boolean, rotateToken = false, clearTo
     companionPort.value = companion.value.port;
     companionRemotePage.value = companion.value.remote.page_url;
     companionRemoteMode.value = companion.value.remote.mode;
+    // A status read must not eat what the user is halfway through typing.
+    if (!companionRemoteBrokersDirty.value) {
+      companionRemoteBrokers.value = (companion.value.remote.brokers ?? []).join(", ");
+    }
   } catch (error) {
     if (generation !== companionGeneration) return;
     store.setError(error);
@@ -502,6 +510,11 @@ async function configureCompanion(enabled: boolean, rotateToken = false, clearTo
  * broker (encrypted) and has its own page URL and QR code. */
 const companionRemotePage = ref("");
 const companionRemoteMode = ref<"readonly" | "full">("readonly");
+/* The relay brokers remote access tries, as the user edits them.  The default
+ * list lives in the sidecar and comes back with every status read, so
+ * "restore defaults" is the same list the tunnel itself would fall back to. */
+const companionRemoteBrokers = ref("");
+const companionRemoteBrokersDirty = ref(false);
 const companionRemoteBusy = ref(false);
 const companionRemoteQrOpen = ref(false);
 const companionRemoteDialog = useDialog(companionRemoteQrOpen);
@@ -515,19 +528,52 @@ function remoteLastSeenLabel(): string {
   return seen ? new Date(seen * 1000).toLocaleString() : t("暂无");
 }
 
+/* One broker per line or comma-separated — both are what a pasted list looks
+ * like, and neither costs the other anything. */
+function parseRemoteBrokers(text: string): string[] {
+  return text
+    .split(/[\s,]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function restoreRemoteBrokers(): void {
+  const defaults = companion.value?.remote?.default_brokers ?? [];
+  // Restoring an empty list would empty the field, and an empty field disables
+  // the save button — so the one control that could repair the state is the one
+  // that caused it, and remote access stays off with no way to turn it back on.
+  if (!defaults.length) return;
+  companionRemoteBrokers.value = defaults.join(", ");
+  companionRemoteBrokersDirty.value = true;
+}
+
 async function configureCompanionRemote(enabled?: boolean, pageUrl?: string, rotateToken = false) {
   if (companionRemoteBusy.value) return;
   companionRemoteBusy.value = true;
   try {
+    // Only a save carries the broker list.  Turning remote access off, or
+    // rotating its token, is not a statement about which servers to use, and
+    // sending a half-typed list along with them would quietly rewrite it.
+    const brokers = enabled === false || rotateToken ? undefined : parseRemoteBrokers(companionRemoteBrokers.value);
     const result = await bridge.companionRemoteConfigure({
       ...(enabled === undefined ? {} : { enabled }),
       ...(pageUrl === undefined ? { pageUrl: companionRemotePage.value.trim() } : { pageUrl }),
       mode: companionRemoteMode.value,
+      ...(brokers && brokers.length ? { brokers } : {}),
       ...(rotateToken ? { rotateToken: true } : {}),
     });
     if (companion.value) companion.value = { ...companion.value, remote: result };
     companionRemotePage.value = result.page_url;
     companionRemoteMode.value = result.mode;
+    // Every save answers with the brokers the sidecar actually holds, so the
+    // field is resynced even when this particular save carried no list --
+    // turning remote access off, or saving the permissions with the relay box
+    // cleared.  Leaving it dirty in those cases pinned a stale list in place
+    // with no remaining polled status able to correct it.
+    companionRemoteBrokersDirty.value = false;
+    if (result.brokers && result.brokers.length) {
+      companionRemoteBrokers.value = result.brokers.join(", ");
+    }
     announce(rotateToken ? t("远程令牌已更换，旧二维码已失效") : enabled === false ? t("远程访问已关闭") : t("远程访问设置已保存"));
   } catch (error) {
     store.setError(error);
@@ -814,7 +860,7 @@ function historyMenu(event: MouseEvent, item: HistoryItem) {
       run: () => store.pin(item),
     },
     {
-      id: "favorite", label: t("添加到收藏"), icon: Star, disabled: !hasId,
+      id: "favorite", label: t("加入收藏夹"), icon: Star, disabled: !hasId,
       run: () => addToFavorites(item),
     },
     {
@@ -1156,7 +1202,7 @@ function previewLabel(item: HistoryItem) {
  */
 function typeLine(item: HistoryItem) {
   const label = typeLabel(item);
-  return [label === previewLabel(item) ? "" : label, item.pinned ? t("已收藏") : ""].filter(Boolean).join(" · ");
+  return [label === previewLabel(item) ? "" : label, item.pinned ? t("已置顶") : ""].filter(Boolean).join(" · ");
 }
 
 /** How many times a clip has been pasted back, as a badge worth showing.
@@ -2453,6 +2499,13 @@ const historyBusy = computed(() => busy.value || state.loading);
 async function refreshHistoryNow() {
   await store.refreshHistory();
   store.toast("ui.history", t("已刷新 · {count} 条记录", { count: state.total }));
+}
+/* Out of a search without touching the keyboard, and straight back into it:
+ * the × is on the field, so the reader who cleared a search is still searching,
+ * with an empty box, rather than looking at a list with the caret nowhere. */
+function clearHistorySearch() {
+  store.search("");
+  searchInput.value?.focus();
 }
 /* The three panes that own their own buttons report through one of these: the
  * notice stack is the window's, and which page a message belongs to is the
@@ -4867,7 +4920,7 @@ async function translateText() {
               ref="searchInput"
               :value="state.query" :aria-label="t('搜索历史记录')" :placeholder="t('搜索历史记录')"
               :disabled="busy" @input="store.search(($event.target as HTMLInputElement).value)"
-            /></label>
+            /><button v-if="state.query" type="button" class="search-clear" :aria-label="t('清除搜索')" :title="t('清除搜索')" @click.prevent="clearHistorySearch"><X :size="14" /></button></label>
             <button class="icon-button" :title="t('刷新')" :aria-label="t('刷新')" :disabled="historyBusy" @click="refreshHistoryNow"><RefreshCw :size="18" :class="{ spinning: state.loading }" /></button>
             <button class="icon-button" :title="t('清空历史')" :aria-label="t('清空历史')" :disabled="historyBusy || !state.total" @click="clearHistoryOpen = true"><Eraser :size="18" /></button>
           </div>
@@ -4892,8 +4945,8 @@ async function translateText() {
                 @change="store.selectAllVisible(($event.target as HTMLInputElement).checked)" />{{ t("全选当前页") }}</label>
               <span role="status">{{ t("已选择 {count} 条", { count: state.selectedIds.length }) }}</span>
               <div class="batch-actions">
-                <button class="icon-button" :aria-label="t('批量收藏')" :title="t('批量收藏')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="pinSelected(true)"><Pin :size="17" /></button>
-                <button class="icon-button" :aria-label="t('批量取消收藏')" :title="t('批量取消收藏')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="pinSelected(false)"><PinOff :size="17" /></button>
+                <button class="icon-button" :aria-label="t('批量置顶')" :title="t('批量置顶')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="pinSelected(true)"><Pin :size="17" /></button>
+                <button class="icon-button" :aria-label="t('批量取消置顶')" :title="t('批量取消置顶')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="pinSelected(false)"><PinOff :size="17" /></button>
                 <button class="icon-button" :aria-label="t('加入收藏夹')" :title="t('加入收藏夹')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="favoriteSelected"><Star :size="17" /></button>
                 <button class="icon-button" :aria-label="t('合并推送到电脑')" :title="t('合并推送到电脑')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="mergePushSelected"><SendHorizontal :size="17" /></button>
                 <button class="icon-button" :aria-label="t('批量删除')" :title="t('批量删除')" :disabled="historyBusy || mergeBusy || !state.selectedIds.length" @click="batchDeleteIds = [...state.selectedIds]"><Trash2 :size="17" /></button>
@@ -4908,7 +4961,13 @@ async function translateText() {
               <h2 v-if="state.query">{{ t("没有匹配的记录") }}</h2>
               <h2 v-else-if="state.kind !== 'all'">{{ t("还没有{type}", { type: kindLabel(state.kind) }) }}</h2>
               <h2 v-else>{{ t("暂无历史记录") }}</h2>
-              <p class="note">{{ state.kind !== 'all' ? t("换个过滤条件，或清除过滤查看全部内容。") : (native ? t('当前数据目录中没有可显示的记录') : t('桌面窗口连接后显示本地记录')) }}</p>
+              <!-- What the note says follows the heading: a search that found
+                   nothing is not an empty data directory, and telling the reader
+                   about the directory when a filter is what emptied the page
+                   sends them looking in the wrong place. -->
+              <p class="note">{{ state.query
+                ? t("多个关键词用空格分隔，需同时包含；也可以只留一个词再试。")
+                : (state.kind !== 'all' ? t("换个过滤条件，或清除过滤查看全部内容。") : (native ? t('当前数据目录中没有可显示的记录') : t('桌面窗口连接后显示本地记录'))) }}</p>
             </div>
             <article v-for="(item, index) in state.history" :key="item.id" class="history-row"
               :class="{ 'history-row--kbd': state.kbdIndex === index }"
@@ -4946,7 +5005,7 @@ async function translateText() {
                      rather than sits beside the copy button — two buttons on one
                      row where only one of them can work is worse than one. -->
                 <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('下载文件')" :title="remoteFileTitle(item)" :disabled="historyBusy || !remoteFileActionable(item)" @click="downloadRemoteFile(item)"><Check v-if="remoteFileBusy(item)" :size="17" /><Download v-else :size="17" /></button>
-                <button class="icon-button" :class="{ pinned: item.pinned }" :aria-label="item.pinned ? t('取消收藏') : t('收藏')" :title="item.pinned ? t('取消收藏') : t('收藏')" :disabled="historyBusy" @click="store.pin(item)"><Pin :size="17" /></button>
+                <button class="icon-button" :class="{ pinned: item.pinned }" :aria-label="item.pinned ? t('取消置顶') : t('置顶')" :title="item.pinned ? t('取消置顶') : t('置顶')" :disabled="historyBusy" @click="store.pin(item)"><Pin :size="17" /></button>
                 <button class="icon-button" :aria-label="t('翻译记录')" :title="t('翻译记录')" :disabled="historyBusy || translateItemReading" @click="openTranslateItem(item)"><Globe :size="17" /></button>
                 <button v-if="isWebLink(item)" class="icon-button" :aria-label="t('在浏览器打开')" :title="t('在浏览器打开')" :disabled="historyBusy" @click="openHistoryLink(item)"><ExternalLink :size="17" /></button>
                 <button class="icon-button" :aria-label="t('删除记录')" :title="t('删除记录')" :disabled="historyBusy" @click="deleteItem = item"><Trash2 :size="17" /></button>
@@ -6274,6 +6333,17 @@ async function translateText() {
                     </select>
                   </span>
                 </label>
+                <label class="setting">
+                  <span class="setting-name">{{ t("中继服务器") }}</span>
+                  <span class="setting-control"><input
+                    v-model="companionRemoteBrokers" class="setting-wide" :aria-label="t('中继服务器')"
+                    :placeholder="(companion.remote.default_brokers || []).join(', ')"
+                    :disabled="companionRemoteBusy" @input="companionRemoteBrokersDirty = true" /></span>
+                </label>
+                <p class="note">{{ t("按顺序尝试，某个中继不可用时自动换下一个；多个地址用逗号分隔。公共中继免费且不保证可用，不稳定时可以换成自己的服务器。") }}</p>
+                <div class="setting-actions">
+                  <button type="button" :disabled="companionRemoteBusy || !(companion.remote.default_brokers || []).length" @click="restoreRemoteBrokers">{{ t("恢复默认中继") }}</button>
+                </div>
                 <div class="setting-actions">
                   <button type="button" :disabled="companionRemoteBusy" @click="configureCompanionRemote(true)">{{ companion.remote.enabled ? t("保存设置") : t("开启远程访问") }}</button>
                   <button type="button" :disabled="companionRemoteBusy || !companion.remote.enabled" @click="configureCompanionRemote(false)">{{ t("关闭远程访问") }}</button>

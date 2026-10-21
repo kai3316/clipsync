@@ -20,6 +20,17 @@
   var PROTOCOL_VERSION = 1;
   var REQUEST_TIMEOUT_MS = 8000;
   var KEEPALIVE_SECONDS = 30;
+  /*
+   * How long one broker gets to answer MQTT CONNECT with a CONNACK.  Without
+   * this the page had no upper bound at all: on a mobile network a broker
+   * whose WebSocket port is blocked leaves the browser in CONNECTING, where no
+   * `close` event ever arrives, so the phone sat on the first broker for as
+   * long as the page was open and never tried the second or third.  That is
+   * the shape of "opens but is unavailable".
+   */
+  var CONNECT_TIMEOUT_MS = 10000;
+  var RECONNECT_BASE_MS = 1500;
+  var RECONNECT_MAX_MS = 15000;
   var SALT = 'clipsync-companion-v1';
   var INFO_STRING = 'channel-key';
 
@@ -219,11 +230,49 @@
     this.inbox = new Uint8Array(0);
     this.pingTimer = null;
     this.reconnectTimer = null;
+    this.connectTimer = null;
+    // Which socket attempt this is.  `close` and `error` arrive
+    // asynchronously and can belong to a socket the page has already given up
+    // on; a handler whose number is stale must not tear down the live one.
+    this.generation = 0;
+    // Consecutive failures, for the retry backoff.  Reset by every CONNACK.
+    this.attempts = 0;
+    // One PINGREQ is allowed in flight at a time: a broker that never answers
+    // it is a half-open socket, not a slow one.
+    this.pingOutstanding = false;
+    this.lastFailure = '';
     this.upTopic = '';
     this.downTopic = '';
     this.onlineHandlers = [];
+    // What the page shows while the tunnel is being established.  The page had
+    // only two states to render -- "loaded" and "failed" -- so a phone that
+    // was still dialling broker #2 looked exactly like a computer that was
+    // off.  These are the states in between.
+    this.stateHandlers = [];
+    this.state = null;
     this._onlineWaiters = [];
   }
+
+  Tunnel.prototype.report = function (state, extra) {
+    var payload = { state: state };
+    if (extra) {
+      for (var key in extra) {
+        if (Object.prototype.hasOwnProperty.call(extra, key)) payload[key] = extra[key];
+      }
+    }
+    this.state = payload;
+    for (var i = 0; i < this.stateHandlers.length; i++) {
+      try { this.stateHandlers[i](payload); } catch (e) {}
+    }
+  };
+
+  /** Subscribe and receive the current state immediately if there is one. */
+  Tunnel.prototype.onState = function (handler) {
+    this.stateHandlers.push(handler);
+    if (this.state) {
+      try { handler(this.state); } catch (e) {}
+    }
+  };
 
   Tunnel.prototype.start = function () {
     var self = this;
@@ -253,17 +302,34 @@
   Tunnel.prototype.connect = function () {
     var self = this;
     if (!self.brokers.length) return;
+    if (self.connectTimer) { clearTimeout(self.connectTimer); self.connectTimer = null; }
     var broker = self.brokers[self.brokerIndex % self.brokers.length];
     self.brokerIndex += 1;
+    self.currentBroker = broker.url;
+    self.report('connecting', {
+      broker: broker.url,
+      index: ((self.brokerIndex - 1) % self.brokers.length) + 1,
+      total: self.brokers.length,
+    });
+    var generation = ++self.generation;
     var ws;
     try {
       ws = new WebSocket(broker.url, ['mqtt']);
       ws.binaryType = 'arraybuffer';
     } catch (e) {
-      self.scheduleReconnect();
+      self.lastFailure = 'open';
+      self.retry(generation);
       return;
     }
     self.ws = ws;
+    // The watchdog for the case the WebSocket API cannot report: a socket
+    // stuck in CONNECTING fires neither `open` nor `close`, so nothing else
+    // would ever move the page on to the next broker.
+    self.connectTimer = setTimeout(function () {
+      self.connectTimer = null;
+      if (generation !== self.generation || self.connected) return;
+      self.fail(generation, 'timeout');
+    }, CONNECT_TIMEOUT_MS);
     ws.onopen = function () {
       var flags = 0x02; // clean session
       var payload = [mqttString('clipsync-phone-' + Math.random().toString(36).slice(2, 10))];
@@ -285,22 +351,76 @@
       self.feed(new Uint8Array(event.data));
     };
     ws.onclose = function () {
+      if (generation !== self.generation) return;
       self.connected = false;
+      // The connect watchdog belongs to the socket that just closed.  `retry`
+      // may decline to schedule (another timer is already queued), and the
+      // watchdog would then fire ten seconds later into a reconnect that is
+      // already waiting — `fail()` would throw that timer away and start a
+      // longer one, for nothing.
+      if (self.connectTimer) { clearTimeout(self.connectTimer); self.connectTimer = null; }
       self.stopPing();
-      self.scheduleReconnect();
+      self.lastFailure = 'closed';
+      self.retry(generation);
     };
     ws.onerror = function () {
+      if (generation !== self.generation) return;
       try { ws.close(); } catch (e) {}
     };
   };
 
-  Tunnel.prototype.scheduleReconnect = function () {
+  /*
+   * Give up on the current socket and move to the next broker.
+   *
+   * Everything that ends an attempt funnels through here, so the browser's own
+   * `close`, a CONNACK that says no, and the connect watchdog cannot each
+   * schedule their own reconnect and race each other.
+   */
+  Tunnel.prototype.fail = function (generation, reason) {
     var self = this;
+    if (generation !== self.generation) return;
+    self.lastFailure = reason || '';
+    if (self.connectTimer) { clearTimeout(self.connectTimer); self.connectTimer = null; }
+    var ws = self.ws;
+    self.ws = null;
+    self.connected = false;
+    self.stopPing();
+    if (ws) { try { ws.close(); } catch (e) {} }
+    // The socket's own `close` handler will run now; bumping the generation
+    // first makes it a no-op instead of a second retry.
+    self.generation += 1;
+    // A retry that was already queued belongs to the socket just abandoned.
+    // Leaving it in place would make `retry` refuse to schedule this one and
+    // strand the tunnel with no timer at all.
+    if (self.reconnectTimer) { clearTimeout(self.reconnectTimer); self.reconnectTimer = null; }
+    self.retry(self.generation);
+  };
+
+  /*
+   * Backoff, not a fixed 1.5 s.  A fixed delay meant "one broker hiccuped" and
+   * "the phone is on a captive-portal Wi-Fi" were retried at the same speed,
+   * so three dead brokers were re-dialled every 4.5 seconds forever -- which
+   * on a phone is battery and radios, and on a rate-limited public broker is
+   * how an IP gets throttled.
+   */
+  Tunnel.prototype.retry = function (generation) {
+    var self = this;
+    if (generation !== undefined && generation !== self.generation) return;
     if (self.reconnectTimer) return;
+    self.attempts += 1;
+    var ceiling = Math.min(RECONNECT_BASE_MS * Math.pow(2, self.attempts - 1), RECONNECT_MAX_MS);
+    // ±20% so several phones behind one NAT do not retry in lockstep.
+    var delay = Math.round(ceiling * (0.8 + Math.random() * 0.4));
+    self.report('retrying', {
+      reason: self.lastFailure,
+      delay: Math.round(delay / 1000),
+      attempts: self.attempts,
+      total: self.brokers.length,
+    });
     self.reconnectTimer = setTimeout(function () {
       self.reconnectTimer = null;
       self.connect();
-    }, 1500);
+    }, delay);
   };
 
   Tunnel.prototype.stopPing = function () {
@@ -310,8 +430,22 @@
   Tunnel.prototype.startPing = function () {
     var self = this;
     self.stopPing();
+    self.pingOutstanding = false;
     self.pingTimer = setInterval(function () {
-      if (self.connected) self.send(new Uint8Array([0xC0, 0x00]));
+      if (!self.connected) return;
+      if (self.pingOutstanding) {
+        /*
+         * The socket is open but the broker stopped answering.  A mobile
+         * network that drops a flow without a FIN leaves exactly this: writes
+         * succeed into a void and every request times out, which reads as
+         * "the app is broken" rather than "the link is gone".  Treat it as a
+         * disconnect so the next broker gets a turn.
+         */
+        self.fail(self.generation, 'stale');
+        return;
+      }
+      self.pingOutstanding = true;
+      self.send(new Uint8Array([0xC0, 0x00]));
     }, KEEPALIVE_SECONDS * 1000 * 0.8);
   };
 
@@ -343,7 +477,15 @@
   Tunnel.prototype.handlePacket = function (packet, headerLength) {
     var type = packet[0] >> 4;
     if (type === 2) { // CONNACK
-      if (packet[headerLength + 1] !== 0) return;
+      if (this.connectTimer) { clearTimeout(this.connectTimer); this.connectTimer = null; }
+      if (packet[headerLength + 1] !== 0) {
+        // A refusal is an answer.  Returning here kept the socket open and set
+        // no timer, so the page held a dead tunnel with nothing to rescue it:
+        // every request waited out its timeout and every poll failed while the
+        // other two brokers sat unused.
+        this.fail(this.generation, 'refused');
+        return;
+      }
       this._markOnline();
       this.startPing();
       var self = this;
@@ -356,7 +498,9 @@
       this.send(subscribe);
       this.channel.seal({ v: PROTOCOL_VERSION, type: 'hello', phone_id: this.phoneId(), name: 'phone' })
         .then(function (blob) { self.publish(blob, 1); });
-      this.onlineHandlers.forEach(function (handler) { handler(true); });
+      // No handler call here: `_markOnline()` above already announced it, and
+      // a page that subscribed to "we are online" got told twice for one
+      // handshake — enough for a handler that counts reconnects to be wrong.
       return;
     }
     if (type === 3) { // PUBLISH
@@ -375,6 +519,10 @@
       return;
     }
     if (type === 4) { // PUBACK for our QoS1 publish
+      return;
+    }
+    if (type === 13) { // PINGRESP — the only proof the path is still there
+      this.pingOutstanding = false;
       return;
     }
   };
@@ -414,6 +562,12 @@
 
   Tunnel.prototype._markOnline = function () {
     this.connected = true;
+    // A CONNACK, whichever broker sent it, ends the failure run: the next
+    // disconnect should retry in 1.5 s rather than at the backoff ceiling.
+    this.attempts = 0;
+    this.pingOutstanding = false;
+    if (this.connectTimer) { clearTimeout(this.connectTimer); this.connectTimer = null; }
+    this.report('online', { broker: this.currentBroker || '' });
     var waiters = this._onlineWaiters;
     this._onlineWaiters = [];
     waiters.forEach(function (waiter) {
@@ -539,6 +693,10 @@
     tunnel: tunnel,
     online: false,
     request: function (path, method, body) { return tunnel.request(path, method, body); },
+    // The page renders "connecting to relay 2 of 3" from these.  A page that
+    // subscribes late still gets the current one.
+    onState: function (handler) { return tunnel.onState(handler); },
+    state: function () { return tunnel.state; },
   };
   tunnel.onlineHandlers.push(function (online) { window.__CLIPSYNC_REMOTE__.online = online; });
   tunnel.start();

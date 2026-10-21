@@ -77,3 +77,10 @@ notes/
 # defect to anyone reading.  They stay on the maintainer's disk.
 AUDIT-REPORT.md
 PERF-REPORT.md
+
+# The code-review rounds.  Same reasoning as the two above: each one lists the
+# findings that are fixed *and* the ones still open, with paths written out.
+CODE-REVIEW-*.md
+
+# WorkBuddy's own project state (daily logs, memory).  Tool data, not source.
+.workbuddy/

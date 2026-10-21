@@ -532,7 +532,15 @@ def _dispatch(
         if path == "/api/history":
             limit_str = query_params.get("limit", [None])[0]
             offset_str = query_params.get("offset", [None])[0]
-            data, status = get_history(history, cfg, limit_str, offset_str)
+            # The phone's history page searches and filters; the window does
+            # the same work over IPC.  Both read the same three params so a
+            # query means the same thing on either client.
+            query_str = query_params.get("q", [None])[0]
+            kind_str = query_params.get("kind", [None])[0]
+            sort_str = query_params.get("sort", [None])[0]
+            data, status = get_history(
+                history, cfg, limit_str, offset_str, query_str, kind_str, sort_str
+            )
             return _json_response(data, status)
 
         elif path == "/api/devices":
@@ -605,7 +613,12 @@ def _dispatch(
             return _json_response({"ok": False, "error": "not found"}, 404)
 
         elif path == "/api/favorites":
-            data, status = get_favorites()
+            # Optional narrowing for the phone's favourites page: the window
+            # filters through IPC, and the phone has no IPC.
+            data, status = get_favorites(
+                query_params.get("q", [None])[0],
+                query_params.get("group", [None])[0],
+            )
             return _json_response(data, status)
 
         elif path == "/api/transfer":

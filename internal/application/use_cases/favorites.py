@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from internal.application.errors import ApplicationError
+from internal.application.use_cases.search import matcher as query_matcher
 from internal.clipboard.format import decode_text
 from internal.data.favorites_export import build_favorites_export
 
@@ -88,16 +89,14 @@ class FavoritesUseCase:
             )
             for name in groups:
                 self._text(name, "stored group", 128)
-            needle = query.casefold()
+            # Terms must all be found, and may land in either field: a favourite
+            # is remembered by what it says *and* the group it was filed under.
+            hit = query_matcher(query)
             matches = [
                 entry
                 for entry in entries
                 if (not group or entry["group"] == group)
-                and (
-                    not needle
-                    or needle in entry["title"].casefold()
-                    or needle in entry["content"].casefold()
-                )
+                and hit(entry["title"], entry["content"])
             ]
             # The sidebar's counts are taken over the whole library, not over
             # the search: a count that moved while the reader typed would be
