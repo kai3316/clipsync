@@ -82,5 +82,14 @@ PERF-REPORT.md
 # findings that are fixed *and* the ones still open, with paths written out.
 CODE-REVIEW-*.md
 
+# A catch-all for the next one.  The four rules above name the files that
+# happen to exist today; a review saved under any other name would be
+# published before anyone looked.  `core.ignorecase` is true in this checkout,
+# so one casing is enough.  Deliberately no `*SECURITY*.md`: that would also
+# swallow a `SECURITY.md` vulnerability-disclosure policy, which is the one
+# file of this kind that *should* be public.
+*REVIEW*.md
+*AUDIT*.md
+
 # WorkBuddy's own project state (daily logs, memory).  Tool data, not source.
 .workbuddy/
