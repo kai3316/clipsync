@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-collect-all-logs"
+description = "Enables the collect_all_logs command without any pre-configured scope."
+commands.allow = ["collect_all_logs"]
+
+[[permission]]
+identifier = "deny-collect-all-logs"
+description = "Denies the collect_all_logs command without any pre-configured scope."
+commands.deny = ["collect_all_logs"]

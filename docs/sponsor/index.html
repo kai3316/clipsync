@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>赞助 ClipSync · Support ClipSync</title>
+<meta name="description" content="赞助 ClipSync：用支付宝或微信扫码，自愿支持一个不靠广告的跨设备剪贴板工具。">
+<link rel="icon" href="../assets/icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f5f7f6;
+    --card: #fff;
+    --soft: #edf2f0;
+    --line: #dfe8e4;
+    --text: #1f2a27;
+    --muted: #69736f;
+    --accent: #087c6b;
+    --accent-soft: #dff1eb;
+    --accent-line: #b9ddd3;
+    --danger-soft: #fff2ef;
+    --danger-text: #98382f;
+    --radius: 16px;
+    --shadow: 0 18px 48px rgba(17, 48, 40, .08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #171c1b;
+      --card: #202725;
+      --soft: #27302d;
+      --line: #35413d;
+      --text: #e7eeeb;
+      --muted: #9eaaa5;
+      --accent: #7dd3c7;
+      --accent-soft: #133731;
+      --accent-line: #28564d;
+      --danger-soft: #33201e;
+      --danger-text: #f0a8a1;
+      --shadow: 0 18px 48px rgba(0, 0, 0, .25);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--page); }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(1100px 600px at 50% -220px, var(--accent-soft), transparent 65%), var(--page);
+    color: var(--text);
+    font: 15px/1.65 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { width: min(960px, calc(100% - 40px)); margin: 0 auto; }
+  header { padding: 26px 0 12px; }
+  header .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; font-size: 17px; letter-spacing: -.01em; }
+  .brand:hover { text-decoration: none; }
+  .brand img { width: 30px; height: 30px; border-radius: 8px; }
+  .top-links { display: flex; align-items: center; gap: 18px; color: var(--muted); font-size: 13px; }
+  .top-links a { color: var(--muted); }
+  .lang { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+  .lang button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; padding: 4px 10px; cursor: pointer; }
+  .lang button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+  main { padding: 28px 0 56px; }
+  .hero { max-width: 700px; margin: 0 auto 34px; text-align: center; }
+  .eyebrow { margin: 0 0 10px; color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+  .hero .heart { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; margin-bottom: 16px; border-radius: 14px; background: var(--accent-soft); color: var(--accent); }
+  .hero .heart svg { width: 24px; height: 24px; }
+  .hero h1 { margin: 0 0 14px; font-size: clamp(28px, 5vw, 42px); line-height: 1.2; letter-spacing: -.03em; }
+  .hero p { margin: 0 auto; max-width: 620px; color: var(--muted); font-size: 15px; line-height: 1.8; }
+  .qr-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .qr-card {
+    display: grid;
+    justify-items: center;
+    gap: 12px;
+    padding: 22px 22px 18px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    text-align: center;
+  }
+  .qr-card__head { display: flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 700; }
+  .pay-mark { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: #fff; font-size: 13px; font-weight: 800; }
+  .pay-mark--alipay { background: #1677ff; }
+  .pay-mark--wechat { background: #07c160; }
+  .qr-button { display: block; padding: 0; border: 0; background: transparent; cursor: zoom-in; border-radius: 12px; }
+  .qr-button img { display: block; width: min(280px, 72vw); height: auto; border-radius: 10px; background: #fff; }
+  .qr-button:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+  .qr-card p { margin: 0; color: var(--muted); font-size: 13px; }
+  .note-box { margin-top: 22px; padding: 14px 16px; border-radius: 10px; background: var(--danger-soft); color: var(--danger-text); font-size: 12px; line-height: 1.8; }
+  .note-box strong { color: inherit; }
+  .fine-print { margin: 14px 0 0; color: var(--muted); font-size: 12px; text-align: center; }
+  footer { border-top: 1px solid var(--line); margin-top: 30px; padding: 22px 0 40px; color: var(--muted); font-size: 12px; }
+  footer .wrap { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+  .lightbox { position: fixed; inset: 0; z-index: 50; display: none; place-items: center; padding: 24px; background: rgba(8, 18, 15, .82); backdrop-filter: blur(4px); }
+  .lightbox[open] { display: grid; }
+  .lightbox img { width: min(88vw, 560px); height: auto; border-radius: 14px; background: #fff; }
+  .lightbox button { position: absolute; top: 18px; right: 18px; width: 38px; height: 38px; border-radius: 50%; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.12); color: #fff; font-size: 22px; line-height: 1; cursor: pointer; }
+  @media (max-width: 700px) {
+    .qr-grid { grid-template-columns: minmax(0, 1fr); }
+    .qr-card { padding: 18px 16px; }
+    .top-links { gap: 12px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <a class="brand" href="../"><img src="../assets/icon.svg" alt="">ClipSync</a>
+    <nav class="top-links" aria-label="站点导航">
+      <a href="../" data-i18n="home">返回首页</a>
+      <a href="https://github.com/kai3316/clipsync" data-i18n="repo">GitHub</a>
+      <span class="lang">
+        <button type="button" data-lang="zh" aria-pressed="true">中文</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      </span>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <div class="heart" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
+    </div>
+    <p class="eyebrow" data-i18n="eyebrow">支持独立开发</p>
+    <h1 data-i18n="title">赞助 ClipSync</h1>
+    <p data-i18n="lead">ClipSync 不卖广告，也不要求注册账号。如果它每天替你省下一点复制粘贴的时间，你可以自愿赞助，让这个项目继续被维护。</p>
+  </section>
+
+  <section class="qr-grid" aria-label="收款二维码">
+    <article class="qr-card">
+      <div class="qr-card__head"><span class="pay-mark pay-mark--alipay" aria-hidden="true">支</span><span data-i18n="alipayName">支付宝</span></div>
+      <button type="button" class="qr-button" data-qr="alipay">
+        <img src="assets/alipay-qr.png" alt="支付宝收款码" width="980" height="980" loading="lazy">
+      </button>
+      <p data-i18n="alipayHint">打开支付宝，使用「扫一扫」</p>
+    </article>
+    <article class="qr-card">
+      <div class="qr-card__head"><span class="pay-mark pay-mark--wechat" aria-hidden="true">微</span><span data-i18n="wechatName">微信支付</span></div>
+      <button type="button" class="qr-button" data-qr="wechat">
+        <img src="assets/wechat-qr.png" alt="微信收款码" width="980" height="980" loading="lazy">
+      </button>
+      <p data-i18n="wechatHint">打开微信，使用「扫一扫」</p>
+    </article>
+  </section>
+
+  <div class="note-box">
+    <strong data-i18n="warningTitle">请注意</strong>
+    <span data-i18n="warningText">赞助是自愿的，不构成购买软件、服务或公益捐赠，也不提供退款和捐赠票据。请只转你愿意承担的金额，并自行确认所在地区的法律法规与税务义务。</span>
+  </div>
+  <p class="fine-print" data-i18n="finePrint">目前仅支持支付宝和微信扫码赞助。境外用户可能无法直接使用，感谢理解。</p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span data-i18n="footerLeft">ClipSync · 跨设备的剪贴板、文件与聊天</span>
+    <span><a href="../" data-i18n="footerHome">回到 ClipSync</a> · <a href="https://github.com/kai3316/clipsync" target="_blank" rel="noopener">GitHub</a></span>
+  </div>
+</footer>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="收款码大图">
+  <button type="button" id="lightbox-close" aria-label="关闭">×</button>
+  <img id="lightbox-image" src="" alt="">
+</div>
+
+<script>
+  const I18N = {
+    zh: {
+      home: "返回首页", repo: "GitHub", eyebrow: "支持独立开发", title: "赞助 ClipSync",
+      lead: "ClipSync 不卖广告，也不要求注册账号。如果它每天替你省下一点复制粘贴的时间，你可以自愿赞助，让这个项目继续被维护。",
+      alipayName: "支付宝", wechatName: "微信支付",
+      alipayHint: "打开支付宝，使用「扫一扫」", wechatHint: "打开微信，使用「扫一扫」",
+      alipayAlt: "放大支付宝收款码", wechatAlt: "放大微信收款码",
+      warningTitle: "请注意",
+      warningText: "赞助是自愿的，不构成购买软件、服务或公益捐赠，也不提供退款和捐赠票据。请只转你愿意承担的金额，并自行确认所在地区的法律法规与税务义务。",
+      finePrint: "目前仅支持支付宝和微信扫码赞助。境外用户可能无法直接使用，感谢理解。",
+      footerLeft: "ClipSync · 跨设备的剪贴板、文件与聊天", footerHome: "回到 ClipSync", close: "关闭"
+    },
+    en: {
+      home: "Home", repo: "GitHub", eyebrow: "SUPPORT INDEPENDENT WORK", title: "Support ClipSync",
+      lead: "ClipSync has no ads and no account. If it saves you a little copy-paste time every day, you can support its maintenance voluntarily.",
+      alipayName: "Alipay", wechatName: "WeChat Pay",
+      alipayHint: "Open Alipay and use Scan", wechatHint: "Open WeChat and use Scan",
+      alipayAlt: "Enlarge the Alipay QR code", wechatAlt: "Enlarge the WeChat QR code",
+      warningTitle: "Please note",
+      warningText: "Sponsorship is voluntary and is not a purchase of software or a service, a charitable donation, or a tax-deductible gift. No refunds or receipts are provided. Please check the laws and tax rules where you live.",
+      finePrint: "Alipay and WeChat scanning are the only support methods for now; supporters outside mainland China may not be able to use them.",
+      footerLeft: "ClipSync · clipboard, files and chat across devices", footerHome: "Back to ClipSync", close: "Close"
+    }
+  };
+
+  let lang = (new URLSearchParams(location.search).get("lang") || (navigator.language || "zh").toLowerCase().startsWith("zh") ? "zh" : "en");
+  let text = I18N[lang] || I18N.zh;
+
+  function applyText() {
+    document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+    document.querySelectorAll("[data-i18n]").forEach((node) => {
+      const key = node.getAttribute("data-i18n");
+      if (text[key]) node.textContent = text[key];
+    });
+    document.querySelectorAll("[data-lang]").forEach((button) => {
+      button.setAttribute("aria-pressed", button.getAttribute("data-lang") === lang ? "true" : "false");
+    });
+    const labels = { alipay: text.alipayAlt, wechat: text.wechatAlt };
+    document.querySelectorAll(".qr-button").forEach((button) => {
+      const label = labels[button.getAttribute("data-qr")];
+      if (label) {
+        button.setAttribute("aria-label", label);
+        button.querySelector("img").alt = label;
+      }
+    });
+    document.getElementById("lightbox-close").setAttribute("aria-label", text.close);
+  }
+
+  const lightbox = document.getElementById("lightbox");
+  const lightboxImage = document.getElementById("lightbox-image");
+  document.querySelectorAll(".qr-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const image = button.querySelector("img");
+      lightboxImage.src = image.src;
+      lightboxImage.alt = image.alt;
+      lightbox.setAttribute("open", "");
+      document.getElementById("lightbox-close").focus();
+    });
+  });
+  function closeLightbox() {
+    lightbox.removeAttribute("open");
+    lightboxImage.src = "";
+  }
+  document.getElementById("lightbox-close").addEventListener("click", closeLightbox);
+  lightbox.addEventListener("click", (event) => { if (event.target === lightbox) closeLightbox(); });
+  window.addEventListener("keydown", (event) => { if (event.key === "Escape") closeLightbox(); });
+
+  document.querySelectorAll("[data-lang]").forEach((button) => {
+    button.addEventListener("click", () => {
+      lang = button.getAttribute("data-lang");
+      text = I18N[lang] || I18N.zh;
+      applyText();
+    });
+  });
+
+  applyText();
+</script>
+</body>
+</html>

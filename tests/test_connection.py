@@ -1,0 +1,649 @@
+"""The transport's wire constants, its send contract, and scratch hygiene.
+
+``MockPairingManager`` also lives here: the TCP/TLS lifecycle suite
+(tests/sidecar/test_transport_lifecycle.py) imports it to stand a real
+``TransportManager`` up without a real pairing store.
+"""
+
+import logging
+import os
+import socket
+import sys
+import threading
+import time
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from internal.transport.connection import (
+    _REJECT_MARKER,
+    _REJECT_REASONS,
+    FRAME_HEADER_SIZE,
+    MAX_FRAME_SIZE,
+    REJECT_IDENTITY_UNPROVEN,
+    REJECT_REMOVED,
+    REJECT_UNSPECIFIED,
+    TransportManager,
+)
+
+
+class MockPairingManager:
+    """Minimal mock of PairingManager with the interface TransportManager needs.
+
+    Returns a real Ed25519 DeviceIdentity so that any code that reads PEM
+    fields or computes fingerprints works without patching cryptography.
+    """
+
+    def __init__(self):
+        import datetime
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.x509.oid import NameOID
+
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-device"),
+            ]
+        )
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(12345)
+            .not_valid_before(datetime.datetime.now(datetime.UTC))
+            .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=365))
+            .sign(private_key, None)
+        )
+        cert_pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+
+        from internal.security.pairing import DeviceIdentity, fingerprint_short
+
+        self._identity = DeviceIdentity(
+            device_id="test-device",
+            device_name="Test Device",
+            private_key=private_key,
+            certificate=certificate,
+            certificate_pem=cert_pem,
+            private_key_pem=key_pem,
+            fingerprint="AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+            fingerprint_short=fingerprint_short(cert_pem),
+        )
+
+    # --- PairingManager interface ------------------------------------------
+
+    def get_identity(self):
+        return self._identity
+
+    def get_peer_certificate(self, peer_id):
+        return self._identity.certificate_pem
+
+    def is_peer_paired(self, peer_id):
+        return False
+
+    def add_peer(self, *args, **kwargs):
+        pass
+
+    def generate_shared_pairing_code(self, peer_id):
+        return "00000000"
+
+    def make_handshake_nonce(self):
+        # The identity exchange asks for one before it reads anything, so a mock
+        # without it fails every dial-related test for a reason that has nothing
+        # to do with what the test is checking.  (Signing and verifying are not
+        # here: no test reaches a frame with this manager.)
+        return os.urandom(32).hex()
+
+
+def test_send_to_peer_unknown_peer_returns_false():
+    # Regression: nearby chat's _send_frame treats a non-True result as
+    # "nothing delivered", so the transport MUST return a real bool — a
+    # bare `return` (None) made every chat send look like a failure in
+    # the real app while the unit tests' bool-returning stubs hid it.
+    tm = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+    assert tm.send_to_peer("nobody", b"data") is False
+
+
+class TestConstants:
+    """Protocol constants are what the rest of the stack expects."""
+
+    def test_max_frame_size_is_10_mb(self):
+        assert MAX_FRAME_SIZE == 10 * 1024 * 1024
+
+    def test_frame_header_size_is_4(self):
+        assert FRAME_HEADER_SIZE == 4
+
+
+def test_stale_scratch_pem_files_are_removed(monkeypatch, tmp_path):
+    """Leftover key/cert files in the TLS scratch directory do not survive."""
+    monkeypatch.setattr(
+        TransportManager,
+        "_secure_scratch_dir",
+        staticmethod(lambda: tmp_path),
+    )
+
+    pem1 = tmp_path / "old_key.pem"
+    pem2 = tmp_path / "old_cert.pem"
+    keep = tmp_path / "config.txt"
+
+    pem1.write_text("dummy key data")
+    pem2.write_text("dummy cert data")
+    keep.write_text("should remain")
+
+    assert pem1.exists()
+    assert pem2.exists()
+
+    TransportManager._cleanup_stale_scratch()
+
+    assert not pem1.exists(), "Stale .pem file should be removed"
+    assert not pem2.exists(), "Stale .pem file should be removed"
+    assert keep.exists(), "Non-.pem files must be left untouched"
+
+
+class _TimeoutThatDiesAfterClose:
+    """A socket whose timeout cannot be restored once it has been closed.
+
+    This is what an SSLSocket does: ``sslsocket.settimeout()`` raises
+    ``RuntimeError("handshake not done yet")`` when the wrapper's underlying
+    ``_sslobj`` is gone, which is the state a socket is left in after the peer
+    closes the connection.
+    """
+
+    def __init__(self, recv_error: BaseException):
+        self._recv_error = recv_error
+        self._timeout: float | None = 10.0
+        self.closed = False
+
+    def gettimeout(self):
+        return self._timeout
+
+    def settimeout(self, value):
+        if self.closed:
+            raise RuntimeError("handshake not done yet")
+        self._timeout = value
+
+    def recv(self, _size):
+        # The peer went away between the handshake and the identity frame.
+        self.closed = True
+        raise self._recv_error
+
+
+def test_a_peer_that_drops_the_link_is_named_by_its_own_error(caplog):
+    """The identity read reports why it failed, not what the cleanup failed at.
+
+    Restoring the socket's timeout runs from ``finally``, so an exception there
+    replaces the one that got us into the block.  When the peer closes the
+    connection mid-handshake, ``settimeout`` is exactly what raises — so the
+    warning in the log used to read "connect failed: handshake not done yet" for
+    every such dial, naming neither the peer nor the reason.  The dial's own
+    error has to survive.
+
+    The read is reached through the exchange, which is the only thing that reads
+    an identity frame now, so this also says the failure still lands on the
+    dial's own error rather than being swallowed by the layer above it.
+    """
+    peer_gone = ConnectionResetError("connection reset by peer")
+    sock = _TimeoutThatDiesAfterClose(peer_gone)
+    tm = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+
+    with caplog.at_level(logging.WARNING, logger="internal.transport.connection"):
+        assert tm._identity_exchange(sock, server_side=False) is None
+
+    assert "connection reset by peer" in caplog.text
+    assert "handshake not done yet" not in caplog.text
+
+
+def test_a_handshake_that_fails_keeps_its_own_reason():
+    """``_wrap_socket`` must not let the timeout restore replace the failure.
+
+    A handshake that times out leaves the wrapper unusable, so the restore in
+    the failure path is the other place the real reason could be swapped for
+    the cleanup's error.
+    """
+
+    class TimingOutWrapper(_TimeoutThatDiesAfterClose):
+        def do_handshake(self):
+            self.closed = True
+            raise TimeoutError("timed out during handshake")
+
+    class Context:
+        def wrap_socket(self, sock, **kwargs):
+            return TimingOutWrapper(TimeoutError("unused"))
+
+    class Manager(TransportManager):
+        def __init__(self):
+            self._lock = __import__("threading").RLock()
+            self._running = True
+            self._pending_sockets = {}
+            self._closed = []
+
+        def _close_socket(self, sock):
+            self._closed.append(sock)
+
+    manager = Manager()
+    with pytest.raises(TimeoutError, match="timed out during handshake"):
+        manager._wrap_socket(Context(), object(), server_hostname="peer")
+    assert manager._closed, "the failed wrapper must be closed"
+
+
+class TestStoppingADialInFlight:
+    """A dial must not outlive the stop that closed the transport.
+
+    This is the shutdown defect, written down.  `LanRuntime.stop()` gives the
+    whole teardown one five-second budget, and the drain inside
+    `TransportManager.stop_server` reported a `clipsync-connect` worker still
+    sitting in `socket.create_connection` when that budget ran out -- a dial that
+    `create_connection` had not yet returned a socket for, so the stop had
+    nothing to close.  The runtime then failed to release ownership, the process
+    did not exit cleanly, and the log said only "did not release ownership
+    within its budget".
+    """
+
+    @staticmethod
+    def _manager():
+        tm = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        tm._running = True
+        return tm
+
+    @staticmethod
+    def _blackhole():
+        """A listener that accepts and then says nothing, so a dial hangs.
+
+        Not an unroutable address: whether that hangs or is refused at once
+        depends on the network, and this test has to fail for one reason only.
+        """
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        return listener, listener.getsockname()[1]
+
+    def test_a_dial_is_registered_before_it_connects(self):
+        tm = self._manager()
+        listener, port = self._blackhole()
+        dial = None
+        try:
+            seen = []
+            original = tm._track_socket
+
+            def watch(sock):
+                seen.append(sock)
+                return original(sock)
+
+            tm._track_socket = watch
+            dial = threading.Thread(
+                target=self._swallow, args=(tm, "127.0.0.1", port, 10), daemon=True
+            )
+            dial.start()
+            # The socket exists and is known to the manager while the dial is
+            # still in progress -- that is the whole fix, and the wait below
+            # gives the thread time to get there.
+            deadline = time.monotonic() + 5
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert seen, "the dial did not register its socket"
+            assert seen[0].fileno() != -1, "the socket should still be open"
+        finally:
+            tm._running = False
+            tm.stop_server(timeout=1)
+            if dial is not None:
+                dial.join(5)
+            listener.close()
+
+    def test_stopping_closes_a_dial_in_progress_and_returns_inside_its_budget(self):
+        tm = self._manager()
+        listener, port = self._blackhole()
+        result = {}
+        dial = None
+        try:
+            dial = threading.Thread(
+                target=self._swallow,
+                args=(tm, "127.0.0.1", port, 10),
+                kwargs={"into": result},
+                daemon=True,
+            )
+            dial.start()
+            deadline = time.monotonic() + 5
+            while not tm._pending_sockets and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert tm._pending_sockets, "the dial should be registered before it connects"
+
+            started = time.monotonic()
+            # A fraction of what the dial would have waited on its own, so a
+            # regression shows up as a slow test rather than a flaky one.
+            stopped = tm.stop_server(timeout=2)
+            elapsed = time.monotonic() - started
+            assert stopped is True
+            assert elapsed < 2, f"the drain took {elapsed:.1f}s of its 2s budget"
+            dial.join(5)
+            assert not dial.is_alive(), "the dial outlived the stop"
+            # An aborted dial is a stop, not a connection: it must not report a
+            # socket the caller could go on to use.  Either it raised, or the
+            # connect completed in the window before the close landed -- in which
+            # case what it returned is a socket that is already closed.  Both are
+            # "not usable", which is the property; asserting only `is None` made
+            # this test racy, because which one happens depends on whether the
+            # kernel finished the connect before `stop_server` closed the socket.
+            outcome = result["outcome"]
+            assert outcome is None or outcome.fileno() == -1, (
+                f"the dial handed back a usable socket: {outcome!r}"
+            )
+        finally:
+            tm._running = False
+            tm.stop_server(timeout=1)
+            if dial is not None:
+                dial.join(5)
+            listener.close()
+
+    @staticmethod
+    def _swallow(manager, address, port, timeout, into=None):
+        """Dial, reporting None where a stop cut it short rather than an error."""
+        try:
+            outcome = manager._dial(address, port, timeout)
+        except OSError:
+            outcome = None
+        if into is not None:
+            into["outcome"] = outcome
+        return outcome
+
+
+class TestPinningMeansThePin:
+    """A pinned dial must trust that certificate and nothing else.
+
+    `create_default_context(Purpose.SERVER_AUTH)` loads the platform trust store,
+    and `load_verify_locations` only *adds* to it.  So the old shape meant
+    `CERT_REQUIRED` accepted a chain to the pinned certificate **or to any of the
+    ~250 public roots on the machine**, with `check_hostname` off, so no name had
+    to match either: a pin that let a publicly-signed impostor complete the
+    handshake.  Measured on this machine, the store still held 251 CA roots after
+    the pin was loaded.
+    """
+
+    def test_a_pinned_dial_carries_no_system_trust_anchors(self, tmp_path):
+        import ssl
+
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        peer = MockPairingManager()
+        peer_cert = peer.get_identity().certificate_pem
+
+        class Pairing(MockPairingManager):
+            def get_peer_certificate(self, peer_id):
+                return peer_cert
+
+        manager._pairing_mgr = Pairing()
+        # The scratch dir is where the context writes its temporary PEMs.
+        scratch = tmp_path / ".scratch"
+        scratch.mkdir()
+        manager._secure_scratch_dir = staticmethod(lambda: scratch)
+
+        context = manager._build_ssl_context(server_side=False, verify_peer_id="peer-1")
+
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        # The load-bearing assertion: only the pinned certificate is an anchor.
+        stats = context.cert_store_stats()
+        assert stats["x509_ca"] == 0, (
+            f"the pinned context still trusts {stats['x509_ca']} CA roots; "
+            f"pinning must not be additive"
+        )
+
+    def test_an_unpinned_dial_is_unchanged(self, tmp_path):
+        """First contact has nothing to pin yet, so it keeps the old shape."""
+        import ssl
+
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        scratch = tmp_path / ".scratch"
+        scratch.mkdir()
+        manager._secure_scratch_dir = staticmethod(lambda: scratch)
+
+        context = manager._build_ssl_context(server_side=False, verify_peer_id=None)
+
+        # Whatever the platform store holds, this path is not the pinned one:
+        # the app-layer identity frame is what decides trust on first contact.
+        assert context.verify_mode in (ssl.CERT_NONE, ssl.CERT_REQUIRED)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+
+
+class TestTheRejectionMarkerCarriesAReason:
+    """Three reasons, and only one of them has an action for the user.
+
+    From the dialling side they are indistinguishable -- it has the identity it
+    always had and the peer stopped accepting it -- so the reason has to travel
+    in the marker or it is lost.  It also has to survive the *frame reader*, which
+    reads the marker's four ``0xff`` bytes as a length header of 0xFFFFFFFF and
+    discards them: every rejection used to reach the dial as "no identity frame",
+    with the reason gone before anything could report it.
+    """
+
+    def _pair(self):
+        left, right = socket.socketpair()
+        for sock in (left, right):
+            sock.settimeout(5)
+        return left, right
+
+    def test_each_reason_survives_the_round_trip(self):
+        """Every reason reaches the dial through the one probe that reads it.
+
+        The probe under ``_check_rejection`` is the only marker reader on the
+        dial path.  A second, near-identical parser (``_read_rejection_marker``)
+        was left behind as production dead code — its docstring claimed it ran
+        "before the frame reader" — and this test used to exercise that one, so
+        the code actually on the path had no round-trip test at all.
+        """
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        for reason in (
+            REJECT_UNSPECIFIED,
+            REJECT_REMOVED,
+            REJECT_IDENTITY_UNPROVEN,
+        ):
+            sender, receiver = self._pair()
+            try:
+                TransportManager._send_rejection(sender, reason)
+                seen, leftover = manager._check_rejection(receiver)
+                assert seen == reason
+                assert leftover == b""
+            finally:
+                sender.close()
+                receiver.close()
+
+    def test_the_dead_marker_parser_is_gone(self):
+        """One marker parser, not two with different semantics.
+
+        The two differed in what they returned for the same bytes (one the
+        reason, one ``(reason, leftover)``), which is exactly the shape that
+        makes a later edit pick the wrong one.
+        """
+        assert not hasattr(TransportManager, "_read_rejection_marker")
+
+    def test_the_probe_reports_the_reason_too(self):
+        """The path the dial actually uses, not only the direct reader."""
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        sender, receiver = self._pair()
+        try:
+            TransportManager._send_rejection(sender, REJECT_IDENTITY_UNPROVEN)
+            reason, leftover = manager._check_rejection(receiver)
+            assert reason == REJECT_IDENTITY_UNPROVEN
+            assert leftover == b""
+        finally:
+            sender.close()
+            receiver.close()
+
+    def test_a_marker_without_a_reason_byte_is_unspecified(self):
+        """A build that predates the reason byte must not be mislabelled."""
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        sender, receiver = self._pair()
+        try:
+            sender.sendall(_REJECT_MARKER)
+            reason, _leftover = manager._check_rejection(receiver)
+            assert reason == REJECT_UNSPECIFIED
+        finally:
+            sender.close()
+            receiver.close()
+
+    def test_ordinary_traffic_is_not_mistaken_for_a_rejection(self):
+        """The probe runs on every connect, so a false positive would be fatal."""
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        sender, receiver = self._pair()
+        try:
+            # A frame header (length zero) is what an idle peer sends.
+            sender.sendall(b"\x00\x00\x00\x00")
+            reason, leftover = manager._check_rejection(receiver, timeout=0.1, max_wait=0.2)
+            assert reason == 0
+            # The bytes must come back, or the first application frame is eaten.
+            assert leftover == b"\x00\x00\x00\x00"
+        finally:
+            sender.close()
+            receiver.close()
+
+    def test_the_dial_reports_the_reason_it_was_given(self):
+        """The reason must reach the app layer, or it cannot be shown."""
+        seen = []
+        manager = TransportManager("dev-1", "Device 1", 9999, MockPairingManager())
+        manager.set_on_connect_rejected(lambda name, pid, reason: seen.append(reason))
+        manager._notify_connect_rejected("Peer", "peer-1", REJECT_IDENTITY_UNPROVEN)
+        assert seen == [REJECT_IDENTITY_UNPROVEN]
+
+    def test_every_reason_has_a_name_for_the_log(self):
+        """A bare code in a log line sends the reader to the source."""
+        for reason in (REJECT_UNSPECIFIED, REJECT_REMOVED, REJECT_IDENTITY_UNPROVEN):
+            assert _REJECT_REASONS.get(reason), f"reason {reason} has no name"
+
+
+# ── the noise a sleeping peer used to make ───────────────────────────────
+def test_a_retry_cycle_warns_once_and_then_goes_quiet(caplog):
+    """259 warnings became one, and the retries are still recorded.
+
+    A laptop asleep with its lid closed does not answer mDNS and does not accept TCP, so every
+    attempt fails and every failure used to be a WARNING -- one line every 30 seconds for three
+    hours, none of them actionable and all of them from a path working as designed.
+
+    The retry machinery already knows which attempt starts a cycle: `_reconnect_timers` holds a
+    live timer while one is pending.  Asserted as counts, because the count is the change.
+    """
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._reconnect_timers = {}
+    manager._connect_failures = {}
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.connection"):
+        # The first attempt of a cycle: nothing pending, nothing failed before.
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        first = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(first) == 1, "the first failure of a cycle is news"
+
+        # A retry is now pending, so the attempts that follow are the expected ones.
+        manager._reconnect_timers["peer"] = object()
+        for _ in range(20):
+            manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, f"{len(warnings)} warnings for 21 failures"
+    # And nothing is lost: every attempt is in the log at DEBUG.
+    assert len([r for r in caplog.records if "connect failed" in r.getMessage()]) == 21
+    assert manager._connect_failures["peer"] == 21
+
+
+def test_a_peer_coming_back_ends_the_streak(caplog):
+    """So a peer that goes away a second time is announced a second time.
+
+    Without the reset, the second outage would be silent -- which is the other half of the
+    trade: one warning per *cycle*, not one per process.  The reset here is the production
+    helper the successful-connect path calls; the test does not edit the dict itself.
+    """
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._reconnect_timers = {}
+    manager._connect_failures = {}
+    manager._reconnect_attempts = {}
+    manager._cert_pin_blocked = {}
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.connection"):
+        # The peer disappears; the first dial fails and a retry is pending.
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        manager._reconnect_timers["peer"] = object()
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        manager._connect_failures["real-peer"] = 7  # same peer under its real id
+
+        # The retry fires and connects.  The timer that dialled is gone, and the success
+        # path clears both id forms through the same helper connection.py calls.
+        manager._reconnect_timers.pop("peer", None)
+        manager._clear_reconnect_state("peer", "real-peer")
+        assert "peer" not in manager._connect_failures
+        assert "real-peer" not in manager._connect_failures
+
+        # The peer goes away again; this is a new cycle's first failure.
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 2, "each cycle gets its own warning"
+    assert manager._connect_failures["peer"] == 1
+
+
+def test_the_first_failure_after_a_successful_reconnect_is_a_warning(caplog):
+    """A peer that goes away again is news, even though it failed before.
+
+    Regression: the successful-connect path cleared ``_reconnect_attempts`` but not
+    ``_connect_failures``, so the first failure of the cycle after a recovery saw a stale
+    streak and was logged at DEBUG.  The one line a reader needs -- 'it went away again' --
+    was the one the reset forgot.
+    """
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._reconnect_timers = {}
+    manager._connect_failures = {}
+    manager._reconnect_attempts = {}
+    manager._cert_pin_blocked = {}
+
+    with caplog.at_level(logging.DEBUG, logger="internal.transport.connection"):
+        # First outage: a burst of failed dials leaves a long streak.
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        manager._reconnect_timers["peer"] = object()
+        for _ in range(4):
+            manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+        assert manager._connect_failures["peer"] == 5
+
+        # The retry fires and the dial succeeds; production runs this same reset for both
+        # id forms before it announces the connection.
+        manager._reconnect_timers.pop("peer", None)
+        manager._clear_reconnect_state("peer", "real-peer")
+        assert "peer" not in manager._connect_failures
+        assert "real-peer" not in manager._connect_failures
+
+        # Second outage: nothing pending and no stale streak, so the first failure warns.
+        manager._log_connect_failure("peer", "Sleepy", TimeoutError("timed out"))
+
+    attempts = [r for r in caplog.records if "connect failed" in r.getMessage()]
+    warnings = [r for r in attempts if r.levelno >= logging.WARNING]
+    assert len(warnings) == 2, [r.getMessage() for r in attempts]
+    assert warnings[-1].levelno == logging.WARNING
+    assert manager._connect_failures["peer"] == 1
+
+
+def test_a_disconnect_callback_for_an_absent_peer_is_a_no_op():
+    """``_on_peer_disconnected`` must not delete a key that is already gone.
+
+    A disconnect can race a manual removal, and the callback can arrive with no connection
+    object to identify the entry by; falling through to a bare ``del`` would raise KeyError
+    on a path that has nothing left to do.
+    """
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._running = True
+    manager._peers = {}
+    manager._pairing_mgr = MockPairingManager()
+
+    # Neither the id lookup nor the object lookup finds an entry, and conn is None.
+    manager._on_peer_disconnected("peer", None)
+    manager._on_peer_disconnected("peer", object())
+
+    assert manager._peers == {}

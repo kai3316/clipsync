@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-companion-qr"
+description = "Enables the companion_qr command without any pre-configured scope."
+commands.allow = ["companion_qr"]
+
+[[permission]]
+identifier = "deny-companion-qr"
+description = "Denies the companion_qr command without any pre-configured scope."
+commands.deny = ["companion_qr"]

@@ -1,0 +1,311 @@
+"""Recovery paths in the transport layer.
+
+Every case here is a "the app never comes back on its own" bug: a retry loop
+that never escalates, an mDNS registration that can never be retried, a
+sleep/wake detector fooled by the clock, and a reconnect suppression with no
+way out.  They all look fine in a happy-path test and only bite after a real
+network event, so they get their own file.
+"""
+
+import os
+import socket
+import sys
+import threading
+import time
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from internal.transport import discovery as D  # noqa: N812
+from internal.transport import relay as R  # noqa: N812
+
+# --------------------------------------------------------------- relay backoff
+
+
+def _relay(monkeypatch):
+    t = R.RelayTransport(
+        ["wss://broker.example:8884/mqtt"],
+        get_channels=lambda: {},
+        on_frame=lambda frame, _topic=None, _key_index=0: None,
+        on_state=lambda s: None,
+        client_factory=lambda: None,
+        sleeper=lambda s: None,
+    )
+    return t
+
+
+def _drive_run(t, sessions: int, session_len: float = 0.0):
+    """Run the worker loop for `sessions` connect/drop cycles, capturing sleeps."""
+    delays: list[float] = []
+    t._sleeper = delays.append
+    stop = threading.Event()
+    seen = {"n": 0}
+
+    t._connect_one = lambda index, stop_ev=None: True
+
+    def fake_serve(index, stop_ev=None):
+        seen["n"] += 1
+        if session_len:
+            time.sleep(session_len)
+        if seen["n"] >= sessions:
+            stop.set()
+
+    t._serve_until_lost = fake_serve
+    t._run(stop)
+    return delays
+
+
+def test_backoff_escalates_when_the_broker_drops_us_immediately(monkeypatch):
+    """CONNACK is not success.
+
+    A broker that accepts the connection and drops the socket a second later
+    used to reset `attempt` on every cycle, so the delay stayed pinned at
+    BACKOFF_SEQUENCE[0] == 1s -- an endless once-a-second reconnect storm that
+    never escalated and never gave the next broker a fair chance.
+    """
+    t = _relay(monkeypatch)
+    delays = _drive_run(t, sessions=4)
+    # 1st drop -> attempt 1 -> 2s, then 4s, then 8s.
+    assert delays[:3] == [2, 4, 8]
+
+
+# ------------------------------------------------------------ mDNS advertising
+
+
+class _FakeZeroconf:
+    def __init__(self, fail_times=0):
+        self.registered = []
+        self.unregistered = []
+        self._fail_times = fail_times
+
+    def register_service(self, info, **_kwargs):
+        # **_kwargs: the real call passes cooperating_responders=True, which is
+        # what keeps the conflict probe off the startup path.
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise OSError("no route to host")
+        self.registered.append(info)
+
+    def unregister_service(self, info):
+        self.unregistered.append(info)
+
+
+@pytest.fixture
+def disco(monkeypatch):
+    monkeypatch.setattr(D, "get_all_local_addresses", lambda: ["192.168.1.5"])
+    monkeypatch.setattr(D, "_get_local_address", lambda: "192.168.1.5")
+    d = D.Discovery("dev-1", "Laptop", 45678, "_clipsync._tcp.local.")
+    return d
+
+
+def test_failed_registration_can_be_retried(disco):
+    """The killer bug: a failed register left _service_info set.
+
+    _service_info was assigned before register_service(), and the failure path
+    only logged -- so the `if self._service_info is not None: return` guard at
+    the top rejected every later attempt.  The device stayed undiscoverable for
+    the rest of the process while is_advertising() reported True.
+
+    Two failures, because the registration itself retries once under a
+    distinguishing instance name: the first attempt fails on the plain label,
+    the retry fails on the "-x" one, and the next call has to try again rather
+    than read either failure as "already registered".
+    """
+    disco._zc = _FakeZeroconf(fail_times=2)
+    disco.start_advertising()
+    assert disco._service_info is None
+    assert disco.is_advertising is False
+
+    disco.start_advertising()  # must actually try again
+    assert disco._zc.registered, "start_advertising never retried"
+    assert disco.is_advertising is True
+
+
+# ------------------------------------------------------- sleep/wake detection
+
+
+class _StubPairing:
+    def __init__(self, paired=True, fp="AA:BB"):
+        self._paired = paired
+        self._fp = fp
+
+    def is_peer_paired(self, pid):
+        return self._paired
+
+    def get_peer_fingerprint(self, pid):
+        return self._fp
+
+
+def _mgr(monkeypatch):
+    from internal.transport import connection as C  # noqa: N812
+
+    m = C.TransportManager.__new__(C.TransportManager)
+    m._lock = threading.RLock()
+    m._peers = {}
+    m._peer_addresses = {}
+    m._reconnect_timers = {}
+    m._reconnect_attempts = {}
+    m._cert_pin_blocked = {}
+    m._hash_to_real_id = {}
+    m._running = True
+    m._max_reconnect_attempts = 5
+    m._pairing_mgr = _StubPairing()
+    return m
+
+
+def test_cert_pin_block_is_lifted_once_the_pin_changes(monkeypatch):
+    """A pin mismatch stops reconnects -- re-pairing has to start them again.
+
+    Nothing used to lift the suppression, so after the user accepted the new
+    certificate the device stayed "paired but unreachable" until an app
+    restart.
+    """
+    m = _mgr(monkeypatch)
+    m._peer_addresses["hash-1"] = ("Laptop", "192.168.1.9", 45678)
+    m._cert_pin_blocked["hash-1"] = ("real-1", "OLD:FP")
+    scheduled: list[str] = []
+    m._schedule_reconnect = scheduled.append
+
+    m._pairing_mgr = _StubPairing(fp="OLD:FP")
+    m._recheck_cert_pin_blocks()
+    assert scheduled == [], "reconnected while the pin was still the refused one"
+    assert "hash-1" in m._cert_pin_blocked
+
+    m._pairing_mgr = _StubPairing(fp="NEW:FP")  # user re-paired
+    m._recheck_cert_pin_blocks()
+    assert scheduled == ["hash-1"]
+    assert "hash-1" not in m._cert_pin_blocked
+
+
+def test_cert_pin_block_is_dropped_without_reconnecting_when_unpaired(monkeypatch):
+    m = _mgr(monkeypatch)
+    m._cert_pin_blocked["hash-1"] = ("real-1", "OLD:FP")
+    scheduled: list[str] = []
+    m._schedule_reconnect = scheduled.append
+    m._pairing_mgr = _StubPairing(paired=False, fp="NEW:FP")
+    m._recheck_cert_pin_blocks()
+    assert scheduled == []
+    assert m._cert_pin_blocked == {}
+
+
+@pytest.mark.parametrize(
+    "wall_gap,mono_gap,expected,why",
+    [
+        (15.0, 15.0, False, "a normal tick"),
+        (900.0, 900.0, True, "suspend on Windows/macOS (monotonic includes it)"),
+        (900.0, 15.0, True, "suspend on Linux (monotonic paused, wall ran on)"),
+        (15.0, 900.0, True, "the loop itself was starved for 15 minutes"),
+        (-3600.0, 15.0, False, "clock stepped an hour backwards -- not a sleep"),
+        (16.0, 15.0, False, "a second of scheduling jitter"),
+    ],
+)
+def test_wake_detection_uses_both_clocks(wall_gap, mono_gap, expected, why):
+    from internal.transport.connection import _looks_like_wake
+
+    assert _looks_like_wake(wall_gap, mono_gap) is expected, why
+
+
+# ------------------------------------------------------ bounded address lookup
+
+
+def test_address_lookup_does_not_wait_out_a_stalled_resolver(monkeypatch):
+    """A name in no zone must not hold the caller for the resolver's timeout.
+
+    Enumerating this host's addresses calls getaddrinfo on the host name and on
+    the FQDN, and its callers are on the thread the user is waiting on: the
+    companion resolves the address it is reachable at while starting, and the
+    pairing QR resolves it while drawing.  Off a network that knows this
+    machine's name -- a macOS CI runner, a laptop that just joined a guest
+    network, anything behind a VPN that took the name server with it -- neither
+    name answers, and the caller sat in the resolver for the resolver's own
+    tens of seconds.  That is what timed the macOS sidecar suite out, on every
+    test that starts the companion, 60s apiece; Linux and Windows resolve their
+    own host name from /etc/hosts or the local resolver, so only macOS showed it.
+
+    The fake resolver answers for the host name and never answers for the FQDN:
+    a lookup that is merely slow to give up produces exactly that shape, and it
+    also pins the other half -- what did answer is still reported.
+    """
+    release = threading.Event()
+    real_getaddrinfo = socket.getaddrinfo
+    monkeypatch.setattr(D.socket, "gethostname", lambda: "clipsync-test")
+    monkeypatch.setattr(D.socket, "getfqdn", lambda: "clipsync-test.invalid")
+
+    def _getaddrinfo(name, *args, **kwargs):
+        if name == "clipsync-test":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.44.7", 0))]
+        release.wait(60)
+        return real_getaddrinfo(name, *args, **kwargs)
+
+    monkeypatch.setattr(D.socket, "getaddrinfo", _getaddrinfo)
+    try:
+        started = time.monotonic()
+        addresses = D.get_all_local_addresses()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert elapsed < D.HOSTNAME_LOOKUP_TIMEOUT + 1.0, (
+        f"address enumeration waited {elapsed:.1f}s on a name that never resolves"
+    )
+    # The bound is a ceiling on waiting, not a licence to drop the answer.
+    assert "192.168.44.7" in addresses
+
+
+# --- the steady retry interval ---
+def test_the_reconnect_ladder_ends_at_five_minutes():
+    """The fast tier is capped at 30s; the steady tier is five minutes, not thirty seconds.
+
+    Measured: at 30 seconds a laptop asleep with its lid shut produced 259 failed attempts in
+    three hours.  The interval's job is now the peer that comes back *without* answering mDNS,
+    because the presence loop dials every peer it sees (`_peer_found`) and so covers the
+    ordinary case.
+
+    Asserted as the whole ladder, because the fast attempts are what the old comment was
+    about: a Wi-Fi outage of a minute or two should still be recovered quickly, and a test
+    that only checked the cap would not notice if they went away.
+    """
+    from internal.transport.connection import (
+        FAST_RECONNECT_CAP,
+        MAX_RECONNECT_ATTEMPTS,
+        MAX_RECONNECT_BACKOFF,
+        MIN_RECONNECT_DELAY,
+        TransportManager,
+    )
+
+    manager = object.__new__(TransportManager)
+    manager._lock = threading.RLock()
+    manager._reconnect_attempts = {}
+    manager._reconnect_timers = {}
+    manager._peer_addresses = {"peer": ("127.0.0.1", 1)}
+    manager._running = True
+    manager._max_reconnect_attempts = MAX_RECONNECT_ATTEMPTS
+    # _schedule_reconnect prunes the worker/connection registries it keeps.
+    manager._workers = set()
+    manager._connections = set()
+
+    delays = []
+    for _ in range(MAX_RECONNECT_ATTEMPTS + 4):
+        manager._schedule_reconnect("peer")
+        timer = manager._reconnect_timers["peer"]
+        delays.append(round(timer.interval))
+        timer.cancel()
+        assert "peer" in manager._reconnect_timers, "scheduling must leave a live timer"
+
+    # The full fast ladder: 3, 3, 4, 8, 16, then the 30s cap for the rest of the budget.
+    fast = delays[:MAX_RECONNECT_ATTEMPTS]
+    assert fast == [3, 3, 4, 8, 16, 30, 30, 30, 30, 30], fast
+    assert fast[0] == MIN_RECONNECT_DELAY
+    assert max(fast) == FAST_RECONNECT_CAP
+    assert FAST_RECONNECT_CAP == 30
+    # Ten fast attempts span ~3 minutes (184s) before the steady tier takes over.
+    assert sum(fast) == 184
+
+    # Every attempt past the budget is the same five-minute steady interval.
+    steady = delays[MAX_RECONNECT_ATTEMPTS:]
+    assert steady, "the ladder produced no attempts past the budget"
+    assert set(steady) == {MAX_RECONNECT_BACKOFF}, steady
+    assert MAX_RECONNECT_BACKOFF == 300, (
+        "the steady interval was reduced without a measurement to justify it"
+    )

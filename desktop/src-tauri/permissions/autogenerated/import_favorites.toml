@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-favorites"
+description = "Enables the import_favorites command without any pre-configured scope."
+commands.allow = ["import_favorites"]
+
+[[permission]]
+identifier = "deny-import-favorites"
+description = "Denies the import_favorites command without any pre-configured scope."
+commands.deny = ["import_favorites"]

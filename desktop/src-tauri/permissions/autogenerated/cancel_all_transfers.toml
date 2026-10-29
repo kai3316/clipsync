@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-all-transfers"
+description = "Enables the cancel_all_transfers command without any pre-configured scope."
+commands.allow = ["cancel_all_transfers"]
+
+[[permission]]
+identifier = "deny-cancel-all-transfers"
+description = "Denies the cancel_all_transfers command without any pre-configured scope."
+commands.deny = ["cancel_all_transfers"]

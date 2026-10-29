@@ -1,0 +1,1061 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { bridge } from "../src/api/bridge";
+import { t } from "../src/i18n";
+import { createApplicationStore } from "../src/stores/application";
+import type { HistoryItem } from "../src/api/types";
+
+vi.mock("../src/api/bridge", () => ({
+  bridge: {
+    status: vi.fn(), history: vi.fn(), devices: vi.fn(), subscribe: vi.fn(),
+    unlock: vi.fn(), deleteHistory: vi.fn(), pinHistory: vi.fn(),
+    startPairing: vi.fn(), confirmPairing: vi.fn(), rejectPairing: vi.fn(),
+    unpairDevice: vi.fn(), setSyncEnabled: vi.fn(), copyHistory: vi.fn(),
+    batchPinHistory: vi.fn(), batchDeleteHistory: vi.fn(),
+    batchFavoriteHistory: vi.fn(), clearHistory: vi.fn(),
+    connectDevice: vi.fn(), disconnectDevice: vi.fn(), forgetDevice: vi.fn(),
+    restoreDevice: vi.fn(), purgeDevice: vi.fn(),
+    testDevice: vi.fn(), deviceCerts: vi.fn(), retrustDevice: vi.fn(),
+    openHistoryLink: vi.fn(),
+    requestEntryFiles: vi.fn(),
+    sendUrl: vi.fn(), pushText: vi.fn(), discoveryStatus: vi.fn(),
+    setDiscoveryEnabled: vi.fn(), setDiscoveryVisible: vi.fn(),
+    favorites: vi.fn(), favorite: vi.fn(),
+    diagnosticsReport: vi.fn(), diagnosticsRequest: vi.fn(),
+    updateCheck: vi.fn(), updateStatus: vi.fn(), updateDownload: vi.fn(),
+    updateOpenFolder: vi.fn(), updateInstall: vi.fn(), updateInstallReady: vi.fn(),
+    restartSidecar: vi.fn(), recoverDataDir: vi.fn(),
+    acceptChatInvite: vi.fn(), declineChatInvite: vi.fn(),
+  },
+}));
+
+const status = {
+  version: "test", health: "ready" as const, device_name: "Test", device_id: "a",
+  language: "zh-CN", sync_state: "not_started", capabilities: [],
+  session_id: "session", seq: 0,
+};
+const page = { session_id: "session", seq: 0, total: 0, offset: 0, items: [] };
+const pairedDevice = { id: "peer", name: "Peer", paired: true, connection_state: "online",
+  pairing_status: "paired", pairing_code: null, sas: null };
+
+beforeEach(() => {
+  vi.mocked(bridge.status).mockResolvedValue(status);
+  vi.mocked(bridge.history).mockResolvedValue(page);
+  vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+  vi.mocked(bridge.subscribe).mockResolvedValue(vi.fn());
+});
+afterEach(() => { vi.clearAllMocks(); vi.useRealTimers(); });
+
+describe("desktop application store", () => {
+  it("asks a device for a row's files, then words that device's refusal", async () => {
+    vi.mocked(bridge.requestEntryFiles).mockResolvedValue({ requested: true });
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    store.state.devices = [{ ...pairedDevice, id: "peer-1", name: "Studio" }];
+    // "7" is this machine's row; "42" is the id the peer stored the clip as —
+    // different numbers for one clip, and the peer resolves against its own.
+    const row = { id: "7", source_device: "peer-1", offer_entry: "42" } as HistoryItem;
+
+    expect(await store.downloadRemoteFile(row)).toBe(true);
+    expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("42", "peer-1");
+    // The row waits — the button shows it is waiting — until the peer either
+    // starts sending or says why it cannot.  Keyed by the id that was asked
+    // with, which is the id a refusal comes back carrying.
+    expect(store.state.remoteFilePending).toEqual(["peer-1:42"]);
+
+    // The reason crosses the wire as a code, because the peer does not know
+    // which language this window is in; it is worded here.
+    emit({ type: "event", name: "clip.file.denied", session_id: "session",
+      data: { device_id: "peer-1", entry_id: "42", reason: "gone" } });
+    expect(store.state.remoteFilePending).toEqual([]);
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t("{name} 没能发送这个文件：{reason}", {
+        name: "Studio", reason: t("文件已被移动或删除"),
+      }),
+    ]);
+
+    // A row whose offer named no id this build can read has nothing to ask
+    // with — and asking with the row's own id would land on an unrelated record
+    // on the peer — so the ask is refused here instead of guessed at.
+    expect(await store.downloadRemoteFile(
+      { id: "8", source_device: "peer-1" } as HistoryItem,
+    )).toBe(false);
+    expect(bridge.requestEntryFiles).toHaveBeenCalledTimes(1);
+  });
+  it("queues incoming transfer requests using the runtime event and filename", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "transfer.request", session_id: "session",
+      data: { transfer_id: "incoming", filename: "report.pdf", size: 42 } });
+    expect(store.state.notices).toEqual([
+      expect.objectContaining({ title: "transfer.request", message: "report.pdf" }),
+    ]);
+    emit({ type: "event", name: "transfer.complete", session_id: "session",
+      data: { transfer_id: "outgoing", success: true } });
+    expect(store.state.notices).toHaveLength(1);
+    store.dispose();
+  });
+
+  it("names the internet when a transfer request is arriving over the relay", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "transfer.request", session_id: "session",
+      data: { transfer_id: "relay", filename: "report.pdf", size: 42, relay: true } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t("{file} 经互联网传输，速度比同一网络慢，请在文件传输页确认接收。", { file: "report.pdf" }),
+    ]);
+    store.dispose();
+  });
+
+  it("leaves a LAN arrival's notice as the filename it always was", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "transfer.request", session_id: "session",
+      data: { transfer_id: "lan", filename: "report.pdf", size: 42, relay: false } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual(["report.pdf"]);
+    store.dispose();
+  });
+
+  it("says what a nearby-chat message said, and stays quiet when it is not news", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    const message = (data: Record<string, unknown>) =>
+      emit({ type: "event", name: "chat.message", session_id: "session", data });
+
+    // The sender's own message comes back through the same event — the engine
+    // fires its callback for outgoing entries too — and the sender does not
+    // need telling about the message they just typed.
+    message({ session_id: "s1", peer_name: "Studio", peer_id: "peer-1",
+      entry: { kind: "text", outgoing: true, text: "在吗" } });
+    expect(store.state.notices).toEqual([]);
+
+    // An incoming one names the device and carries the message itself: the
+    // notice is the message, not a pointer to it.
+    message({ session_id: "s1", peer_name: "Studio", peer_id: "peer-1",
+      entry: { kind: "text", outgoing: false, text: "在吗" } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual(["Studio：在吗"]);
+
+    // Unless the conversation is already on screen, where the bubble arriving
+    // is the notification.
+    store.setOpenChatSession("s1");
+    message({ session_id: "s1", peer_name: "Studio", peer_id: "peer-1",
+      entry: { kind: "text", outgoing: false, text: "收到了吗" } });
+    expect(store.state.notices).toHaveLength(1);
+
+    // Another conversation is still news, and an attachment has no text to
+    // carry, so it says what arrived instead.
+    store.setOpenChatSession("s2");
+    message({ session_id: "s1", peer_name: "Studio", peer_id: "peer-1",
+      entry: { kind: "file", outgoing: false, file_name: "report.pdf" } });
+    expect(store.state.notices.map((notice) => notice.message))
+      .toEqual(["Studio：在吗", "Studio 发来文件：report.pdf"]);
+    store.dispose();
+  });
+
+  it("announces an invitation to chat and answers it from the notice", async () => {
+    // The invitation is the one chat event with a deadline, and its two answers
+    // used to live only inside the conversation it announces — which the reader
+    // had to open first, in a window they may not have been looking at.
+    vi.mocked(bridge.acceptChatInvite).mockResolvedValue({ ok: true });
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    const invite = (session: string, name = "Studio") =>
+      emit({ type: "event", name: "chat.invite", session_id: "session",
+        data: { session_id: session, peer_id: "peer-1", peer_name: name, status: "invited" } });
+
+    invite("s1");
+    expect(store.state.notices.map((notice) => notice.message)).toEqual(["Studio 邀请你聊天"]);
+    // Both answers travel with the card: they are the banner's own two commands,
+    // reachable from the one surface that exists when no conversation is open.
+    expect(store.state.notices[0].actions?.map((action) => action.label))
+      .toEqual([t("接受"), t("拒绝")]);
+
+    // One invitation is one question, however many times the engine announces
+    // the session it belongs to — a second card would offer the same two
+    // buttons for the same invitation.
+    invite("s1");
+    expect(store.state.notices).toHaveLength(1);
+
+    await store.state.notices[0].actions![0].run();
+    expect(bridge.acceptChatInvite).toHaveBeenCalledExactlyOnceWith("s1");
+    // The card goes and says what was done, rather than leaving two buttons over
+    // an invitation that is already accepted.
+    expect(store.state.notices.map((notice) => notice.message))
+      .toEqual([t("已接受聊天邀请")]);
+
+    // A conversation already in front of the reader asks its own question: the
+    // banner there carries the same two buttons, at the transcript they are for.
+    store.setOpenChatSession("s2");
+    invite("s2");
+    expect(store.state.notices.map((notice) => notice.message))
+      .toEqual([t("已接受聊天邀请")]);
+    store.dispose();
+  });
+
+  it("announces a relaunch without offering a retry the host is already doing", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const state = vi.mocked(bridge.subscribe).mock.calls[0][1];
+    // The snapshot marker is written onto whatever `state.status` holds, so
+    // give this test its own copy instead of the module-level fixture.
+    store.state.status = { ...status };
+    store.state.devices = [pairedDevice];
+    store.state.total = 7;
+    store.state.relayState = "connecting";
+    state({ state: "restarting", attempt: 2, error: "SIDECAR_UNAVAILABLE" });
+    expect(store.state.error).toEqual({
+      code: "SIDECAR_RESTARTING",
+      message: "后台进程已退出，正在重新启动（第 2 次）…",
+      retryable: false,
+    });
+    // The snapshot came from the process that just died, so it is dropped
+    // rather than left on screen looking live.
+    expect(store.state.devices).toEqual([]);
+    expect(store.state.total).toBe(0);
+    expect(store.state.relayState).toBe("");
+    store.dispose();
+  });
+
+  it("names the application holding the data folder instead of a generic retry", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const state = vi.mocked(bridge.subscribe).mock.calls[0][1];
+    // A failure write-back sets `health` on whatever `state.status` holds, and
+    // `start()` has already pointed that at the shared fixture -- give this
+    // test its own copy or the mark lands on every test after it.
+    store.state.status = { ...status };
+    // What the sidecar sends when the legacy application still holds the data
+    // directory: a code, its own English sentence, and retryable false.  The
+    // window has to turn that into something the user can act on -- the old
+    // generic line left them a retry button and no reason for the failure.
+    state({
+      state: "failed",
+      error: "DATA_IN_USE",
+      message: "Close the legacy ClipSync application first",
+      retryable: false,
+    });
+    expect(store.state.error).toEqual({
+      code: "DATA_IN_USE",
+      message: "数据目录正被旧版 ClipSync 占用。请关闭旧版应用后重试。",
+      // Retryable in spite of what the sidecar said: closing the other
+      // application is exactly what makes the next attempt succeed.
+      retryable: true,
+    });
+    store.dispose();
+  });
+
+  it("turns an exhausted relaunch into a retry that relaunches the sidecar", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const state = vi.mocked(bridge.subscribe).mock.calls[0][1];
+    store.state.status = { ...status };
+    state({ state: "failed", error: "SIDECAR_UNAVAILABLE" });
+    expect(store.state.error).toEqual({
+      code: "SIDECAR_UNAVAILABLE", message: "后台进程不可用，请重试", retryable: true,
+    });
+    vi.mocked(bridge.restartSidecar).mockRejectedValueOnce({
+      code: "SIDECAR_START_FAILED", message: "Could not launch the Python sidecar",
+      retryable: false,
+    });
+    await store.reconnect();
+    expect(bridge.restartSidecar).toHaveBeenCalledExactlyOnceWith();
+    expect(store.state.error?.code).toBe("SIDECAR_START_FAILED");
+    // A relaunch that works refreshes the snapshot it dropped.
+    vi.mocked(bridge.restartSidecar).mockClear();
+    vi.mocked(bridge.restartSidecar).mockResolvedValueOnce(undefined);
+    vi.mocked(bridge.status).mockClear();
+    await store.reconnect();
+    expect(bridge.restartSidecar).toHaveBeenCalledExactlyOnceWith();
+    expect(bridge.status).toHaveBeenCalled();
+    expect(store.state.error).toBeNull();
+    store.dispose();
+  });
+
+  it("names the files a repair moved aside so they can be restored by hand", async () => {
+    const store = createApplicationStore();
+    vi.mocked(bridge.recoverDataDir).mockResolvedValueOnce({
+      items: [
+        { artifact: "config", reason: "unreadable", files: ["config.json.corrupt-20260912_101500"] },
+        { artifact: "history", reason: "history_corrupt", files: ["clipboard_history.db.corrupt-20260912_101500"] },
+      ],
+    });
+    expect(await store.recoverData()).toBe(true);
+    expect(store.state.notices).toEqual([
+      expect.objectContaining({
+        // The key, not the sentence: `NoticeStack.title` words a notice from a
+        // table keyed by this name, and it cannot re-word a string that was
+        // already translated by the time it got here.
+        title: "ui.data_recovery",
+        message: "已将损坏的文件移到一旁：config.json.corrupt-20260912_101500, " +
+          "clipboard_history.db.corrupt-20260912_101500",
+      }),
+    ]);
+    // The repair replaces the data directory, so the snapshot is re-read.
+    expect(bridge.status).toHaveBeenCalled();
+    expect(store.state.error).toBeNull();
+    store.dispose();
+  });
+
+  it("expires each notice independently and clears timers on disposal", async () => {
+    vi.useFakeTimers();
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    // The engine's failures are worded from their code, so two codes are two
+    // different notices — which is what makes the expiry of one visible against
+    // the other still standing.
+    emit({ type: "event", name: "runtime.error", session_id: "session",
+      data: { code: "CLIPBOARD_READ_FAILED" } });
+    await vi.advanceTimersByTimeAsync(3000);
+    emit({ type: "event", name: "runtime.error", session_id: "session",
+      data: { code: "HISTORY_WRITE_FAILED" } });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(store.state.notices.map(item => item.message))
+      .toEqual(["历史记录写入失败，本机磁盘可能已满。"]);
+    store.dispose();
+    expect(store.state.notices).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("coalesces a sustained event burst into one snapshot fetch", async () => {
+    // A bulk operation (a large import, a paste storm) emits far faster than the
+    // renderer can re-read the snapshot. If every event fetched its own snapshot
+    // the window would fall further behind the faster the sidecar worked.
+    vi.useFakeTimers();
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    const before = vi.mocked(bridge.status).mock.calls.length;
+    for (let seq = 1; seq <= 500; seq += 1) {
+      emit({ type: "event", name: "history.changed", session_id: "session", seq });
+    }
+    await vi.advanceTimersByTimeAsync(60);
+    expect(vi.mocked(bridge.status).mock.calls.length).toBe(before + 1);
+    store.dispose();
+  });
+
+  it("owes the window one read for everything it missed while it was away", async () => {
+    // Every page's own periodic read stands down while the window is minimized
+    // or behind another one.  The snapshot an event invalidates was the one
+    // that did not: a clipboard copied every few seconds was a status, a device
+    // list, a history page and the favourites read into a window nobody had
+    // opened, and the sidecar publishes whether or not anyone is looking.
+    vi.useFakeTimers();
+    Object.defineProperty(document, "hidden", { value: true, configurable: true });
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    const before = vi.mocked(bridge.status).mock.calls.length;
+    for (let seq = 1; seq <= 5; seq += 1) {
+      emit({ type: "event", name: "history.changed", session_id: "session", seq });
+    }
+    await vi.advanceTimersByTimeAsync(60);
+    expect(vi.mocked(bridge.status).mock.calls.length).toBe(before);
+    // Coming back is the moment the answer can be seen — and it is one read
+    // then, not one for each of the five that arrived while it was away.
+    Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(60);
+    expect(vi.mocked(bridge.status).mock.calls.length).toBe(before + 1);
+    // Nothing is owed after it, so a window that is on screen reads as it used
+    // to rather than waiting to be hidden again.
+    emit({ type: "event", name: "history.changed", session_id: "session", seq: 6 });
+    await vi.advanceTimersByTimeAsync(60);
+    expect(vi.mocked(bridge.status).mock.calls.length).toBe(before + 2);
+    store.dispose();
+  });
+
+  it.each(["favorites.changed", "data.changed"])("routes %s through the authoritative favorites snapshot", async (name) => {
+    vi.useFakeTimers();
+    vi.mocked(bridge.status).mockResolvedValue({ ...status, capabilities: ["favorites.list"] });
+    vi.mocked(bridge.favorites).mockResolvedValue({
+      items: [], total: 0, offset: 0, groups: [], session_id: "session", seq: 0,
+    });
+    const store = createApplicationStore();
+    await store.start();
+    expect(bridge.favorites).toHaveBeenCalledOnce();
+    vi.mocked(bridge.subscribe).mock.calls[0][0]({
+      type: "event", name, session_id: "session", seq: 1,
+    });
+    await vi.advanceTimersByTimeAsync(60);
+    expect(bridge.favorites).toHaveBeenCalledTimes(2);
+    store.dispose();
+    vi.mocked(bridge.subscribe).mock.calls[0][0]({
+      type: "event", name, session_id: "session", seq: 2,
+    });
+    await vi.advanceTimersByTimeAsync(60);
+    expect(bridge.favorites).toHaveBeenCalledTimes(2);
+  });
+  const items = ["a", "b"].map((id) => ({
+    id, preview: id, timestamp: 0, content_type: "TEXT", pinned: false,
+    source_name: "", source_app: "", source_title: "", paste_count: 0,
+  }));
+  async function selectedStore() {
+    vi.mocked(bridge.history).mockResolvedValue({ ...page, total: 60, items });
+    const store = createApplicationStore();
+    await store.start();
+    store.selectAllVisible(true);
+    return store;
+  }
+
+  it("retains selection by ID across reloads and removes missing records", async () => {
+    const store = await selectedStore();
+    vi.mocked(bridge.history).mockResolvedValueOnce({ ...page, items: [...items].reverse() });
+    await store.refreshHistory();
+    expect(store.state.selectedIds).toEqual(["a", "b"]);
+    vi.mocked(bridge.history).mockResolvedValueOnce({ ...page, items: [items[1]] });
+    await store.refreshHistory();
+    expect(store.state.selectedIds).toEqual(["b"]);
+    store.dispose();
+  });
+
+  it("clears selection on query/page change and rejects old confirmation IDs", async () => {
+    const store = await selectedStore();
+    store.search("new");
+    expect(store.state.selectedIds).toEqual([]);
+    await Promise.resolve();
+    expect(await store.batchDelete(["a", "b"])).toBe(false);
+    expect(bridge.batchDeleteHistory).not.toHaveBeenCalled();
+    store.selectAllVisible(true);
+    store.page(1);
+    expect(store.state.selectedIds).toEqual([]);
+    store.dispose();
+  });
+
+  it("sends one batch per pin/unpin and keeps selection after reload", async () => {
+    const store = await selectedStore();
+    vi.mocked(bridge.batchPinHistory).mockResolvedValue({ updated: 2 });
+    await store.batchPin(true);
+    await store.batchPin(false);
+    expect(vi.mocked(bridge.batchPinHistory).mock.calls).toEqual([
+      [["a", "b"], true], [["a", "b"], false],
+    ]);
+    expect(store.state.selectedIds).toEqual(["a", "b"]);
+    store.dispose();
+  });
+
+  it("clears every history entry, resetting the page and selection", async () => {
+    const store = await selectedStore();
+    store.page(1);
+    await Promise.resolve();
+    expect(store.state.offset).toBe(30);
+    vi.mocked(bridge.clearHistory).mockResolvedValue({ cleared: 60 });
+    expect(await store.clearHistory()).toBe(60);
+    expect(bridge.clearHistory).toHaveBeenCalledExactlyOnceWith();
+    expect(store.state.offset).toBe(0);
+    expect(store.state.selectedIds).toEqual([]);
+    store.dispose();
+  });
+
+  it("blocks duplicate mutation and selection/navigation changes while pending", async () => {
+    const store = await selectedStore();
+    let resolve!: (value: { deleted: number }) => void;
+    vi.mocked(bridge.batchDeleteHistory).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const deleting = store.batchDelete(["a", "a", "b"]);
+    await store.batchDelete(["a"]);
+    store.selectAllVisible(false);
+    store.select("a", false);
+    store.search("changed");
+    store.page(1);
+    expect(store.state.selectedIds).toEqual(["a", "b"]);
+    expect(store.state.query).toBe("");
+    expect(store.state.offset).toBe(0);
+    expect(bridge.batchDeleteHistory).toHaveBeenCalledExactlyOnceWith(["a", "b"]);
+    vi.mocked(bridge.history).mockResolvedValueOnce(page);
+    resolve({ deleted: 2 });
+    await deleting;
+    expect(store.state.selectedIds).toEqual([]);
+    store.dispose();
+  });
+
+  it("preserves batch errors across autonomous refresh without replay", async () => {
+    vi.useFakeTimers();
+    const store = await selectedStore();
+    vi.mocked(bridge.batchDeleteHistory).mockRejectedValueOnce({
+      code: "REQUEST_TIMEOUT", message: "Result unknown", retryable: false,
+    });
+    await store.batchDelete(["a", "b"]);
+    vi.mocked(bridge.subscribe).mock.calls[0][0]({
+      type: "event", name: "history.changed", session_id: "session",
+    });
+    await vi.advanceTimersByTimeAsync(60);
+    expect(store.state.error?.code).toBe("REQUEST_TIMEOUT");
+    expect(bridge.batchDeleteHistory).toHaveBeenCalledOnce();
+    expect(store.state.pending).toBe(false);
+    store.dispose();
+  });
+
+  it("keeps two-sided confirmation pending until an authoritative snapshot pairs it", async () => {
+    const device = { id: "peer", name: "Peer", paired: false, connection_state: "online",
+      pairing_status: "confirmed_waiting", pairing_code: "123456", sas: "ABCD" };
+    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [device] });
+    vi.mocked(bridge.confirmPairing).mockResolvedValueOnce({ paired: false, status: "confirmed_waiting" });
+    const store = createApplicationStore();
+    await store.confirmPairing(device);
+    expect(bridge.confirmPairing).toHaveBeenCalledWith("peer", "123456");
+    expect(store.state.devices[0].paired).toBe(false);
+    expect(store.state.error).toBeNull();
+    store.dispose();
+  });
+
+  it("does not call a confirm that is waiting on the peer a failure", async () => {
+    // `paired: false` is also what a handshake in flight answers.  Read as
+    // failure it told the user the opposite of what was happening, while the
+    // row underneath already said 等待对方确认.
+    const device = { id: "peer", name: "Peer", paired: false, connection_state: "online",
+      pairing_status: "confirmed_waiting", pairing_code: "123456", sas: "ABCD" };
+    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [device] });
+    vi.mocked(bridge.confirmPairing).mockResolvedValueOnce({ paired: false, status: "confirmed_waiting" });
+    const store = createApplicationStore();
+    await store.confirmPairing(device);
+    expect(store.state.notices).toEqual([]);
+    store.dispose();
+  });
+
+  it("still says so when the confirm lands after the handshake is over", async () => {
+    const device = { id: "peer", name: "Peer", paired: false, connection_state: "online",
+      pairing_status: "cancelled", pairing_code: "123456", sas: "ABCD" };
+    vi.mocked(bridge.devices).mockResolvedValueOnce({ items: [device] });
+    vi.mocked(bridge.confirmPairing).mockResolvedValueOnce({ paired: false, status: "cancelled" });
+    const store = createApplicationStore();
+    await store.confirmPairing(device);
+    expect(store.state.notices.map((notice) => notice.title)).toEqual(["pairing.failed"]);
+    store.dispose();
+  });
+
+  it("sends a URL to the chosen device and reports that the frame left", async () => {
+    const store = createApplicationStore();
+    vi.mocked(bridge.sendUrl).mockResolvedValueOnce({ sent: true, device_id: "peer" });
+    expect(await store.sendUrl(pairedDevice, "https://example.com")).toBe(true);
+    expect(bridge.sendUrl).toHaveBeenCalledExactlyOnceWith("peer", "https://example.com");
+    store.dispose();
+  });
+
+  it("rejects an empty or oversized URL without invoking the host", async () => {
+    const store = createApplicationStore();
+    expect(await store.sendUrl(pairedDevice, "   ")).toBe(false);
+    expect(await store.sendUrl(pairedDevice, `https://example.com/${"x".repeat(2048)}`)).toBe(false);
+    expect(bridge.sendUrl).not.toHaveBeenCalled();
+    expect(store.state.error?.code).toBe("INVALID_URL");
+    store.dispose();
+  });
+
+  it("pushes text through the host and reports whether it was broadcast", async () => {
+    const store = createApplicationStore();
+    vi.mocked(bridge.pushText).mockResolvedValueOnce({ ok: true, len: 5, sent: true });
+    expect(await store.pushText("hello")).toEqual({ ok: true, len: 5, sent: true });
+    expect(bridge.pushText).toHaveBeenCalledExactlyOnceWith("hello");
+    vi.mocked(bridge.pushText).mockResolvedValueOnce({ ok: true, len: 7, sent: false });
+    expect(await store.pushText("offline")).toEqual({ ok: true, len: 7, sent: false });
+    store.dispose();
+  });
+
+  it("requires a ready host and discovery capability before toggling discovery", async () => {
+    const store = createApplicationStore();
+    expect(await store.discovery()).toBeNull();
+    expect(await store.setDiscoveryEnabled(false)).toBeNull();
+    expect(bridge.discoveryStatus).not.toHaveBeenCalled();
+    expect(bridge.setDiscoveryEnabled).not.toHaveBeenCalled();
+    store.state.status = { ...status, capabilities: ["discovery.status"] };
+    vi.mocked(bridge.discoveryStatus).mockResolvedValueOnce({ enabled: true, visible: true });
+    vi.mocked(bridge.setDiscoveryVisible).mockResolvedValueOnce({ enabled: true, visible: false });
+    expect(await store.discovery()).toEqual({ enabled: true, visible: true });
+    expect(await store.setDiscoveryVisible(false)).toEqual({ enabled: true, visible: false });
+    expect(bridge.setDiscoveryVisible).toHaveBeenCalledWith(false);
+    store.dispose();
+  });
+
+  it("returns the diagnostics report and forwards repair actions verbatim", async () => {
+    const store = createApplicationStore();
+    const report = { v2: true, summary: "warn" as const, checks: [], groups: {},
+      discovery_running: false, server_running: true, connected_count: 0, paired_count: 0,
+      web_companion_running: false, web_port: 8080, lan_ip: "192.168.1.5", os: "Windows",
+      version: "1.0.0" };
+    vi.mocked(bridge.diagnosticsReport).mockResolvedValueOnce(report);
+    expect(await store.diagnostics()).toEqual(report);
+    expect(bridge.diagnosticsReport).toHaveBeenCalledExactlyOnceWith();
+    vi.mocked(bridge.diagnosticsRequest).mockResolvedValueOnce({ ok: true });
+    expect(await store.repairDiagnostics("firewall")).toEqual({ ok: true });
+    expect(bridge.diagnosticsRequest).toHaveBeenCalledExactlyOnceWith("firewall");
+    store.dispose();
+  });
+
+  it("opens a link clip through the sidecar, which reads the row itself", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const reads = vi.mocked(bridge.history).mock.calls.length;
+    const item = { id: "7", timestamp: 0, content_type: "URL", pinned: false,
+      preview: "https://example.com",
+      source_name: "", source_app: "", source_title: "", paste_count: 0 };
+    vi.mocked(bridge.openHistoryLink).mockResolvedValue(
+      { opened: true, url: "https://example.com" });
+    expect(await store.openLink(item)).toEqual({ opened: true, url: "https://example.com" });
+    // The window names the row; no URL crosses the IPC from here, which is what
+    // keeps the sidecar the one deciding what may reach the browser.
+    expect(bridge.openHistoryLink).toHaveBeenCalledWith("7");
+    // An open is not a mutation, so the list is not re-read for it.
+    expect(vi.mocked(bridge.history).mock.calls.length).toBe(reads);
+
+    vi.mocked(bridge.openHistoryLink).mockRejectedValue(
+      { code: "INVALID_URL", message: "not an openable web link", retryable: false });
+    expect(await store.openLink(item)).toBeNull();
+    expect(store.state.error?.code).toBe("INVALID_URL");
+    store.dispose();
+  });
+
+  it("says why a connect click came to nothing", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "peer", name: "Pixel" } });
+    // A peer that could not be dialed is named from the snapshot, and only then
+    // by its short id — legacy fell back the same way.
+    store.state.devices = [pairedDevice];
+    emit({ type: "event", name: "device.connection_unreachable", session_id: "session",
+      data: { device_id: "peer", name: "" } });
+    emit({ type: "event", name: "device.connection_unreachable", session_id: "session",
+      data: { device_id: "0123456789abcdef", name: "" } });
+    // And the update exchange's two answers, which are the same kind of thing:
+    // a click whose outcome only the peer knows.  They carry a name and an id
+    // of their own, so the snapshot fallback is not used for them.
+    emit({ type: "event", name: "update.peer_unavailable", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", version: "1.0.9" } });
+    emit({ type: "event", name: "update.peer_notice", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", version: "1.0.9", has_asset: true } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Pixel" }),
+      t("找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络", { name: "Peer" }),
+      t("找不到 {name} — 请确认该设备已开启 ClipSync 且在同一网络", { name: "0123456789ab" }),
+      t("{name} 上没有可发送的安装包，请在本机检查更新", { name: "Pixel" }),
+      t("{name} 正在把新版本 {version} 发送过来", { name: "Pixel", version: "1.0.9" }),
+    ]);
+    // The same answer is left on the device row, where the click that asked for
+    // it put a note promising a transfer: the notice above expires and that note
+    // does not, so a refusal the row never hears is a row that lies for good.
+    expect(store.state.updatePeerEvent).toMatchObject({
+      device_id: "peer",
+      message: t("{name} 正在把新版本 {version} 发送过来", { name: "Pixel", version: "1.0.9" }),
+    });
+    // The runtime reports the refusal on every attempt it makes, so a second
+    // one for the same device is the same news: no room left in the stack for
+    // the notices that would say something new.
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "peer", name: "Pixel" } });
+    expect(store.state.notices.filter(
+      (notice) => notice.message === t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Pixel" }),
+    )).toHaveLength(1);
+    store.dispose();
+  });
+
+  it("separates the refusal that can be repaired here from the one that cannot", async () => {
+    // Two refusals, one sentence each, because the repairs are on different
+    // devices: a removal is undone at the peer, while a certificate this side
+    // will not trust is undone by re-pairing here.  A single sentence would send
+    // half the users to the wrong screen, which is what the reason byte on the
+    // wire exists to prevent.
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    store.state.devices = [pairedDevice];
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", reason: "identity-unproven" } });
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "other", name: "Laptop", reason: "removed" } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t(
+        "{name} 无法证明自己的身份 — 请在「设备」页对它重新配对（该设备若为旧版本，升级后即可正常连接）",
+        { name: "Pixel" },
+      ),
+      t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Laptop" }),
+    ]);
+    store.dispose();
+  });
+
+  it("falls back to the removal wording for a reason it does not know", async () => {
+    // A newer sidecar may name a reason this build has never heard of.  Reporting
+    // the removal wording is what every refusal meant before the reason existed,
+    // and it is better than dropping the notice and leaving a silent no-op.
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    store.state.devices = [pairedDevice];
+    emit({ type: "event", name: "device.connection_rejected", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", reason: "code-77" } });
+    expect(store.state.notices.map((notice) => notice.message)).toEqual([
+      t("{name} 已将本机移除 — 需要重新在对方配对", { name: "Pixel" }),
+    ]);
+    store.dispose();
+  });
+
+  it("still reports an action the runtime refused without an event", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    // Only the connect route's false is spoken for by an event; a pairing that
+    // could not be started has nothing but this band to say it failed.
+    vi.mocked(bridge.startPairing).mockResolvedValue({ accepted: false });
+    expect(await store.startPairing(pairedDevice)).toBe(false);
+    expect(store.state.error?.code).toBe("ACTION_REJECTED");
+    store.dispose();
+  });
+
+  it("tells the user when the filter stripped a clip before it left the device", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    // The sidecar sends no fields with this event: the point is only that a
+    // sensitive value was replaced, and naming it would put it back on screen.
+    emit({ type: "event", name: "sync.redacted", session_id: "session", data: {} });
+    expect(store.state.notices).toEqual([
+      expect.objectContaining({ title: "sync.redacted", message: t("敏感内容未同步") }),
+    ]);
+    store.dispose();
+  });
+
+  it("prompts on a changed certificate until the answer is applied", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "device.security_alert", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", code: "CERTIFICATE_CHANGED", can_trust: true } });
+    expect(store.state.certAlert).toEqual({ device_id: "peer", name: "Pixel", can_trust: true, changed: true });
+
+    // An answer the runtime refused leaves the prompt up: the user has to be
+    // able to try again once the device has connected with its new certificate.
+    vi.mocked(bridge.retrustDevice).mockRejectedValue(
+      { code: "VALIDATION_ERROR", message: "connect again", retryable: false });
+    expect(await store.retrust("peer")).toBe(false);
+    expect(store.state.error?.code).toBe("VALIDATION_ERROR");
+    expect(store.state.certAlert).not.toBeNull();
+
+    vi.mocked(bridge.retrustDevice).mockResolvedValue({ trusted: true });
+    expect(await store.retrust("peer")).toBe(true);
+    expect(bridge.retrustDevice).toHaveBeenLastCalledWith("peer");
+    expect(store.state.certAlert).toBeNull();
+    store.dispose();
+  });
+
+  it("gives up on an unanswered certificate prompt and leaves a notice", async () => {
+    vi.useFakeTimers();
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "device.security_alert", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", code: "CERTIFICATE_CHANGED", can_trust: true } });
+    expect(store.state.certAlert).not.toBeNull();
+    // Legacy waited two minutes for an answer, then changed nothing and said
+    // why; the prompt is not a trap the user has to escape.
+    await vi.advanceTimersByTimeAsync(119_000);
+    expect(store.state.certAlert).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(store.state.certAlert).toBeNull();
+    expect(bridge.retrustDevice).not.toHaveBeenCalled();
+    expect(bridge.unpairDevice).not.toHaveBeenCalled();
+    expect(store.state.notices.map(item => item.message)).toEqual([
+      t("设备“{name}”的证书已变更（可能已重装或重置）。", { name: "Pixel" }),
+    ]);
+    store.dispose();
+  });
+
+  it("stops the certificate clock once the prompt is answered", async () => {
+    vi.useFakeTimers();
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "device.security_alert", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", code: "CERTIFICATE_CHANGED", can_trust: true } });
+    vi.mocked(bridge.retrustDevice).mockResolvedValue({ trusted: true });
+    expect(await store.retrust("peer")).toBe(true);
+    await vi.advanceTimersByTimeAsync(120_000);
+    // No leftover notice about a decision that was made.
+    expect(store.state.notices).toEqual([]);
+    store.dispose();
+  });
+
+  it("answers a certificate prompt the other way by unpairing the device", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "device.security_alert", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", code: "CERTIFICATE_CHANGED", can_trust: false } });
+    vi.mocked(bridge.unpairDevice).mockResolvedValue({ accepted: true });
+    expect(await store.keepUnpaired("peer")).toBe(true);
+    expect(bridge.unpairDevice).toHaveBeenCalledWith("peer");
+    expect(store.state.certAlert).toBeNull();
+    store.dispose();
+  });
+
+  it("does not prompt for a certificate that is the pinned one; it says the identity was unproven", async () => {
+    // 严重-8's non-destructive half.  The accepted connection was refused
+    // because the device could not prove it holds the key, not because its
+    // certificate changed — an alert on a certificate that is byte-identical to
+    // the pin.  The trust prompt's answers (re-pin / unpair) are both wrong for
+    // that, so this is news only.
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "device.security_alert", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", code: "CERTIFICATE_CHANGED",
+        can_trust: false, changed: false } });
+    expect(store.state.certAlert).toBeNull();
+    expect(store.state.notices.map(item => item.message)).toEqual([
+      t("无法验证 {name} 的身份，本次连接已拒绝；它的证书与已保存的一致。", { name: "Pixel" }),
+    ]);
+    store.dispose();
+  });
+
+  it("keeps an expired pairing request's outcome for the row and says it", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "pairing.resolved", session_id: "session",
+      data: { device_id: "peer", status: "expired" } });
+    expect(store.pairingEndedStatus("peer")).toBe("expired");
+    expect(store.state.notices.map(item => item.message)).toContain(
+      t("{name} 的配对请求已过期，请重新配对", { name: "peer" }),
+    );
+    // A fresh request for the same device supersedes the old outcome.
+    emit({ type: "event", name: "pairing.request", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", code: "12345678" } });
+    expect(store.pairingEndedStatus("peer")).toBe("");
+    store.dispose();
+  });
+
+  it("words a failed dial from the transport's reason, and never drops it", async () => {
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "device.connect_failed", session_id: "session",
+      data: { device_id: "peer", name: "Pixel", reason: "tls" } });
+    expect(store.state.notices.map(item => item.message)).toContain(
+      t("与 {name} 建立加密连接失败", { name: "Pixel" }),
+    );
+    store.dispose();
+  });
+
+  it("reports the three ways an internet pairing stops moving", async () => {
+    // A wait nobody answered, a code that outlived its window, and two devices
+    // holding different encryption passwords.  The card changes with the first
+    // two and the third is only ever visible to the user as silence otherwise.
+    const store = createApplicationStore();
+    await store.start();
+    const emit = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    emit({ type: "event", name: "netpair.waiting_failed", session_id: "session",
+      data: { peer_id: "WXYZ", deadline: 1, reason: "timeout" } });
+    emit({ type: "event", name: "netpair.code.expired", session_id: "session",
+      data: { code: "AAAA-BBBB-CCCC", reason: "expired" } });
+    emit({ type: "event", name: "netpair.decrypt_failed", session_id: "session",
+      data: { peer_id: "peer", name: "Pixel" } });
+    const messages = store.state.notices.map(item => item.message);
+    expect(messages).toContain(t("对方没有确认配对码，本次配对已超时，请重新生成或输入配对码"));
+    expect(messages).toContain(t("配对码已过期，请重新生成"));
+    expect(messages).toContain(
+      t("与 {name} 的加密密码不一致，无法同步；请让两端使用同一个加密密码", { name: "Pixel" }),
+    );
+    // Every one of them tells the card to re-read: the waiting row and the
+    // generated code live in the status snapshot, not in the event.
+    expect(store.state.netpairEvent?.name).toBe("netpair.decrypt_failed");
+    store.dispose();
+  });
+
+  it("applies update events in place without triggering a global refresh", async () => {
+    vi.useFakeTimers();
+    const store = createApplicationStore();
+    await store.start();
+    const event = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    const statusCalls = vi.mocked(bridge.status).mock.calls.length;
+    event({ type: "event", name: "update.state", session_id: "session", seq: 1,
+      data: { state: { phase: "downloading", fraction: 0.5, downloaded: 50, total: 100,
+        error: "", version: "", path: "" } } });
+    expect(store.state.update).toEqual({ phase: "downloading", fraction: 0.5,
+      downloaded: 50, total: 100, error: "", version: "", path: "" });
+    // Progress must not be reset by a snapshot reload.
+    //
+    // `refresh` is debounced by 60ms, so a pending one from any earlier event fires during a
+    // 120ms advance and the assertion gets a count it did not cause.  Sampling the count closer
+    // to the `expect` did not fix that -- it made the failure rarer, and CI still produced
+    // exactly the "expected 1 times, but got 2" this comment once blamed on that.  It is not
+    // rare, it is certain: 120 > 60 means the debounce *always* fires inside the advance.
+    //
+    // So the pending refresh is drained first, from both the timer queue and the promise chain
+    // `refresh` awaits, and then the event is expected to add nothing.  That is the claim in the
+    // test's name, and it is now deterministic rather than probable.
+    await vi.advanceTimersByTimeAsync(120);
+    const settled = vi.mocked(bridge.status).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(120);
+    expect(bridge.status).toHaveBeenCalledTimes(settled);
+    event({ type: "event", name: "update.state", session_id: "session", seq: 1,
+      data: { state: { phase: "downloading", fraction: 0.5, downloaded: 50, total: 100,
+        error: "", version: "", path: "" } } });
+    await vi.advanceTimersByTimeAsync(120);
+    expect(bridge.status).toHaveBeenCalledTimes(settled);
+    event({ type: "event", name: "update.available", session_id: "session", seq: 2,
+      data: { latest: "v2.0.0", current: "1.0.0", url: "https://example.com",
+        installable: true } });
+    // `installable` rides with the notice: without it the card reads the host's
+    // silence as "cannot install in place" and offers the manual download, which
+    // is how a self-installing build sent the user another application.
+    expect(store.state.updateCheck).toEqual({ available: true, latest: "v2.0.0",
+      current: "1.0.0", url: "https://example.com", installable: true });
+    await vi.advanceTimersByTimeAsync(120);
+    expect(bridge.status).toHaveBeenCalledTimes(settled);
+    store.dispose();
+  });
+
+  it("does not let a status hydration undo an install in flight", async () => {
+    const store = createApplicationStore();
+    vi.mocked(bridge.status).mockResolvedValue({
+      ...status, capabilities: ["update.status"],
+    });
+    await store.start();
+    const event = vi.mocked(bridge.subscribe).mock.calls[0][0];
+    event({ type: "event", name: "update.state", session_id: "session", seq: 1,
+      data: { state: { phase: "installing", fraction: 1, downloaded: 100, total: 100,
+        error: "", version: "v2.0.0", path: "" } } });
+    expect(store.state.update.phase).toBe("installing");
+    // Opening settings re-reads the sidecar's phase, and the sidecar only ever
+    // reports its own four -- it would answer `idle` and put the download
+    // button back while the bundle is being replaced underneath it.
+    vi.mocked(bridge.updateStatus).mockResolvedValueOnce({ state: { phase: "idle",
+      fraction: 0, downloaded: 0, total: 0, error: "", version: "", path: "" } });
+    await store.loadUpdateStatus();
+    expect(store.state.update.phase).toBe("installing");
+    store.dispose();
+  });
+
+  it("keeps unknown and up-to-date update checks distinguishable", async () => {
+    const store = createApplicationStore();
+    vi.mocked(bridge.updateCheck).mockResolvedValueOnce({ available: false, latest: "",
+      current: "1.0.0", url: "" });
+    expect(await store.checkUpdate()).toEqual({ available: false, latest: "",
+      current: "1.0.0", url: "" });
+    // An empty answer is "unknown", not "up to date": the panel must not claim
+    // the app is current when the lookup never reached GitHub.
+    expect(store.state.updateCheck).toBeNull();
+    vi.mocked(bridge.updateCheck).mockResolvedValueOnce({ available: true, latest: "v2.0.0",
+      current: "1.0.0", url: "https://example.com" });
+    await store.checkUpdate();
+    expect(store.state.updateCheck?.available).toBe(true);
+    vi.mocked(bridge.updateCheck).mockRejectedValueOnce({
+      code: "SIDECAR_UNAVAILABLE", message: "no host", retryable: true,
+    });
+    expect(await store.checkUpdate()).toBeNull();
+    expect(store.state.error?.code).toBe("SIDECAR_UNAVAILABLE");
+    store.dispose();
+  });
+
+  it("forwards the download and reveal results verbatim", async () => {
+    const store = createApplicationStore();
+    vi.mocked(bridge.updateDownload).mockResolvedValueOnce({ ok: false, started: false,
+      error: "update already in progress" });
+    expect(await store.downloadUpdate()).toEqual({ ok: false, started: false,
+      error: "update already in progress" });
+    expect(bridge.updateDownload).toHaveBeenCalledExactlyOnceWith();
+    vi.mocked(bridge.updateOpenFolder).mockResolvedValueOnce({ ok: false, error: "no ready update" });
+    expect(await store.openUpdateFolder()).toEqual({ ok: false, error: "no ready update" });
+    expect(bridge.updateOpenFolder).toHaveBeenCalledExactlyOnceWith();
+    store.dispose();
+  });
+
+  it("says a copied row was copied, and says nothing when it was not", async () => {
+    const item = {
+      id: "1", preview: "x", timestamp: 0, content_type: "TEXT", pinned: false,
+      source_name: "", source_app: "", source_title: "", paste_count: 0,
+    };
+    const store = createApplicationStore();
+    vi.mocked(bridge.copyHistory).mockResolvedValueOnce({ copied: true });
+    await store.copy(item);
+    // The row's own answer is a tick that replaces its copy icon — in a list
+    // the reader has looked away from by the time it lands. The notice is the
+    // half that travels.
+    expect(store.state.notices.map((notice) => [notice.title, notice.message]))
+      .toEqual([["ui.history", t("已复制")]]);
+
+    store.dismissNotice(store.state.notices[0].id);
+    vi.mocked(bridge.copyHistory).mockResolvedValueOnce({ copied: false });
+    await store.copy(item);
+    expect(store.state.notices).toEqual([]);
+    store.dispose();
+  });
+
+  it("steps back to the last page there is when the list shrinks under the one on screen", async () => {
+    // The list shortens under the window: rows deleted, a retention age or
+    // limit pruning them, a lowered history limit taking effect the moment it
+    // is saved.  The read for a page that no longer exists answers with no rows
+    // and a total below the offset, and taken as it came that is an empty
+    // history — 暂无历史记录 over a pager still counting twenty rows.
+    const rows = (from: number, count: number) =>
+      Array.from({ length: count }, (_, index) => ({ id: String(from + index) }));
+    const answer = (total: number) => async (_query: string, offset: number) => ({
+      ...page, total, offset,
+      items: offset < total ? rows(offset, Math.min(30, total - offset)) : [],
+    });
+    vi.mocked(bridge.history).mockImplementation(answer(40) as any);
+    const store = createApplicationStore();
+    await store.start();
+    store.page(1);
+    await store.refreshHistory();
+    expect(store.state.offset).toBe(30);
+    // Twenty of the forty rows go while the reader sits on that page.
+    vi.mocked(bridge.history).mockImplementation(answer(20) as any);
+    await store.refreshHistory();
+    expect(store.state.offset).toBe(0);
+    expect(store.state.total).toBe(20);
+    expect(store.state.history).toHaveLength(20);
+    store.dispose();
+  });
+
+  it("does not query encrypted history while locked", async () => {
+    vi.mocked(bridge.status).mockResolvedValueOnce({ ...status, health: "locked" });
+    const store = createApplicationStore();
+    await store.start();
+    expect(bridge.history).not.toHaveBeenCalled();
+    store.dispose();
+  });
+
+  it("routes device management actions through the matching native commands", async () => {
+    const device = { id: "p", name: "P", paired: true, connection_state: "online",
+      pairing_status: "paired", pairing_code: null, sas: null };
+    const store = createApplicationStore();
+    await store.start();
+    await store.connect(device);
+    await store.disconnect(device);
+    await store.forget(device);
+    await store.restore(device);
+    await store.purge(device);
+    expect(vi.mocked(bridge.connectDevice).mock.calls).toEqual([["p"]]);
+    expect(vi.mocked(bridge.disconnectDevice).mock.calls).toEqual([["p"]]);
+    expect(vi.mocked(bridge.forgetDevice).mock.calls).toEqual([["p"]]);
+    expect(vi.mocked(bridge.restoreDevice).mock.calls).toEqual([["p"]]);
+    expect(vi.mocked(bridge.purgeDevice).mock.calls).toEqual([["p"]]);
+    expect(bridge.devices).toHaveBeenCalledTimes(6);
+    store.dispose();
+  });
+
+  it("returns probe results and pinned certificates without refreshing devices", async () => {
+    const device = { id: "p", name: "P", paired: true, connection_state: "online",
+      pairing_status: "paired", pairing_code: null, sas: null };
+    const probe = { ok: true, results: [{ channel: "lan" as const, ok: true, latency_ms: 12.5, error: null }] };
+    vi.mocked(bridge.testDevice).mockResolvedValue(probe);
+    vi.mocked(bridge.deviceCerts).mockResolvedValue({ devices: [
+      { device_id: "p", device_name: "P", fingerprint_short: "abcdefgh...12345678",
+        fingerprint: "abc", paired: true },
+    ] });
+    const store = createApplicationStore();
+    await store.start();
+    const devicesBefore = vi.mocked(bridge.devices).mock.calls.length;
+    expect(await store.probe(device)).toEqual(probe);
+    expect(await store.certificates()).toEqual([
+      expect.objectContaining({ device_id: "p", fingerprint_short: "abcdefgh...12345678" }),
+    ]);
+    expect(vi.mocked(bridge.testDevice).mock.calls).toEqual([["p"]]);
+    expect(bridge.deviceCerts).toHaveBeenCalledOnce();
+    expect(vi.mocked(bridge.devices).mock.calls).toHaveLength(devicesBefore);
+    expect(store.state.pending).toBe(false);
+    store.dispose();
+  });
+});

@@ -1,0 +1,885 @@
+"""Settings API handlers.
+
+Only safe-to-expose settings are returned. Secrets (tokens, keys,
+passwords, hashes) are never sent to clients.
+
+All handlers return a (data_dict, status_code) tuple.
+"""
+
+import contextlib
+import copy
+import csv
+import json
+import logging
+import os
+
+from internal.config.config import FIELD_RULES, _config_path
+from internal.config.config import save as save_config
+from internal.i18n import T
+
+logger = logging.getLogger(__name__)
+
+# Fields that are safe to expose to web clients
+_SAFE_FIELDS = {
+    "device_id",
+    "device_name",
+    "language",
+    # Read-only: whether the user has ever picked a language.  The desktop
+    # shell shows its first-run picker while this is False; it is never
+    # mutable through this endpoint (see the language branch in
+    # update_settings, which is what marks the choice).
+    "language_chosen",
+    "appearance_mode",
+    "sync_enabled",
+    "plain_text_only",
+    "encryption_enabled",
+    "notifications_enabled",
+    "notify_device_connect",
+    "notify_transfer",
+    "notify_pairing",
+    "notify_sync",
+    # Nearby chat's admission rule (see `internal/sync/nearby_chat.py`).
+    "chat_open_to_all",
+    # File transfer's, the same shape (see `internal/sync/file_transfer.py`).
+    "file_open_to_all",
+    # Whether other devices may pull this machine's log (see `internal/data/logs.py`).
+    "log_sharing",
+    "web_enabled",
+    "web_port",
+    "web_history_limit",
+    "history_max_entries",
+    "history_max_age_days",
+    "file_receive_dir",
+    "sync_debounce",
+    "clipboard_poll_interval",
+    "max_reconnect_attempts",
+    "transfer_timeout",
+    "log_level",
+    "auto_start",
+    "port",
+    "service_type",
+    "app_filter_enabled",
+    "app_filter_mode",
+    "app_filter_list",
+    "filter_enabled_categories",
+    "source_tracking_enabled",
+    "sound_enabled",
+    "ui_animation_enabled",
+    "ui_backend",
+    "translate_url",
+    "translate_key_set",
+    "paste_to_top",
+    "low_memory_mode",
+    "retry_capture_enabled",
+    "dedup_method",
+    "auto_update_check",
+    # Internet (cross-network) relay sync.  The secrets (relay_secret,
+    # peer_relay_secrets) are deliberately NOT exposed: they never leave the
+    # device except over the TLS LAN channel, and a token holder must not be
+    # able to read or overwrite them through this API.
+    "internet_sync_enabled",
+    "relay_brokers",
+    "relay_private_brokers",
+    # The relay broker *username* is exposed so the web UI can prefill it; the
+    # password is not — only relay_password_set is exposed (see get_settings).
+    "relay_username",
+    # The broker's per-message ceiling, in bytes.  A property of the server the
+    # user pointed this app at, not a secret, and the size a file chunk is
+    # derived from.  Exposed here though the panel draws no row for it: the
+    # control is the desktop settings page's, and this API is where that page
+    # and a phone-side save meet.
+    "relay_max_message_bytes",
+    # How much of the relay this app will use, in bytes/s.  Not a property of
+    # the server like the ceiling above but a preference about sharing it, so it
+    # belongs next to it: the two together are what make an internet file
+    # transfer arrive (see ChatManager's chunk acknowledgement).
+    "relay_max_bytes_per_second",
+    "data_dir",
+    # Reachable only for an older companion build that still sends them.  This
+    # panel draws no hotkey editor because it has nothing to register them
+    # with: a global shortcut belongs to the process that owns the OS
+    # registration, and that is the desktop host (see `set_hotkeys` in
+    # main.rs), which writes the bindings here through the sidecar RPC and
+    # then registers them itself.  One switch that changes nothing is worse
+    # than no switch, so the wire keeps accepting the fields -- an older page
+    # still loads -- while nothing offers them.
+    "hotkeys",
+    "hotkeys_enabled",
+    # AI-config sync profiles (refactor round 1): enabled tool keys + user
+    # custom paths.  Effective watch roots are expanded from the profile
+    # table at collection time.
+    "ai_config_tools",
+    "ai_config_custom_paths",
+    # Wall-clock epoch of a pending timed sync pause (0 = none).  Read-only:
+    # the pause/resume actions go through /api/sync/pause|resume, which run
+    # their own live-apply + timer bookkeeping; a direct client write here
+    # could never arm the auto-resume timer.
+    "timed_pause_until",
+}
+
+# Numeric fields the API accepts, with inclusive (lo, hi) bounds.  Derived from
+# ``config.FIELD_RULES``, the one table that owns them, so a bound cannot be
+# true here and false on load -- which is what happened to
+# ``max_reconnect_attempts`` (100 here, 1000 in the restore path) and
+# ``web_history_limit`` (500 here, 100000 there).
+_RANGE_LIMITS = {
+    name: (rule[1], rule[2]) for name, rule in FIELD_RULES.items() if len(rule) == 3
+}
+
+# The HTTP surface refuses the privileged ports, which the config's own floor
+# does not: an API client asking for port 80 is asking this machine to serve
+# something it will not be allowed to bind after a restart.  A low port already
+# in config.json is left alone -- that decision was made on the machine, not
+# over the network.
+_PRIVILEGED_PORT_FLOOR = 1024
+for _port_field in ("port", "web_port"):
+    _RANGE_LIMITS[_port_field] = (
+        max(_RANGE_LIMITS[_port_field][0], _PRIVILEGED_PORT_FLOOR),
+        _RANGE_LIMITS[_port_field][1],
+    )
+del _port_field
+
+
+def _port_conflict(cfg, updated) -> str | None:
+    """Name the cross-field port problem a per-field range check cannot see.
+
+    ``port`` and ``web_port`` are each validated against the same range, which
+    says nothing about the pair.  The companion binds ``0.0.0.0:web_port`` and
+    the LAN listener binds its own port on the same address family, so saving
+    the two as the same number produced a config that looked fine in the panel
+    and made the *next* start fail to bind — with the lifecycle rolling the
+    whole start back and the user seeing a dead app rather than a rejected
+    setting.
+    """
+    if "port" not in updated and "web_port" not in updated:
+        return None
+    if not getattr(cfg, "web_enabled", False):
+        # One listener: the other port is not bound at all, so equal numbers
+        # cost nothing and refusing them would be refusing a working config.
+        return None
+    try:
+        if int(getattr(cfg, "port", 0)) == int(getattr(cfg, "web_port", 0)):
+            return "port_conflict"
+    except (TypeError, ValueError):
+        return None
+    return None
+
+# Fields whose value must never reach the log.  Every update is logged, and the
+# log is served to any client holding the web token (`GET /api/logs`), so a line
+# naming a new value is that value leaving the device — which is exactly what
+# the field table above promises does not happen for the credentials in it
+# ("the value is never echoed back — only netpair_password_set is exposed").
+# The field name and the fact that it changed are what a reader of the log
+# needs; the value is what nobody needs.
+_SECRET_FIELDS = {"relay_password", "netpair_password", "web_token"}
+
+# Fields that the client is allowed to modify
+_MUTABLE_FIELDS = {
+    "device_name",
+    "language",
+    "appearance_mode",
+    "sync_enabled",
+    "plain_text_only",
+    "encryption_enabled",
+    "notifications_enabled",
+    "notify_device_connect",
+    "notify_transfer",
+    "notify_pairing",
+    "notify_sync",
+    # Nearby chat's admission rule (see `internal/sync/nearby_chat.py`).
+    "chat_open_to_all",
+    # File transfer's, the same shape (see `internal/sync/file_transfer.py`).
+    "file_open_to_all",
+    # Whether other devices may pull this machine's log (see `internal/data/logs.py`).
+    "log_sharing",
+    "web_enabled",
+    "web_port",
+    "web_history_limit",
+    "history_max_entries",
+    "history_max_age_days",
+    "file_receive_dir",
+    "sync_debounce",
+    "clipboard_poll_interval",
+    "max_reconnect_attempts",
+    "transfer_timeout",
+    "log_level",
+    "port",
+    "service_type",
+    "auto_start",
+    "app_filter_enabled",
+    "app_filter_mode",
+    "app_filter_list",
+    "filter_enabled_categories",
+    "source_tracking_enabled",
+    "sound_enabled",
+    "ui_animation_enabled",
+    "ui_backend",
+    "translate_url",
+    "paste_to_top",
+    "low_memory_mode",
+    "retry_capture_enabled",
+    "dedup_method",
+    "auto_update_check",
+    "internet_sync_enabled",
+    "relay_brokers",
+    "relay_private_brokers",
+    "relay_username",
+    "relay_password",
+    "relay_max_message_bytes",
+    "relay_max_bytes_per_second",
+    # Legacy pairing passphrase (the one-password unification: the single
+    # encryption password in the Security tab now derives the netpair channel
+    # keys, so
+    # the web UI no longer sends this field — it is kept only so an older
+    # companion build can still set the pre-merge value).  Empty string
+    # clears it; a non-empty value is strength-validated before saving.  The
+    # value is never echoed back — only netpair_password_set is exposed.
+    "netpair_password",
+    "data_dir",
+    # Kept for the same reason as in _SAFE_FIELDS above: nothing offers them,
+    # and an older companion build that sends them still round-trips.
+    "hotkeys",
+    "hotkeys_enabled",
+    "ai_config_tools",
+    "ai_config_custom_paths",
+}
+
+# Action keys that trigger a host-side operation rather than a plain
+# config-field mutation.  These are forwarded to on_settings_change so the
+# application can regenerate/clear the web token, set/clear the encryption
+# password, or perform a factory reset.
+_SPECIAL_ACTIONS = {
+    "password",
+    "clear_password",
+    "factory_reset",
+    "regenerate_web_token",
+    "clear_web_token",
+    "set_translate_key",
+    "clear_translate_key",
+}
+
+# Keys the host application may return from ``on_settings_change`` that are
+# safe to echo back to the web client.  Secrets — notably the encryption
+# password and its verification hash — are deliberately absent.
+# ``web_token`` IS included deliberately: only an authenticated caller can
+# reach this endpoint, and after a regenerate the dashboard needs the new
+# token to rewrite its own URL before reloading — without it the page
+# reloads against the old (now invalid) token and lands on the
+# "link expired" dead end instead of staying usable.
+_SAFE_RESPONSE_KEYS = {
+    "password_set",
+    "ok",
+    "token_updated",
+    "web_token",
+    "translate_key_set",
+}
+
+
+def get_settings(cfg, get_internet_sync_state=None, get_current_relay_broker=None):
+    """Return safe-to-expose settings (exclude secrets).
+
+    *get_internet_sync_state*, when provided, returns the live internet-sync
+    relay state (one of off/connecting/online/error) so a freshly loaded
+    dashboard shows the current state without waiting for the next WS
+    ``relay_state`` transition event.
+
+    *get_current_relay_broker*, when provided, returns the endpoint URL of the
+    broker the relay is currently connected to ("" when offline/disabled).
+    """
+    result = {}
+    for field in _SAFE_FIELDS:
+        if hasattr(cfg, field):
+            result[field] = getattr(cfg, field)
+
+    # Expose only *whether* an encryption password is configured, never the
+    # password or its verification hash. The web UI uses this to show the
+    # correct "set / not set" state and enable the clear-password action.
+    result["password_set"] = bool(
+        getattr(cfg, "encryption_password_hash", "") or getattr(cfg, "encryption_password", "")
+    )
+
+    # Expose only *whether* a translation API key is configured, never the
+    # key itself (see module docstring).
+    result["translate_key_set"] = bool(getattr(cfg, "translate_api_key", ""))
+
+    # Same for the (legacy, pre-unification) pairing passphrase: the UI sees
+    # set/not-set only, never the value (it is a decryption key for netpair
+    # traffic).  Since the one-password unification the single encryption
+    # password drives netpair channels, so this flag reflects the leftover
+    # fallback config.
+    result["netpair_password_set"] = bool(getattr(cfg, "netpair_password", ""))
+
+    # Relay broker password: set/not-set only, never the value.  The web UI
+    # shows an empty field with a "set" indicator, exactly like the security
+    # password — a token holder must not be able to read the broker credential.
+    result["relay_password_set"] = bool(getattr(cfg, "relay_password", ""))
+
+    # Live internet-sync state (never a secret).  When sync is disabled the
+    # state is definitively "off" — no callback needed; otherwise fall back to
+    # "connecting" when the host cannot be asked (callback absent/failed).
+    if not getattr(cfg, "internet_sync_enabled", False):
+        result["internet_sync_state"] = "off"
+    else:
+        state = ""
+        if get_internet_sync_state is not None:
+            try:
+                state = str(get_internet_sync_state() or "")
+            except Exception:
+                logger.debug("get_internet_sync_state callback failed", exc_info=True)
+        result["internet_sync_state"] = (
+            state if state in ("off", "connecting", "online", "error") else "connecting"
+        )
+
+    # Current relay broker endpoint (never a secret, and not a cfg field —
+    # it is a live transport property, so it bypasses _SAFE_FIELDS and is
+    # written straight into the result).  Empty string when sync is disabled,
+    # the transport is not up, or the callback is absent/failed.
+    broker = ""
+    if getattr(cfg, "internet_sync_enabled", False) and get_current_relay_broker is not None:
+        try:
+            broker = str(get_current_relay_broker() or "")
+        except Exception:
+            logger.debug("get_current_relay_broker callback failed", exc_info=True)
+    result["current_relay_broker"] = broker
+
+    return {"settings": result}, 200
+
+
+def _type_mismatch(old, new) -> bool:
+    """Return True when ``new`` can't safely replace ``old`` in the config.
+
+    Guards against a client writing a string into an int field (e.g.
+    ``{"web_port": "not-a-port"}``), which would otherwise corrupt the config
+    and crash a live service on its next read.  ``bool`` is a subclass of
+    ``int``, so int fields reject booleans explicitly.
+    """
+    if old is None:
+        return False
+    if isinstance(old, bool):
+        return not isinstance(new, bool)
+    if isinstance(old, int):
+        return not isinstance(new, int) or isinstance(new, bool)
+    if isinstance(old, float):
+        return not isinstance(new, (int, float)) or isinstance(new, bool)
+    if isinstance(old, str):
+        return not isinstance(new, str)
+    if isinstance(old, (list, tuple, dict, set)):
+        return not isinstance(new, type(old))
+    return False
+
+
+def _persist_preserving_at_rest_private_key(cfg) -> None:
+    """Persist cfg to config.json without writing the private key in plaintext.
+
+    ``save_config(cfg)`` writes ``cfg.private_key_pem`` verbatim when no
+    encryption manager is supplied.  In memory that value is the *plaintext*
+    key loaded at startup, so doing that would downgrade an encrypted config
+    to plaintext on disk.  Instead, when no encryption manager is available,
+    preserve whatever is already stored on disk (the encrypted blob when
+    encryption is enabled) and only update the non-secret fields.
+    """
+    # Only an at-rest value we actually READ may be written back.  Treating a
+    # failed read as "there is no key" used to blank private_key_pem, which
+    # destroys this device's identity: every paired peer then sees a changed
+    # certificate and the user has to re-pair everything.  So fall back to the
+    # in-memory key whenever the stored value is unavailable -- there is no
+    # encrypted blob to downgrade in exactly those cases (missing file, corrupt
+    # file, key absent), so preserving identity costs nothing.
+    at_rest = None
+    try:
+        stored = json.loads(_config_path().read_text(encoding="utf-8"))
+        if isinstance(stored, dict):
+            value = stored.get("private_key_pem")
+            if isinstance(value, str) and value:
+                at_rest = value
+    except FileNotFoundError:
+        pass  # First save; nothing stored yet.
+    except (OSError, json.JSONDecodeError):
+        logger.warning(
+            "Could not read the stored private key from %s; keeping the "
+            "in-memory key so this device's identity survives the save.",
+            _config_path(),
+        )
+
+    # Write from a shallow COPY rather than temporarily blanking the shared
+    # cfg: this object is the one live object every thread reads.  While the
+    # old code held the swapped-in value, a concurrent reader (a peer
+    # handshake signing with the private key, a settings GET, the desktop UI)
+    # could observe the encrypted blob and fail for no visible reason.
+    # ``save()`` only reads attributes, so a shallow copy is enough.
+    snapshot = copy.copy(cfg)
+    if at_rest is not None:
+        snapshot.private_key_pem = at_rest
+    save_config(snapshot)
+
+
+def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
+    """Update settings from request body (only safe fields).
+
+    If *on_settings_change* is provided, it is called with the ``updated``
+    dict plus any ``special`` action keys after persistence so the host
+    application can apply the changes to its live services immediately
+    (rather than on next restart).
+
+    *enc_mgr* is the encryption manager used to re-encrypt the device private
+    key at rest.  When it is None (callback not wired yet), persistence keeps
+    the already-stored at-rest private key instead of writing the in-memory
+    plaintext value (see ``_persist_preserving_at_rest_private_key``).
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    # The pairing passphrase is strength-validated server-side too, so the
+    # rules (length ≥ 12 + uppercase/lowercase/digit/special) can't be
+    # bypassed by editing the request body.  Empty string = clear the
+    # passphrase (allowed).  Runs before the mutation loop so an invalid
+    # value is rejected without touching cfg.
+    if "netpair_password" in data:
+        pw = data["netpair_password"]
+        if not isinstance(pw, str):
+            return {"ok": False, "error": "netpair_password_type"}, 400
+        pw = pw.strip()
+        if pw:
+            from internal.transport.relay import netpair_passphrase_error
+
+            err = netpair_passphrase_error(pw)
+            if err is not None:
+                return {"ok": False, "error": "netpair_password_" + err}, 400
+        data["netpair_password"] = pw
+
+    # The receive directory is where every phone upload, download, listing and
+    # delete is confined to — so it is the one path field whose value decides
+    # what "confined" means.  Unvalidated, a token holder pointed it at any
+    # directory on the host and then used the ordinary file endpoints on it.
+    # Empty means "not configured" (the caller keeps the default) and passes.
+    if "file_receive_dir" in data:
+        value = data["file_receive_dir"]
+        if not isinstance(value, str):
+            return {"ok": False, "error": "file_receive_dir_type"}, 400
+        from internal.web.api.security import is_safe_receive_dir
+
+        ok, why = is_safe_receive_dir(value)
+        if not ok:
+            logger.warning("Rejected file_receive_dir outside allowed roots (%s)", why)
+            return {"ok": False, "error": "file_receive_dir_" + why}, 400
+        data["file_receive_dir"] = value.strip()
+
+    # The translation endpoint is fetched by this machine, so an unvalidated
+    # value turns the app into a request proxy into its own network — loopback
+    # services, router admin pages, cloud metadata — and the response is
+    # returned to whoever set it.
+    if "translate_url" in data:
+        value = data["translate_url"]
+        if not isinstance(value, str):
+            return {"ok": False, "error": "translate_url_type"}, 400
+        value = value.strip()
+        if value:
+            from internal.web.api.security import is_safe_outbound_url
+
+            ok, why = is_safe_outbound_url(value)
+            if not ok:
+                logger.warning("Rejected translate_url (%s)", why)
+                return {"ok": False, "error": "translate_url_" + why}, 400
+        data["translate_url"] = value
+
+    # The single app password ("password" special action) keeps the same
+    # strength rules the netpair passphrase had — the unified
+    # encryption_password is just as sensitive, so a weak value must be
+    # rejected server-side too rather than only in the web UI.  Empty string
+    # is allowed (it means "leave unchanged" — use clear_password to remove).
+    if "password" in data:
+        pw = data["password"]
+        if not isinstance(pw, str):
+            return {"ok": False, "error": "password_type"}, 400
+        pw = pw.strip()
+        if pw:
+            from internal.transport.relay import netpair_passphrase_error
+
+            err = netpair_passphrase_error(pw)
+            if err is not None:
+                return {"ok": False, "error": "password_" + err}, 400
+        data["password"] = pw
+
+    updated = {}
+    # The values as they were, so a refusal that arrives after the loop — a
+    # port pair that cannot both bind, or a config file that will not save —
+    # can put memory back where the disk still is instead of leaving the
+    # process on settings the user was told were rejected.
+    previous = {}
+    for field in _MUTABLE_FIELDS:
+        if field in data:
+            new_val = data[field]
+            old_val = getattr(cfg, field, None)
+            if _type_mismatch(old_val, new_val):
+                logger.warning(
+                    "Settings update rejected for %s: type mismatch (%s -> %s)",
+                    field,
+                    type(old_val).__name__,
+                    type(new_val).__name__,
+                )
+                continue
+            limits = _RANGE_LIMITS.get(field)
+            if limits is not None:
+                try:
+                    in_range = limits[0] <= float(new_val) <= limits[1]
+                except (TypeError, ValueError):
+                    in_range = False
+                if not in_range:
+                    logger.warning(
+                        "Settings update rejected for %s: value %r outside %s..%s",
+                        field,
+                        new_val,
+                        limits[0],
+                        limits[1],
+                    )
+                    continue
+            previous[field] = old_val
+            setattr(cfg, field, new_val)
+            updated[field] = new_val
+            if field in _SECRET_FIELDS:
+                # Said, not shown: an emptied credential reads as cleared, and a
+                # set one says only that it is set.
+                logger.info(
+                    "Settings updated: %s = %s", field, "<cleared>" if not new_val else "<set>"
+                )
+            else:
+                logger.info("Settings updated: %s = %s", field, new_val)
+
+    def restore():
+        """Put every field this request touched back the way the disk has it."""
+        for name, value in previous.items():
+            setattr(cfg, name, value)
+
+    conflict = _port_conflict(cfg, updated)
+    if conflict:
+        # Rejected as a pair, not as fields: each port is in range on its own,
+        # which is why the per-field check above cannot catch it.
+        logger.warning("Settings update rejected: %s", conflict)
+        restore()
+        return {"ok": False, "error": conflict}, 400
+
+    # A language change made through the web UI is a REAL first-run choice:
+    # mark it so the desktop picker (gated by cfg.language_chosen) and the
+    # web wizard gate (__CLIPSYNC_FRESH__ = not language_chosen) stop
+    # disagreeing with the web UI's own language selector.  Without this,
+    # picking a language in the web settings left language_chosen False, the
+    # native picker re-nagged on every launch, and the config kept reading as
+    # "fresh" to every later page load.
+    if "language" in updated and not getattr(cfg, "language_chosen", False):
+        cfg.language_chosen = True
+        logger.info("language_chosen set via web language selection")
+
+    # Action keys the host application handles (not plain config fields).
+    special = {k: data[k] for k in _SPECIAL_ACTIONS if k in data}
+
+    if not updated and not special:
+        return {"ok": False, "error": "no valid fields to update"}, 400
+
+    try:
+        if enc_mgr is not None:
+            save_config(cfg, enc_mgr)
+        else:
+            _persist_preserving_at_rest_private_key(cfg)
+        logger.debug("Config persisted after settings update")
+    except Exception as e:
+        logger.error("Failed to persist settings: %s", e)
+        # Nothing was written, so nothing may stay applied.  Without this the
+        # process kept running the values the caller was told had failed to
+        # save, and a later successful save wrote them to disk on its own.
+        restore()
+        return {"ok": False, "error": "failed to persist settings"}, 500
+
+    if "log_level" in updated:
+        # The rotating file handler is opened before the config is loaded and
+        # starts at its own INFO default; a level saved here has to reach it
+        # now rather than on the next restart.  Both the RPC and the HTTP
+        # settings paths run through this function, so this is the one place
+        # the live handler needs to hear about it.
+        from internal.data.logs import set_file_log_level
+
+        set_file_log_level(cfg.log_level)
+
+    result = None
+    applied = True
+    if on_settings_change is not None:
+        try:
+            result = on_settings_change(updated, special)
+        except Exception as e:
+            logger.error("Failed to apply settings live: %s", e)
+            # Saved, but not running.  The file is written — that part did
+            # happen — and the process is still on the old values; a plain
+            # "ok: true" told the user the change was in force, which is what
+            # made a failed rebind indistinguishable from a successful save.
+            applied = False
+
+    response = {"ok": True, "saved": True, "applied": applied, "updated": updated}
+    if not applied:
+        response["error"] = "settings_saved_not_applied"
+    if isinstance(result, dict):
+        # Only whitelisted (non-secret) keys may be merged into the response.
+        for key in _SAFE_RESPONSE_KEYS:
+            if key in result:
+                response[key] = result[key]
+    return response, 200
+
+
+# ---------------------------------------------------------------------------
+# Data export / import
+# ---------------------------------------------------------------------------
+
+
+def export_data(body, cfg, history):
+    """Export clipboard history to a persistent file (JSON, CSV, or Markdown).
+
+    Request body: {"format": "json" | "csv" | "markdown"}
+    Writes a uniquely-named file to the user's Downloads folder (falling back
+    to the app data directory) and leaves it in place so the user can open or
+    move it.  Returns the durable path and filename.
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    # Coerce to str first: a non-string "format" (number/null) would raise
+    # AttributeError on .lower() and surface as a misleading 500.
+    fmt = str(data.get("format", "json")).lower()
+    if fmt not in ("json", "csv", "markdown"):
+        return {"ok": False, "error": "unsupported format (use json, csv or markdown)"}, 400
+
+    suffix = {"json": ".json", "csv": ".csv", "markdown": ".md"}[fmt]
+    from pathlib import Path
+
+    from internal.config.config import _config_dir
+
+    # Downloads is where users expect exported files; if it can't be
+    # determined, fall back to the app data dir (always present).
+    downloads = Path.home() / "Downloads"
+    dest_dir = downloads if downloads.is_dir() else Path(_config_dir())
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        dest_dir = Path(_config_dir())
+    # A unique, exclusively-created name: same-second exports used to share a
+    # timestamp and open(..., "w") truncated the earlier file.
+    from internal.fsutil import unique_export_path
+
+    dest = unique_export_path(dest_dir, "clipsync-history", suffix, sep="-")
+    filename = dest.name
+    dest_path = str(dest)
+
+    try:
+        from internal.data.export import (
+            export_history_csv,
+            export_history_json,
+            export_history_markdown,
+        )
+
+        if fmt == "json":
+            count = export_history_json(history, dest_path)
+        elif fmt == "markdown":
+            count = export_history_markdown(history, dest_path)
+        else:
+            count = export_history_csv(history, dest_path)
+        # The export functions chmod the file 0600 (plaintext clipboard
+        # content).  Do NOT delete it — the whole point is that the user can
+        # find and use this file.
+        return {
+            "ok": True,
+            "filepath": dest_path,
+            "filename": filename,
+            "count": count,
+            "format": fmt,
+        }, 200
+    except Exception as exc:
+        logger.exception("Export failed")
+        # Remove a partial export on failure so no broken file is left behind.
+        with contextlib.suppress(OSError):
+            os.unlink(dest_path)
+        return {"ok": False, "error": str(exc)}, 500
+
+
+def import_data(body, cfg, history):
+    """Import clipboard history from a JSON or CSV file path.
+
+    Request body: {"filepath": "/path/to/file.json"}
+    Accepts any existing regular-file path the user points at (no confinement
+    to the app data dir), still caps the file at ~10 MB and validates that it
+    parses as a ClipSync export before applying anything.  The source file is
+    only ever read, never written.  Returns the count of imported items.
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    filepath = data.get("filepath", "").strip()
+    if not filepath:
+        return {"ok": False, "error": T("web.import_missing_path")}, 400
+
+    filepath = os.path.expanduser(filepath)
+    if not os.path.isfile(filepath):
+        return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 404
+
+    # Confine import to where a legitimate export/backup actually lands — the
+    # app data dir (backups) and the user's Downloads folder (manual exports) —
+    # so a token holder can't read arbitrary files off the disk by importing
+    # them into history and reading the content back out.
+    from internal.config.config import _config_dir
+
+    data_root = os.path.realpath(_config_dir())
+    downloads_root = os.path.realpath(os.path.join(os.path.expanduser("~"), "Downloads"))
+    real = os.path.realpath(filepath)
+    if not any(real == r or real.startswith(r + os.sep) for r in (data_root, downloads_root)):
+        return {"ok": False, "error": T("web.import_path_not_allowed")}, 400
+
+    # Cap at ~10 MB so a huge or mistaken file can't be slurped into memory.
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        return {"ok": False, "error": T("web.import_file_not_found", path=filepath)}, 404
+    if size > 10 * 1024 * 1024:
+        return {"ok": False, "error": T("web.import_file_too_large")}, 413
+
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext not in (".json", ".csv"):
+        return {"ok": False, "error": T("web.import_unsupported_format")}, 415
+
+    # Validate before applying so a malformed file fails with a clear
+    # localized error instead of a generic 500 mid-import.
+    try:
+        if ext == ".json":
+            with open(filepath, encoding="utf-8") as f:
+                parsed = json.load(f)
+            if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+                return {"ok": False, "error": T("web.import_invalid_content")}, 400
+            # Require ClipSync export fields so a foreign JSON array (e.g. a
+            # browser/app config dump) can't be ingested and read back through
+            # the history API.  An empty list is a valid no-op import.
+            if not all(
+                ("text_preview" in item or "types" in item or "content_type" in item)
+                for item in parsed
+            ):
+                return {"ok": False, "error": T("web.import_invalid_content")}, 400
+        else:
+            with open(filepath, encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                expected = {"timestamp", "content_type", "text_preview"}
+                if not expected.intersection(reader.fieldnames or []):
+                    return {"ok": False, "error": T("web.import_invalid_content")}, 400
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        logger.warning("Import validation failed for %s", filepath, exc_info=True)
+        return {"ok": False, "error": T("web.import_invalid_content")}, 400
+
+    try:
+        from internal.data.export import import_history_csv, import_history_json
+
+        if ext == ".json":
+            count = import_history_json(filepath, history)
+        else:
+            count = import_history_csv(filepath, history)
+        return {"ok": True, "imported": count}, 200
+    except Exception as exc:
+        logger.exception("Import failed")
+        return {"ok": False, "error": str(exc)}, 500
+
+
+# ---------------------------------------------------------------------------
+# Backup / restore
+# ---------------------------------------------------------------------------
+
+
+def create_backup_api(cfg, history):
+    """Create a full backup zip and return its path."""
+    try:
+        from internal.data.backup import create_backup
+
+        path = create_backup(cfg, history)
+        return {"ok": True, "backup_path": path}, 200
+    except Exception as exc:
+        logger.exception("Backup creation failed")
+        return {"ok": False, "error": str(exc)}, 500
+
+
+def restore_backup_api(body, cfg, history):
+    """Restore from a backup zip file.
+
+    Request body: {"backup_path": "/path/to/backup.zip"}
+    Creates a pre-restore backup of the current state first (a safety net so
+    the user can undo a restore), then restores.  Returns a summary of
+    restored items plus the pre-restore backup path.
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    backup_path = data.get("backup_path", "").strip()
+    if not backup_path:
+        return {"ok": False, "error": "missing backup_path"}, 400
+
+    from internal.config.config import _config_dir
+    from internal.web.api.security import confine_path
+
+    safe_path = confine_path(backup_path, _config_dir())
+    if safe_path is None:
+        return {"ok": False, "error": "backup_path must be inside the ClipSync data directory"}, 400
+    backup_path = str(safe_path)
+
+    # Safety net: snapshot the current state before overwriting it, so a
+    # restore can always be undone from the backups list.  A failure to
+    # snapshot must not block the restore itself — just leave the field None.
+    pre_restore_backup = None
+    try:
+        from internal.data.backup import create_backup
+
+        pre_restore_backup = create_backup(cfg, history)
+    except Exception as exc:
+        logger.warning("Failed to create pre-restore backup: %s", exc)
+        pre_restore_backup = None
+
+    try:
+        from internal.data.backup import restore_backup
+
+        summary = restore_backup(backup_path, cfg, history)
+        # Persist the restored config immediately.  A restore that only mutates
+        # the in-memory Config is silently discarded if the process crashes
+        # before some unrelated save happens, and the restored values would be
+        # lost on the next start.  This handler has no encryption manager, so
+        # reuse the at-rest-private-key-preserving helper used by
+        # update_settings to avoid downgrading an encrypted key to plaintext.
+        try:
+            _persist_preserving_at_rest_private_key(cfg)
+            logger.info("Restored config persisted to disk")
+        except Exception as exc:
+            # A save failure must not fail the restore request — the in-memory
+            # restore already succeeded — but it must not pass silently either.
+            logger.error("Failed to persist restored config: %s", exc)
+        return {
+            "ok": True,
+            "summary": summary,
+            "restored": summary,
+            "pre_restore_backup": pre_restore_backup,
+            "needs_restart": True,
+        }, 200
+    except FileNotFoundError:
+        return {"ok": False, "error": "backup file not found"}, 404
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}, 400
+    except Exception as exc:
+        logger.exception("Restore failed")
+        return {"ok": False, "error": str(exc)}, 500
+
+
+def list_backups_api(backup_dir: str | None = None):
+    """Return a list of available backups."""
+    try:
+        from internal.data.backup import list_backups
+
+        backups = list_backups(backup_dir)
+        return {"ok": True, "backups": backups}, 200
+    except Exception as exc:
+        logger.exception("List backups failed")
+        return {"ok": False, "error": str(exc)}, 500

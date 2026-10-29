@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-decline-chat-invite"
+description = "Enables the decline_chat_invite command without any pre-configured scope."
+commands.allow = ["decline_chat_invite"]
+
+[[permission]]
+identifier = "deny-decline-chat-invite"
+description = "Denies the decline_chat_invite command without any pre-configured scope."
+commands.deny = ["decline_chat_invite"]

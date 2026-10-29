@@ -1,0 +1,1288 @@
+"""Configuration management.
+
+Config is stored as JSON in the user's config directory:
+  Windows: %APPDATA%/ClipSync/config.json
+  macOS:   ~/Library/Application Support/ClipSync/config.json
+"""
+
+import json
+import logging
+import math
+import os
+import platform
+import re
+import tempfile
+import threading
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from internal.security.encryption import EncryptionManager
+
+import contextlib
+
+from internal.sync import ai_profiles as _ai_profiles
+
+logger = logging.getLogger(__name__)
+
+# Guards the shared Config instance. save() and load() hold it, and callers
+# that mutate Config fields across threads (e.g. the coordinator) should hold
+# it around multi-field mutations so concurrent dict iteration / torn reads
+# cannot occur. RLock so save()/load() may be called from within the lock.
+config_lock = threading.RLock()
+
+
+@dataclass
+class PeerInfo:
+    device_id: str
+    device_name: str
+    public_key_pem: str = ""  # pinned after pairing
+    paired: bool = False
+    notes: str = ""  # user-assigned alias or memo
+    last_ip: str = ""  # last known address, so a paired peer can be reached
+    last_port: int = 0  # even when it is momentarily off mDNS / across restarts
+    removed_at: float = 0  # wall-clock forget time when archived in removed_peers; 0 = active
+
+
+# Default global-hotkey bindings — single source of truth.  The Config
+# dataclass defaults from this, and the desktop host reads them from here
+# (through `settings.get`) before registering them with the OS: the process
+# that owns the registration is the one that can see a keystroke while another
+# application has focus, and that is the Rust host, not this sidecar.  The
+# spelling is `global-hotkey`'s, so `Ctrl+1` and `Ctrl+Shift+V` are registered
+# as written.
+DEFAULT_HOTKEYS: dict[str, str] = {
+    "paste_1": "Ctrl+1",
+    "paste_2": "Ctrl+2",
+    "paste_3": "Ctrl+3",
+    "paste_4": "Ctrl+4",
+    "paste_5": "Ctrl+5",
+    "paste_6": "Ctrl+6",
+    "paste_7": "Ctrl+7",
+    "paste_8": "Ctrl+8",
+    "paste_9": "Ctrl+9",
+    "paste_plain": "Ctrl+Shift+V",
+    "toggle_monitor": "Ctrl+Shift+M",
+    "show_window": "Ctrl+Shift+Space",
+}
+
+
+# The public brokers remote phone access tries, in order.  These are
+# best-effort free services: any one of them can be down, rate-limiting or
+# blocked by a given mobile network, which is why the list exists at all and is
+# tried rather than picked from.  Named at module level so the window can offer
+# "restore defaults" from the same list instead of carrying a second copy that
+# drifts.
+DEFAULT_COMPANION_REMOTE_BROKERS = (
+    "wss://broker.emqx.io:8084/mqtt",
+    "wss://broker.hivemq.com:8884/mqtt",
+    "wss://test.mosquitto.org:8081/mqtt",
+)
+
+
+@dataclass
+class Config:
+    # Schema version for one-way migrations on load. v1 configs stored
+    # filter_enabled_categories=[] to mean "all enabled"; v2 uses None=all;
+    # v3 turns the phone companion (远程访问) on by default.
+    config_version: int = 3
+    device_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    device_name: str = field(default_factory=platform.node)
+    port: int = 19990
+    service_type: str = "_clipsync._tcp.local."
+    peers: dict[str, PeerInfo] = field(default_factory=dict)
+    # Devices the user forgot/removed, archived so the UI can offer a "Restore"
+    # management surface.  Same PeerInfo shape as peers; removed_at > 0 marks
+    # the moment of removal.
+    removed_peers: dict[str, PeerInfo] = field(default_factory=dict)
+    sync_enabled: bool = True
+    # Wall-clock deadline (time.time()) of a timed "pause for N minutes";
+    # 0 = none.  The auto-resume timer itself is runtime-only state, so the
+    # deadline is persisted: a restart / auto-update relaunch inside the
+    # pause window re-arms it instead of leaving sync_enabled=False stuck
+    # on forever with nothing left to re-enable it.
+    timed_pause_until: float = 0.0
+    auto_start: bool = False
+    # None = not configured → nothing redacted (default OFF), which is also
+    # what [] (an explicit empty selection) means.  Non-empty = that subset.
+    filter_enabled_categories: list[str] | None = None
+    private_key_pem: str = ""
+    certificate_pem: str = ""
+    # Advanced settings
+    history_max_entries: int = 500
+    # Age-based cleanup for unpinned history entries, in days (dual limit
+    # together with history_max_entries).  0 disables age-based cleanup.
+    history_max_age_days: float = 0.0
+    file_receive_dir: str = ""
+    sync_debounce: float = 0.3
+    clipboard_poll_interval: float = 1.0
+    max_reconnect_attempts: int = 10
+    transfer_timeout: float = 120.0
+    log_level: str = "INFO"
+    notifications_enabled: bool = True
+    # Per-type notification toggles (each defaults ON; the master
+    # notifications_enabled switch above still gates all of them).
+    notify_device_connect: bool = True
+    notify_transfer: bool = True
+    notify_pairing: bool = True
+    notify_sync: bool = True
+    # Per-peer chat message mutes (peer_ids whose incoming messages must not
+    # produce a desktop notification / sound).  Managed from the web chat UI.
+    chat_muted_peers: list[str] = field(default_factory=list)
+    # Nearby chat's admission rule.  True (the default) lets any device that
+    # can reach this one open a conversation and send a file; False holds both
+    # for an explicit Allow on this machine.  See `internal/sync/nearby_chat.py`.
+    chat_open_to_all: bool = True
+    # File transfer's admission rule, the same shape as the chat one above
+    # because file transfer is the same kind of act: True (the default) lets any
+    # device that can reach this one send a file, and the transfer starts on
+    # arrival; False puts the Allow/Deny prompt in front of each one.
+    #
+    # Separate from `chat_open_to_all` rather than shared with it: a person may
+    # reasonably take a stranger's message and not a stranger's file.  Paired
+    # devices are unaffected either way -- they are prompted for both.
+    file_open_to_all: bool = True
+    # Whether other devices may pull this machine's application log.  Off by
+    # default: the log is a record of what this machine did, and a debug tool
+    # that hands it out unasked is not one anybody agreed to.  Turning it on
+    # answers whoever asks, paired or not -- there is no per-device list, and
+    # the answer is always a redacted copy (see `internal/data/logs.py`).
+    log_sharing: bool = False
+    # Security
+    encryption_enabled: bool = True
+    encryption_password: str = ""  # runtime only — never persisted
+    encryption_password_hash: str = ""  # persisted verification token
+    # UI preferences
+    appearance_mode: str = "system"  # system, light, dark, sepia, midnight, contrast
+    language: str = "zh-CN"  # locale code: "en", "zh-CN" (default Chinese)
+    language_chosen: bool = False  # True once the user picked a language (first-run onboarding)
+    # Clipboard behavior
+    paste_to_top: bool = True  # move pasted item to top
+    low_memory_mode: bool = False  # reduce polling frequency / disable previews
+    retry_capture_enabled: bool = True  # multi-round retry capture
+    dedup_method: str = "sha256"  # "sha256" or "simple"
+    # Strip rich-text formats (HTML/RTF) from every local clipboard write —
+    # remote receives and pastes land as plain text only.  Images and file
+    # lists are content, not formatting, and are kept.
+    plain_text_only: bool = False
+
+    # Periodic silent update check against GitHub releases (~every 6h).  OFF
+    # means the background loop never contacts the network for update checks;
+    # manual "check for updates" stays available either way.
+    auto_update_check: bool = True
+
+    # App filter (blacklist/whitelist apps from clipboard monitoring)
+    app_filter_enabled: bool = False
+    app_filter_mode: str = "blacklist"  # "blacklist" or "whitelist"
+    app_filter_list: list[str] = field(default_factory=list)  # list of process names
+
+    # Source tracking
+    source_tracking_enabled: bool = True  # track which app produced clipboard content
+
+    # UI preferences
+    ui_backend: str = "webview"  # "webview" or "ctk"
+    ui_animation_enabled: bool = True
+    # "通知提示音" — the user-facing master notification switch.  On some
+    # platforms a notification always plays a sound, so OFF means no
+    # notifications at all, not just silence.  Default ON so fresh installs
+    # keep getting notifications (see Application._notify).
+    sound_enabled: bool = True
+
+    # Data management
+    favorites_path: str = ""  # empty = default location
+    # NOTE: nothing reads favorites_path.  Favorites live in SQLite and both
+    # backup.py:_get_favorites_path() and favorites.py resolve the location
+    # from _config_dir() directly, so setting this never moved anything.  The
+    # field is kept only so an existing config.json carrying it still loads;
+    # it was removed from the settings UI and API because it silently did
+    # nothing.  Do not surface it again without wiring it up first.
+    data_dir: str = ""  # custom data directory (empty = default)
+
+    # Web companion (远程访问 / 手机 Companion) — the phone-facing web page.
+    #
+    # ON by default: the phone companion is the feature most people install the
+    # app for, and finding it meant knowing to go and switch it on first.  The
+    # server still mints an access token the moment it starts (see
+    # ``Application._start_companion``), so "on" is not "open" — a device on the
+    # same network still has to carry the token.
+    #
+    # A config that says OFF on purpose stays off: see the v3 migration in
+    # ``load``, which only flips a config showing no sign of the companion ever
+    # having run.
+    web_enabled: bool = True
+    web_port: int = 19991
+    web_token: str = ""
+    # The user cleared the access token on purpose.  An empty ``web_token``
+    # alone cannot say whether that is a leftover or a decision, and the
+    # companion mints one whenever it starts without — so without this the
+    # clear button would be undone by the next restart.  This flag's whole job
+    # is to keep that token empty: serving without one is ``web_token``'s own
+    # doing (``web.server._validate_token`` passes every request when the
+    # expected token is empty), and it stays true only as long as nothing
+    # re-mints.  Rotating a token, or switching the companion on from off,
+    # clears the flag.  The sidecar honours it; the legacy Tk panel still
+    # re-mints (see the parity audit).
+    web_token_disabled: bool = False
+    web_history_limit: int = 30
+    # Remote access to the companion through the relay tunnel.  Off by
+    # default: it publishes this machine's companion traffic (encrypted) to a
+    # third-party MQTT broker, and that is the user's decision to make.
+    companion_remote_enabled: bool = False
+    # The tunnel's own token.  Empty reuses ``web_token``; a separate one can
+    # be rotated or cleared without invalidating the LAN QR code.
+    companion_remote_token: str = ""
+    # WSS MQTT brokers the tunnel tries in order.  Kept apart from
+    # ``relay_brokers`` so remote phone access can point at a different broker
+    # (a private one, or one that is reachable on the user's network) without
+    # moving clipboard sync.
+    companion_remote_brokers: list[str] = field(
+        default_factory=lambda: list(DEFAULT_COMPANION_REMOTE_BROKERS)
+    )
+    # What a remote phone may do: ``readonly`` (default) can read history,
+    # chats, files; ``full`` also adds push/pin/delete/chat actions.  The tunnel
+    # enforces this after its path allow-list, never instead of it.
+    companion_remote_mode: str = "readonly"
+    # Where the static phone page is published.  The remote QR code points here;
+    # the token and broker list ride in the URL fragment, which the static host
+    # never receives.  Empty means "not deployed yet" and the QR is refused.
+    companion_remote_page_url: str = ""
+
+    # Translation (LibreTranslate-compatible endpoint). Empty url = the
+    # public LibreTranslate instance; when both url and key are empty the
+    # translate endpoint falls back to a free anonymous service.
+    translate_url: str = ""
+    translate_api_key: str = ""  # never exposed to web clients
+
+    # Hotkeys
+    hotkeys: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
+
+    # Global hotkeys are off by default; the user can enable them in settings.
+    hotkeys_enabled: bool = False
+
+    # Paired devices this machine does *not* send clipboard content to.
+    #
+    # A list of the exceptions rather than a flag per device, and that is a
+    # deliberate choice between two silent failures: a device with no entry is in
+    # scope, so every pairing that existed before this setting keeps working
+    # exactly as it did and "just paired" means "syncing".  Defaulting to off
+    # would stop every existing pair at the upgrade with no visible cause, which
+    # is worse than a third machine the user has to switch off by hand.
+    #
+    # A copy used to go to every paired peer, over the LAN or the relay, whichever
+    # could carry it.  That is right for two machines on one desk and wrong the
+    # moment a third is added: a laptop, a work desktop and a machine at a
+    # relative's house are all "paired", so a password copied on the laptop lands
+    # in the history of all three.  The user cannot see that happen -- the clip
+    # simply arrives -- which is why the switch has to be somewhere they can find.
+    sync_paused_peers: list[str] = field(default_factory=list)
+
+    # Internet (cross-network) sync over public MQTT-over-WebSocket relays
+    # (see internal/transport/relay.py).  Zero-cost design: the editable
+    # broker list defaults to free public services, payloads stay E2E-
+    # encrypted, and the relay only ever sees ciphertext + an unguessable
+    # topic derived from both devices' secrets.
+    internet_sync_enabled: bool = False
+    # Anonymous free relays (no credentials) — the zero-cost public option.
+    # Kept separate from the credentialed private relay below so the two
+    # groups are managed independently: free/public endpoints must never be
+    # handed the private broker's password.
+    relay_brokers: list[str] = field(
+        default_factory=lambda: [
+            "wss://broker.emqx.io:8084/mqtt",
+            "wss://broker.hivemq.com:8884/mqtt",
+            "wss://test.mosquitto.org:8081/mqtt",
+        ]
+    )
+    # Private credentialed relay(s) — these authenticate with
+    # relay_username/relay_password below.  Preconfigured with mqttyyc.top,
+    # which is preferred as the primary; the free list becomes mirrors +
+    # failover.
+    relay_private_brokers: list[str] = field(
+        default_factory=lambda: [
+            "mqtt://mqttyyc.top:1883",
+            "ws://mqttyyc.top:8083/mqtt",
+        ]
+    )
+    # Default broker credentials for the private relay above — filled in so
+    # the default server "just works" with no typing.  Stored in the config
+    # file, which is encrypted at rest when an app password is set — same
+    # treatment as the translation API key.
+    relay_username: str = "clipsync_mqtt"
+    relay_password: str = "Y*CT$#qgn_Ft#p6JG+"
+    # The largest single PUBLISH packet the relay will carry, in bytes — the
+    # whole packet, not just the payload this app hands the broker: the topic
+    # and the MQTT headers ride in front of it (relay.PUBLISH_OVERHEAD_BYTES),
+    # and a broker's documented limit counts them.
+    #
+    # A property of the server, not of this app: a broker that refuses a message
+    # over its limit does so by dropping it, so a file chunk too large for it
+    # dies in flight while the sender has already counted it sent.  The shipped
+    # private relay drops it *and* disconnects the publisher, taking the whole
+    # relay session down with the chunk that missed the limit.
+    #
+    # 64 KiB is what that relay carries — measured: a 64209-byte envelope
+    # arrives, a 65573-byte one is refused.  Every chunk is published to the
+    # primary and its mirrors alike, so what a chunk has to fit is the narrowest
+    # relay in the list.  Raise this for a relay that carries more: the chunk
+    # size follows the setting (ChatManager.relay_chunk_for).
+    relay_max_message_bytes: int = 64 * 1024
+    # How fast this app will feed the relay, in bytes per second.
+    #
+    # The other half of what a relay refuses, and not a property of the server
+    # the way the size limit is — it is a *policy*: how much of a shared,
+    # rate-limited pipe this app is willing to take.  A broker accepts a burst
+    # and then silently discards what it cannot push at the rate it is going:
+    # measured on the shipped private relay, 24 chunks of ~44 KiB sent back to
+    # back arrived 2 strong, while 40 of the same chunks offered at ~86 KB/s
+    # arrived 40/40.  Nothing reports those losses — QoS 1 is acknowledged at
+    # the broker, not at the peer — so the sender's own flow control has to
+    # avoid provoking them, and this is the number it aims at.
+    #
+    # 64 KiB/s (512 kbit/s) sits under what the shipped relay carries with room
+    # for the chat, clipboard and receipt traffic sharing the same pipe.  Raise
+    # it for a relay of your own that is faster; the transfer will use the
+    # configured rate as its ceiling and back off below it when a chunk has to
+    # be resent.
+    relay_max_bytes_per_second: int = 64 * 1024
+    # This device's own relay secret — generated lazily on first use and
+    # never transmitted in the clear (enrollment rides the TLS LAN channel).
+    relay_secret: str = ""
+    # peer device_id → that peer's relay secret, learned via relay_enroll.
+    peer_relay_secrets: dict[str, str] = field(default_factory=dict)
+    # Internet pairing-code (Round 14): peer device_id → the shared secret that
+    # was typed in from (or confirmed via) a pairing code.  Unlike
+    # peer_relay_secrets, no prior LAN pairing is required — the code is the
+    # bootstrap.
+    netpair_secrets: dict[str, str] = field(default_factory=dict)
+    # Round 15: user-assigned friendly alias per internet-paired peer (peer
+    # device_id → alias).  Local-only view — the peer never learns it.  Empty /
+    # missing entry = no alias (the web UI falls back to the device name).
+    netpair_aliases: dict[str, str] = field(default_factory=dict)
+    # The name an internet-paired peer published about itself when it said hello
+    # (peer device_id → device name).  Kept because that name used to live only in
+    # memory (`internet_pairing._names`), so a machine that had never been given an
+    # alias lost the peer's name at every restart and every upgrade — until that
+    # peer next connected and said hello again — and a history row in the meantime
+    # was labelled with the raw peer id.  Reported as "升级完以后，它的名字显示也会
+    # 不太对".  A user-assigned alias outranks it; see `known_device_names`.
+    netpair_names: dict[str, str] = field(default_factory=dict)
+    # Round 22: optional user-set pairing passphrase.  When set, netpair
+    # channel keys are derived from the passphrase (with the 35-bit code secret
+    # as a salt) instead of the code alone, closing the code's brute-force
+    # window.  Empty string = passphrase off, original derivation unchanged.
+    # The value itself never leaves this device (GET only exposes a boolean).
+    netpair_password: str = ""
+    # Round 23: the X25519 private key netpair channel keys are derived from,
+    # generated on first pairing and never transmitted — only its public half
+    # goes out, inside the pairing hello.  A netpair channel used to be keyed by
+    # the pairing code alone, and 35 bits is enumerable: anyone who recorded a
+    # session could take the ciphertext home and try every code at GPU speed.
+    # With agreement in the path, the recording carries only public keys.
+    netpair_dh_key: str = ""
+    # peer device_id → that peer's X25519 public key, as carried by its hello.
+    # Missing = the peer has not been heard from since it learned to agree, and
+    # its channel is still on the code-derived key.
+    netpair_peer_keys: dict[str, str] = field(default_factory=dict)
+    # Codes this machine generated and has not seen answered yet, persisted so a
+    # restart does not silently invalidate a code the user copied off the screen.
+    # code (the 12-char ``XXXX-XXXX-XXXX`` string) → {"secret": str,
+    # "created_at": epoch float}.  The in-memory pending table used to be the
+    # only copy: ten minutes later (or after any restart) the code vanished and a
+    # partner typing it waited forever -- "the code is right and nothing
+    # happens".  Owner: InternetPairingService (see ``_prune_pending``).
+    netpair_pending: dict[str, dict] = field(default_factory=dict)
+
+    # AI-config sync (refactor round 1): enabled tool profiles + user custom
+    # paths whose AI tool config files (CLAUDE.md, memory notes, skills/,
+    # .mcp.json, ...) are advertised — as metadata only (rel path + sha256 +
+    # size + mtime) — to paired peers.  The effective watch list is the
+    # flattened union of the enabled tools' profile entries and the custom
+    # paths (see internal/sync/ai_profiles.py).  "~" expands to the current
+    # user's home at collection time.  No tools enabled AND no custom paths =
+    # feature off for this device (nothing is collected / broadcast).
+    ai_config_tools: list[str] = field(
+        default_factory=lambda: list(_ai_profiles.DEFAULT_TOOL_KEYS),
+    )
+    # User-added watch paths (file or directory), beyond the built-in tool
+    # profiles.  Kept separate so the built-in profiles stay deterministic.
+    ai_config_custom_paths: list[str] = field(default_factory=list)
+
+    def add_peer(self, peer: PeerInfo):
+        self.peers[peer.device_id] = peer
+
+
+def _config_dir() -> Path:
+    override = os.environ.get("CLIPSYNC_CONFIG_DIR")
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise ValueError("CLIPSYNC_CONFIG_DIR must be an absolute path")
+        return path
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        return Path(base) / "ClipSync"
+    elif system == "Darwin":
+        return Path.home() / "Library" / "Application Support" / "ClipSync"
+    else:
+        return Path.home() / ".config" / "clipsync"
+
+
+# Public alias — this helper is imported across many modules (transport,
+# backup, web, UI); keep the historic private name working for existing
+# callers while new code uses the public form.
+config_dir = _config_dir
+
+
+def chosen_device_name(cfg, device_id) -> str:
+    """The name **the user** gave this device on this machine, or ``""``.
+
+    One fact, two fields.  A device is renamed from its own row, and which field
+    that writes depends on how the row is paired: the alias an internet pairing
+    is renamed through (``netpair_aliases``) or the note a saved LAN peer is
+    renamed through (``peers[pid].notes``).  So every reader has to consult both,
+    and one that consulted only one of them disagreed with the row the user had
+    just renamed.
+
+    Measured on the reported install, which holds both fields for one device::
+
+        peers["483fa196a05a"].device_name = "Kais-MacBook"   # the peer's own name
+        peers["483fa196a05a"].notes       = "试试"            # the user's name
+        netpair_names["483fa196a05a"]     = "Kais-MacBook"
+
+    The device list read ``note or name`` and showed 试试.  ``known_device_names``
+    applied the self-reported name *after* the note and showed Kais-MacBook, so
+    the same device had two names depending on which surface asked.  Reported as
+    "设备名有的时候会变成'试试'……历史记录里下面显示的名字不对".
+
+    Empty and whitespace-only are not a name, so both fall through to the
+    caller's next source.
+    """
+    if cfg is None:
+        return ""
+    device_id = str(device_id or "")
+    if not device_id:
+        return ""
+    alias = str((getattr(cfg, "netpair_aliases", None) or {}).get(device_id) or "").strip()
+    if alias:
+        return alias
+    with config_lock:
+        peer = (getattr(cfg, "peers", None) or {}).get(device_id)
+    return str(getattr(peer, "notes", "") or "").strip()
+
+
+def known_device_names(cfg) -> dict:
+    """Every device this machine can name, as ``device_id -> display name``.
+
+    One function because there were two callers and each built the map from
+    ``cfg.peers`` alone — the **LAN** peers.  A device paired by internet code
+    has no `PeerInfo`, so it was absent from both, and a history row from one
+    printed the raw peer id instead of a name:
+
+        LAN peer                          -> "Studio"        (worked)
+        internet-paired, alias set        -> "a1b2c3d4e5f6..." (the id)
+        internet-paired, no alias         -> "a1b2c3d4e5f6..." (the id)
+
+    **Two sources answer "what is this device called", and the user's answer
+    wins.**  The peer's own name (its stored ``device_name``, or the
+    ``netpair_names`` it gave at hello) is laid down first; the name this user
+    chose for it — :func:`chosen_device_name`, alias or note — is applied last,
+    so it outranks every self-reported one.  That precedence is the point: read
+    in the other order, a peer that had ever said hello under its own name
+    overrode the rename the user had just performed, which is exactly the
+    reported "历史记录里下面显示的名字不对" — the list showed 试试 and the history
+    row showed the peer's Kais-MacBook for one and the same device.
+
+    This machine is in the map as well.  The probe written to check the fix is
+    what caught it missing: `source_name` falls back to *this* device's name only
+    for an **empty** source, so a row that carried this machine's own id — which
+    the relay path does stamp — still printed the id.  Two callers had been
+    adding it themselves, which is exactly the kind of thing that goes missing
+    when the map is assembled in more than one place.
+
+    Reported as "在历史记录里下面显示的名字不对" and again after an upgrade, which is
+    one defect seen twice: the alias survives an upgrade but the name the runtime
+    learned from a peer's hello does not — that lives in memory
+    (`internet_pairing._names`) — so the list could look right while the history
+    row printed the id, and an upgrade made both worse.
+
+    What this cannot supply is that in-memory hello name for a peer with no
+    alias; the runtime owns it.  `config.netpair_aliases` is the user's own
+    choice and the one that must survive, which is why it is what this reads.
+    """
+    names: dict = {}
+    if cfg is None:
+        return names
+    local_id = str(getattr(cfg, "device_id", "") or "")
+    local_name = str(getattr(cfg, "device_name", "") or "")
+    if local_id and local_name:
+        names[local_id] = local_name
+    with config_lock:
+        peers = list(getattr(cfg, "peers", {}).values())
+    # Lowest precedence first: what each peer published about itself.  A LAN
+    # peer's stored `device_name` is the name frozen when the two last dialed (or
+    # the one its own announcements refreshed); `netpair_names` is the name an
+    # internet peer gave when it said hello.
+    for peer in peers:
+        device_id = str(getattr(peer, "device_id", "") or "")
+        published = str(getattr(peer, "device_name", "") or "")
+        if device_id and published:
+            names[device_id] = published
+    for device_id, learned_name in (getattr(cfg, "netpair_names", None) or {}).items():
+        if learned_name:
+            names[str(device_id)] = str(learned_name)
+    # Then the user's own name for the device, last so that it outranks every
+    # self-reported one.  Driven off both stores, because an alias can name a
+    # device that has no `PeerInfo` at all (`lan.py` builds a relay row for it
+    # from the internet pairing alone).
+    user_named = {str(getattr(peer, "device_id", "") or "") for peer in peers}
+    user_named.update(str(key) for key in (getattr(cfg, "netpair_aliases", None) or {}))
+    for device_id in user_named:
+        chosen = chosen_device_name(cfg, device_id)
+        if chosen:
+            names[device_id] = chosen
+    return names
+
+
+def _log_dir() -> Path:
+    """Directory the application writes its rotating log file to.
+
+    Deliberately distinct from ``_config_dir()``: on macOS and Linux logs live
+    in the conventional log/data directory, not the config directory (which
+    holds data files and secrets).
+
+    ``CLIPSYNC_LOG_DIR`` overrides it the same way ``CLIPSYNC_CONFIG_DIR``
+    overrides the config directory, and for the same reason: a test run (or a
+    packaged build) must be able to keep the application's log out of the
+    developer's own.  An override has to be absolute -- a relative one would put
+    the log wherever the process happened to start, which is not a directory
+    anyone can find again.
+    """
+    override = os.environ.get("CLIPSYNC_LOG_DIR")
+    if override:
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise ValueError("CLIPSYNC_LOG_DIR must be an absolute path")
+        return path
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        return Path(base) / "ClipSync"
+    elif system == "Darwin":
+        return Path.home() / "Library" / "Logs" / "ClipSync"
+    else:
+        return Path.home() / ".local" / "share" / "clipsync"
+
+
+def _config_path() -> Path:
+    return _config_dir() / "config.json"
+
+
+def _cleanup_stale_temps():
+    """Remove stale .config_tmp_*.json files from a previous crashed save."""
+    try:
+        config_dir = _config_dir()
+        if config_dir.exists():
+            for f in config_dir.glob(".config_tmp_*.json"):
+                try:
+                    f.unlink()
+                    logger.debug("Cleaned up stale temp config: %s", f.name)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+# The one place a config field's type and its inclusive bounds are written
+# down.  Everything that reads or writes config.json validates against this:
+# load() here, a restore in ``internal/data/backup.py``, and the web settings
+# API in ``internal/web/api/settings.py`` (which adds a privileged-port floor of
+# its own for the two port fields).
+#
+# It used to be three tables -- type rules here, a second type-and-bounds table
+# in backup.py, a third bounds-only table in the settings API -- and the three
+# had drifted apart: the same field was (1, 65535) on load and (1024, 65535) over
+# HTTP, and a restored ``web_history_limit`` of 100000 was accepted by the
+# restore and then silently clamped to 500 by the next load.  A bound written
+# twice is a bound that disagrees.  The sidecar IPC surface now derives its
+# numeric bounds from ``FIELD_RANGES`` as well (see
+# ``adapters/sidecar/rpc.py``), so every reader of a bound reads this table.
+#
+# Rule shapes:
+#   (kind, lo, hi)  a numeric field, clamped into the inclusive range
+#   ("int",)        Python int (bool rejected)
+#   ("float",)      int or float (bool rejected), coerced to float
+#   ("str",)        any string
+#   ("bool",)       only a Python bool
+#   ("strlist",)    list of strings, or None (a null means "none configured")
+#   ("strlist_nonnull",)  list of strings; null is rejected
+#   ("strdict",)    dict mapping strings to plain strings
+#   ("hotkeys",)    dict mapping shortcut-id strings to shortcut strings
+#
+# NaN/±Infinity are rejected rather than clamped: Python's json module
+# round-trips them, and a crafted value must not reach a later sleep() or
+# settimeout().
+FIELD_RULES: dict[str, tuple] = {
+    "device_id": ("str",),
+    "device_name": ("str",),
+    "service_type": ("service_type",),
+    "sync_enabled": ("bool",),
+    "sync_paused_peers": ("strlist_nonnull",),
+    "timed_pause_until": ("float",),
+    "auto_start": ("bool",),
+    "filter_enabled_categories": ("strlist",),
+    "private_key_pem": ("str",),
+    "certificate_pem": ("str",),
+    "file_receive_dir": ("str",),
+    "log_level": ("str",),
+    "notifications_enabled": ("bool",),
+    "notify_device_connect": ("bool",),
+    "notify_transfer": ("bool",),
+    "notify_pairing": ("bool",),
+    "notify_sync": ("bool",),
+    "chat_muted_peers": ("strlist_nonnull",),
+    "chat_open_to_all": ("bool",),
+    "file_open_to_all": ("bool",),
+    "log_sharing": ("bool",),
+    "encryption_enabled": ("bool",),
+    "encryption_password_hash": ("str",),
+    "appearance_mode": ("str",),
+    "language": ("str",),
+    "language_chosen": ("bool",),
+    "paste_to_top": ("bool",),
+    "low_memory_mode": ("bool",),
+    "retry_capture_enabled": ("bool",),
+    "dedup_method": ("str",),
+    "plain_text_only": ("bool",),
+    "auto_update_check": ("bool",),
+    "app_filter_enabled": ("bool",),
+    "app_filter_mode": ("str",),
+    "app_filter_list": ("strlist_nonnull",),
+    "source_tracking_enabled": ("bool",),
+    "ui_backend": ("str",),
+    "ui_animation_enabled": ("bool",),
+    "sound_enabled": ("bool",),
+    "favorites_path": ("str",),
+    "data_dir": ("str",),
+    "web_enabled": ("bool",),
+    "web_token": ("str",),
+    "web_token_disabled": ("bool",),
+    "companion_remote_enabled": ("bool",),
+    "companion_remote_token": ("str",),
+    "companion_remote_brokers": ("strlist_nonnull",),
+    "companion_remote_mode": ("str",),
+    "companion_remote_page_url": ("str",),
+    "translate_url": ("str",),
+    "translate_api_key": ("str",),
+    "hotkeys": ("hotkeys",),
+    "hotkeys_enabled": ("bool",),
+    "internet_sync_enabled": ("bool",),
+    "relay_brokers": ("strlist_nonnull",),
+    "relay_private_brokers": ("strlist_nonnull",),
+    "relay_username": ("str",),
+    "relay_password": ("str",),
+    "relay_secret": ("str",),
+    "peer_relay_secrets": ("strdict",),
+    "netpair_secrets": ("strdict",),
+    "netpair_aliases": ("strdict",),
+    "netpair_names": ("strdict",),
+    "netpair_dh_key": ("str",),
+    "netpair_peer_keys": ("strdict",),
+    # code → {"secret": str, "created_at": float}; validated to that shape so a
+    # hand-edited config cannot make the pairing service publish a code whose
+    # timestamp is a string (or transport a non-secret into a topic).
+    "netpair_pending": ("pendingrecords",),
+    "ai_config_tools": ("strlist_nonnull",),
+    "ai_config_custom_paths": ("strlist_nonnull",),
+    # -- numeric fields, with the bounds that used to live in FIELD_RANGES ---
+    # 1-65535 rather than the settings API's 1024 cut: a low port that is
+    # already in the file is a working configuration, not something to mangle.
+    "port": ("int", 1, 65535),
+    "web_port": ("int", 1, 65535),
+    "web_history_limit": ("int", 1, 500),
+    "history_max_entries": ("int", 10, 10000),
+    # Retention window in days; 0 disables age-based pruning entirely.
+    "history_max_age_days": ("float", 0, 36500),
+    "sync_debounce": ("float", 0.05, 10.0),
+    "clipboard_poll_interval": ("float", 0.1, 60.0),
+    "max_reconnect_attempts": ("int", 0, 100),
+    "transfer_timeout": ("float", 5, 3600),
+    # A free broker's 64 KiB sits inside this range with room on both sides:
+    # 32 KiB is the floor because below it a file chunk gets too small to be
+    # worth the round trip (see ``ChatManager.relay_chunk_for``), and 1 MiB the
+    # ceiling because past it the figure is no longer a broker's published
+    # limit but a typo.
+    "relay_max_message_bytes": ("int", 32 * 1024, 1024 * 1024),
+    # How much of the relay this app will use, in bytes/s.  The floor is a
+    # transfer slow enough to be useless and the ceiling is past what any of the
+    # shipped brokers carries, so a value in between is a preference rather than
+    # a typo (see the field comment for the measured rate this default clears).
+    "relay_max_bytes_per_second": ("int", 4 * 1024, 2 * 1024 * 1024),
+}
+
+# The numeric subset, for the callers that only need the bounds (the settings
+# API's own range check).  Derived, never written by hand.
+FIELD_RANGES: dict[str, tuple[int, int]] = {
+    name: (rule[1], rule[2]) for name, rule in FIELD_RULES.items() if len(rule) == 3
+}
+
+# An mDNS service type, as zeroconf will register it: ``_service._proto.domain.``
+# (``_clipsync._tcp.local.``).  The trailing dot is conventional and zeroconf
+# accepts both; the validator accepts both so a config that was hand-written
+# without one keeps loading.  This lives here, in the module every surface
+# already imports, so the config loader, the HTTP settings API, the sidecar IPC
+# and the discovery layer can all agree on one rule.
+_SERVICE_TYPE_RE = re.compile(
+    r"^_[A-Za-z0-9-]+\._(?:tcp|udp|sctp)\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.?$"
+)
+
+
+def valid_service_type(value) -> bool:
+    """True when *value* is an mDNS service type zeroconf can register.
+
+    The canonical rule lives in ``internal.transport.discovery`` (it is the
+    module that must browse the value), and is imported lazily so this module
+    keeps working while that one is still loading.  A value that is right but
+    for the conventional trailing dot is accepted here because the discovery
+    layer completes it; replacing such a value with the default instead would
+    silently discard what the user saved.
+    """
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    try:
+        from internal.transport.discovery import is_valid_service_type
+
+        if is_valid_service_type(value):
+            return True
+        return is_valid_service_type(value + ".")
+    except Exception:
+        pass
+    # Fallback for a partially initialised process (tests that import config
+    # first): the same shape, without the transport import.
+    if not (0 < len(value) <= 128):
+        return False
+    if any(char in value for char in "\0\r\n\t"):
+        return False
+    return _SERVICE_TYPE_RE.match(value) is not None
+
+# The floor the network surfaces (the HTTP settings API and the sidecar IPC)
+# apply to ``port``.  The config loader's own floor stays 1: a low port already
+# in config.json is a working configuration and is left alone, while a client
+# asking this machine over HTTP/IPC to bind 80 is asking for a bind it will not
+# be allowed to make after a restart.
+PRIVILEGED_PORT_FLOOR = 1024
+
+# Sentinel returned by _validate_field when a value must be skipped.
+_SKIP_FIELD = object()
+
+
+def _validate_field(key: str, value: object):
+    """Return the validated value for *key*, or ``_SKIP_FIELD``.
+
+    Never raises; an invalid value simply leaves the Config default in place.
+    """
+    rule = FIELD_RULES.get(key)
+    if rule is None:
+        return value  # not in the schema — caller's explicit list governs
+    kind = rule[0]
+    if kind == "str":
+        return value if isinstance(value, str) else _SKIP_FIELD
+    if kind == "bool":
+        return value if isinstance(value, bool) else _SKIP_FIELD
+    if kind == "int":
+        if not isinstance(value, int) or isinstance(value, bool):
+            return _SKIP_FIELD
+        if len(rule) == 3:
+            return max(rule[1], min(rule[2], value))
+        return value
+    if kind == "float":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return _SKIP_FIELD
+        value = float(value)
+        if len(rule) == 3:
+            # NaN/±Infinity aren't JSON numbers in principle, but Python's
+            # json module round-trips them; reject rather than clamp so a
+            # crafted value can't poison a later sleep()/settimeout().
+            if not math.isfinite(value):
+                return _SKIP_FIELD
+            return max(rule[1], min(rule[2], value))
+        return value
+    if kind == "strlist":
+        if value is None:
+            return None
+        if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+            return _SKIP_FIELD
+        return value
+    if kind == "strlist_nonnull":
+        # Like strlist but None is NOT a valid value — a null falls through to
+        # the field's list default (e.g. app_filter_list → []).
+        if value is None:
+            return _SKIP_FIELD
+        if not isinstance(value, list) or not all(isinstance(i, str) for i in value):
+            return _SKIP_FIELD
+        return value
+    if kind == "hotkeys":
+        if not isinstance(value, dict):
+            return _SKIP_FIELD
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            return _SKIP_FIELD
+        return value
+    if kind == "strdict":
+        if not isinstance(value, dict):
+            return _SKIP_FIELD
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            return _SKIP_FIELD
+        return value
+    if kind == "pendingrecords":
+        # The netpair code table: a mapping of code → record.  Rows that do not
+        # match the shape are dropped individually rather than poisoning the
+        # whole map -- one corrupt entry must not cost the other live codes.
+        if not isinstance(value, dict):
+            return _SKIP_FIELD
+        records: dict[str, dict] = {}
+        for code, record in value.items():
+            if not isinstance(code, str) or not code or not isinstance(record, dict):
+                continue
+            secret = record.get("secret")
+            created = record.get("created_at")
+            if not isinstance(secret, str) or not secret:
+                continue
+            if (
+                not isinstance(created, (int, float))
+                or isinstance(created, bool)
+                or not math.isfinite(float(created))
+            ):
+                continue
+            records[code] = {"secret": secret, "created_at": float(created)}
+        return records
+    if kind == "service_type":
+        # A value the mDNS layer can actually register.  This field used to be
+        # validated by length alone, so a typo in the settings page made the
+        # whole LAN runtime fail to start (zeroconf raises
+        # BadTypeInNameException).  Invalid values keep the previous/default
+        # value on load and are refused by the settings surfaces.
+        return value if valid_service_type(value) else _SKIP_FIELD
+    return _SKIP_FIELD
+
+
+def _archive_corrupt_config(path: Path) -> None:
+    """Preserve an unreadable config.json before degrading to defaults.
+
+    A fresh Config has a brand-new device id / private key / empty pairing
+    table, and the next save() overwrites the file — without this rename the
+    old identity would be gone for good.  The archived copy gives the user a
+    chance to recover it manually.
+    """
+    try:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archived = path.with_name(f"{path.name}.corrupt-{stamp}")
+        os.replace(path, archived)
+        logger.warning("Unreadable config preserved as %s", archived.name)
+    except OSError:
+        logger.debug("Could not archive corrupt config", exc_info=True)
+
+
+def _parse_peer_list(data: dict, key: str) -> dict[str, PeerInfo]:
+    """Parse a ``peers``-shaped config key into ``{device_id: PeerInfo}``.
+
+    Shared by the live ``peers`` and the archived ``removed_peers`` keys.
+    Tolerates both the legacy dict form (``{id: {...}}``) and the current
+    list form, and drops rows with invalid identity fields instead of
+    aborting the whole config load.
+    """
+    peers_data = data.get(key, [])
+    if isinstance(peers_data, dict):
+        peers_data = [
+            {"device_id": pid, **pinfo}
+            for pid, pinfo in peers_data.items()
+            if isinstance(pinfo, dict)
+        ]
+    if not isinstance(peers_data, list):
+        logger.warning(
+            "Config '%s' has invalid type %s — ignoring",
+            key,
+            type(peers_data).__name__,
+        )
+        return {}
+    result: dict[str, PeerInfo] = {}
+    for peer_data in peers_data:
+        if not isinstance(peer_data, dict):
+            continue
+        device_id = peer_data.get("device_id")
+        device_name = peer_data.get("device_name")
+        if not isinstance(device_id, str) or not device_id:
+            logger.warning("Skipping peer with invalid device_id: %r", device_id)
+            continue
+        if not isinstance(device_name, str):
+            logger.warning("Skipping peer %s with invalid device_name", device_id)
+            continue
+        public_key_pem = peer_data.get("public_key_pem", "")
+        paired = peer_data.get("paired", False)
+        notes = peer_data.get("notes", "")
+        last_ip = peer_data.get("last_ip", "")
+        last_port = peer_data.get("last_port", 0)
+        removed_at = peer_data.get("removed_at", 0)
+        if not isinstance(public_key_pem, str):
+            public_key_pem = ""
+        if not isinstance(paired, bool):
+            paired = False
+        if not isinstance(notes, str):
+            notes = ""
+        if not isinstance(last_ip, str):
+            last_ip = ""
+        if not isinstance(last_port, int) or isinstance(last_port, bool):
+            last_port = 0
+        if not isinstance(removed_at, (int, float)) or isinstance(removed_at, bool):
+            removed_at = 0.0
+        result[device_id] = PeerInfo(
+            device_id=device_id,
+            device_name=device_name,
+            public_key_pem=public_key_pem,
+            paired=paired,
+            notes=notes,
+            last_ip=last_ip,
+            last_port=last_port,
+            removed_at=float(removed_at),
+        )
+    return result
+
+
+def load() -> Config:
+    with config_lock:
+        _cleanup_stale_temps()
+        path = _config_path()
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, ValueError):
+                logger.warning("Failed to parse config, using defaults", exc_info=True)
+                _archive_corrupt_config(path)
+                return Config()
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Config root is %s instead of an object, using defaults",
+                    type(data).__name__,
+                )
+                _archive_corrupt_config(path)
+                return Config()
+            cfg = Config()
+            for key in (
+                "device_id",
+                "device_name",
+                "port",
+                "service_type",
+                "sync_enabled",
+                "timed_pause_until",
+                "auto_start",
+                "filter_enabled_categories",
+                "private_key_pem",
+                "certificate_pem",
+                "history_max_entries",
+                "history_max_age_days",
+                "file_receive_dir",
+                "sync_debounce",
+                "clipboard_poll_interval",
+                "max_reconnect_attempts",
+                "transfer_timeout",
+                "log_level",
+                "notifications_enabled",
+                "notify_device_connect",
+                "notify_transfer",
+                "notify_pairing",
+                "notify_sync",
+                "chat_muted_peers",
+                "sync_paused_peers",
+                "chat_open_to_all",
+                "file_open_to_all",
+                "log_sharing",
+                "encryption_enabled",
+                "encryption_password_hash",
+                "appearance_mode",
+                "language",
+                "language_chosen",
+                "paste_to_top",
+                "low_memory_mode",
+                "retry_capture_enabled",
+                "dedup_method",
+                "plain_text_only",
+                "auto_update_check",
+                "app_filter_enabled",
+                "app_filter_mode",
+                "app_filter_list",
+                "source_tracking_enabled",
+                "ui_backend",
+                "ui_animation_enabled",
+                "sound_enabled",
+                "favorites_path",
+                "data_dir",
+                "web_enabled",
+                "web_port",
+                "web_token",
+                "web_token_disabled",
+                "web_history_limit",
+                "companion_remote_enabled",
+                "companion_remote_token",
+                "companion_remote_brokers",
+                "companion_remote_mode",
+                "companion_remote_page_url",
+                "translate_url",
+                "translate_api_key",
+                "hotkeys",
+                "hotkeys_enabled",
+                "internet_sync_enabled",
+                "relay_brokers",
+                "relay_private_brokers",
+                "relay_username",
+                "relay_password",
+                "relay_max_message_bytes",
+                "relay_max_bytes_per_second",
+                "relay_secret",
+                "peer_relay_secrets",
+                "netpair_secrets",
+                "netpair_aliases",
+                "netpair_names",
+                "netpair_dh_key",
+                "netpair_peer_keys",
+                "netpair_pending",
+                "ai_config_tools",
+                "ai_config_custom_paths",
+            ):
+                if key in data:
+                    value = _validate_field(key, data[key])
+                    if value is _SKIP_FIELD:
+                        logger.warning(
+                            "Config field '%s' has invalid type %s — keeping default",
+                            key,
+                            type(data[key]).__name__,
+                        )
+                        continue
+                    setattr(cfg, key, value)
+            # Migrate from old plaintext password (now stored on next save as hash)
+            if "encryption_password" in data and data["encryption_password"]:
+                cfg.encryption_password = data["encryption_password"]
+            # Migrate from the old filter_sensitive bool.  A v1 config that had
+            # that switch ON named the five categories v1 knew about, and the
+            # named list is what keeps it on now that the category default is
+            # off — the switch itself is the only record of that choice, so it
+            # is still worth reading.  A v1 config that had it OFF (or never
+            # had it, which is the same thing) is left at the default.
+            #
+            # This replaces a rule that upgraded a v1 [] to None so redaction
+            # stayed ON: under v1 the empty list meant "everything" because
+            # that was the default, and both spellings now mean off, so there
+            # is nothing left for it to preserve.
+            if "filter_sensitive" in data and not data.get("filter_enabled_categories"):  # noqa: SIM102
+                if data["filter_sensitive"]:
+                    cfg.filter_enabled_categories = [
+                        "credit_card",
+                        "ssn",
+                        "phone",
+                        "api_key",
+                        "private_key",
+                        "password",
+                    ]
+            # v3: the phone companion (远程访问) is on by default, so a config
+            # written while the default was OFF is brought forward.  Without
+            # this, "on by default" only ever reaches a machine that has never
+            # run the app, which is never the machine anyone is looking at.
+            #
+            # ``web_token_disabled`` is the one state this must not touch: it
+            # means the user cleared the access token on purpose, and the
+            # companion started for such a config serves every request without
+            # one (``web.server._validate_token``).  Switching it on there would
+            # not be a default, it would be opening the port to the network.
+            #
+            # Every other config is flipped once, and only once — the save that
+            # follows writes version 3, so a user who turns it back off keeps it
+            # off.  A token in the config is not evidence of use and is
+            # deliberately not consulted: the webview front end mints one
+            # whether or not the companion was ever enabled
+            # (``src/main.py``), so most configs carry one.
+            if (data.get("config_version", 1) < 3 and not cfg.web_enabled
+                    and not cfg.web_token_disabled):
+                cfg.web_enabled = True
+            # Migrate from legacy dict-format peers (pre-list) to list format:
+            #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
+            cfg.peers = _parse_peer_list(data, "peers")
+            cfg.removed_peers = _parse_peer_list(data, "removed_peers")
+            # Migrate from the pre-refactor watch list (ai_config_paths) to the
+            # tool-profile model: each old path either enables its built-in
+            # tool profile or becomes a user custom path.  Persisted on the
+            # next save() like the other one-way migrations above.
+            if "ai_config_paths" in data and "ai_config_tools" not in data:
+                keys, custom = _ai_profiles.migrate_watch_paths(data.get("ai_config_paths"))
+                cfg.ai_config_tools = keys
+                cfg.ai_config_custom_paths = custom
+            return cfg
+        return Config()
+
+
+def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
+    with config_lock:
+        cfg.config_version = 3
+        config_dir = _config_dir()
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = _config_path()
+
+        # Encrypt private key before writing to disk if encryption is enabled
+        private_key_to_save = cfg.private_key_pem
+        if cfg.encryption_enabled and enc_mgr and cfg.private_key_pem:
+            private_key_to_save = enc_mgr.encrypt_storage(cfg.private_key_pem)
+            logger.debug("Config save: private_key_pem encrypted for at-rest storage")
+
+        # Last-resort guard: never let a save replace a stored device key with
+        # an empty one.  The key IS this device's identity -- blanking it makes
+        # every paired peer see a changed certificate and forces the user to
+        # re-pair everything, and nothing in the app legitimately clears it.
+        if not private_key_to_save:
+            try:
+                previous = json.loads(config_path.read_text(encoding="utf-8"))
+                kept = previous.get("private_key_pem") if isinstance(previous, dict) else None
+                if isinstance(kept, str) and kept:
+                    logger.warning(
+                        "Config save carried an empty private_key_pem; keeping "
+                        "the stored key instead of erasing this device's identity."
+                    )
+                    private_key_to_save = kept
+            except FileNotFoundError:
+                pass
+            except (OSError, json.JSONDecodeError):
+                logger.warning(
+                    "Config save carried an empty private_key_pem and %s could "
+                    "not be read to recover the stored key.",
+                    config_path,
+                )
+
+        data = {
+            "config_version": cfg.config_version,
+            "device_id": cfg.device_id,
+            "device_name": cfg.device_name,
+            "port": cfg.port,
+            "service_type": cfg.service_type,
+            "sync_enabled": cfg.sync_enabled,
+            "timed_pause_until": cfg.timed_pause_until,
+            "auto_start": cfg.auto_start,
+            "filter_enabled_categories": cfg.filter_enabled_categories,
+            "private_key_pem": private_key_to_save,
+            "certificate_pem": cfg.certificate_pem,
+            "history_max_entries": cfg.history_max_entries,
+            "history_max_age_days": cfg.history_max_age_days,
+            "file_receive_dir": cfg.file_receive_dir,
+            "sync_debounce": cfg.sync_debounce,
+            "clipboard_poll_interval": cfg.clipboard_poll_interval,
+            "max_reconnect_attempts": cfg.max_reconnect_attempts,
+            "transfer_timeout": cfg.transfer_timeout,
+            "log_level": cfg.log_level,
+            "notifications_enabled": cfg.notifications_enabled,
+            "notify_device_connect": cfg.notify_device_connect,
+            "notify_transfer": cfg.notify_transfer,
+            "notify_pairing": cfg.notify_pairing,
+            "notify_sync": cfg.notify_sync,
+            "chat_muted_peers": cfg.chat_muted_peers,
+            "sync_paused_peers": cfg.sync_paused_peers,
+            "chat_open_to_all": cfg.chat_open_to_all,
+            "file_open_to_all": cfg.file_open_to_all,
+            "log_sharing": cfg.log_sharing,
+            "encryption_enabled": cfg.encryption_enabled,
+            "encryption_password_hash": cfg.encryption_password_hash,
+            "appearance_mode": cfg.appearance_mode,
+            "language": cfg.language,
+            "language_chosen": cfg.language_chosen,
+            "paste_to_top": cfg.paste_to_top,
+            "low_memory_mode": cfg.low_memory_mode,
+            "retry_capture_enabled": cfg.retry_capture_enabled,
+            "dedup_method": cfg.dedup_method,
+            "plain_text_only": cfg.plain_text_only,
+            "auto_update_check": cfg.auto_update_check,
+            "app_filter_enabled": cfg.app_filter_enabled,
+            "app_filter_mode": cfg.app_filter_mode,
+            "app_filter_list": cfg.app_filter_list,
+            "source_tracking_enabled": cfg.source_tracking_enabled,
+            "ui_backend": cfg.ui_backend,
+            "ui_animation_enabled": cfg.ui_animation_enabled,
+            "sound_enabled": cfg.sound_enabled,
+            "favorites_path": cfg.favorites_path,
+            "data_dir": cfg.data_dir,
+            "web_enabled": cfg.web_enabled,
+            "web_port": cfg.web_port,
+            "web_token": cfg.web_token,
+            "web_token_disabled": cfg.web_token_disabled,
+            "web_history_limit": cfg.web_history_limit,
+            "companion_remote_enabled": cfg.companion_remote_enabled,
+            "companion_remote_token": cfg.companion_remote_token,
+            "companion_remote_brokers": cfg.companion_remote_brokers,
+            "companion_remote_mode": cfg.companion_remote_mode,
+            "companion_remote_page_url": cfg.companion_remote_page_url,
+            "translate_url": cfg.translate_url,
+            "translate_api_key": cfg.translate_api_key,
+            "hotkeys": cfg.hotkeys,
+            "hotkeys_enabled": cfg.hotkeys_enabled,
+            "internet_sync_enabled": cfg.internet_sync_enabled,
+            "relay_brokers": cfg.relay_brokers,
+            "relay_private_brokers": cfg.relay_private_brokers,
+            "relay_username": cfg.relay_username,
+            "relay_password": cfg.relay_password,
+            "relay_max_message_bytes": cfg.relay_max_message_bytes,
+            "relay_max_bytes_per_second": cfg.relay_max_bytes_per_second,
+            "relay_secret": cfg.relay_secret,
+            "peer_relay_secrets": cfg.peer_relay_secrets,
+            "netpair_secrets": cfg.netpair_secrets,
+            "netpair_aliases": cfg.netpair_aliases,
+            "netpair_names": cfg.netpair_names,
+            "netpair_dh_key": cfg.netpair_dh_key,
+            "netpair_peer_keys": cfg.netpair_peer_keys,
+            "netpair_pending": cfg.netpair_pending,
+            "ai_config_tools": cfg.ai_config_tools,
+            "ai_config_custom_paths": cfg.ai_config_custom_paths,
+            "peers": [
+                {
+                    "device_id": p.device_id,
+                    "device_name": p.device_name,
+                    "public_key_pem": p.public_key_pem,
+                    "paired": p.paired,
+                    "notes": p.notes,
+                    "last_ip": p.last_ip,
+                    "last_port": p.last_port,
+                }
+                for p in cfg.peers.values()
+            ],
+            "removed_peers": [
+                {
+                    "device_id": p.device_id,
+                    "device_name": p.device_name,
+                    "public_key_pem": p.public_key_pem,
+                    "paired": p.paired,
+                    "notes": p.notes,
+                    "last_ip": p.last_ip,
+                    "last_port": p.last_port,
+                    "removed_at": p.removed_at,
+                }
+                for p in cfg.removed_peers.values()
+            ],
+        }
+        # Atomic save: write to temp file then rename
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=str(config_dir),
+            prefix=".config_tmp_",
+            suffix=".json",
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, config_path)  # atomic on same filesystem
+            # mkstemp creates the temp file with 0600; os.replace keeps that
+            # inode, so the final file is already private. Re-assert it for
+            # filesystems where replace may reset perms (non-Windows guard).
+            if os.name != "nt":
+                with contextlib.suppress(OSError):
+                    os.chmod(config_path, 0o600)
+            logger.debug("Config saved to %s", config_path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
