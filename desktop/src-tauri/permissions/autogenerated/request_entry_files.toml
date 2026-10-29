@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-request-entry-files"
+description = "Enables the request_entry_files command without any pre-configured scope."
+commands.allow = ["request_entry_files"]
+
+[[permission]]
+identifier = "deny-request-entry-files"
+description = "Denies the request_entry_files command without any pre-configured scope."
+commands.deny = ["request_entry_files"]

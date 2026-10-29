@@ -1,0 +1,1494 @@
+"""Internet (cross-network) clipboard sync over MQTT brokers.
+
+Design goals (user-mandated): zero cost, zero signup, no third-party client,
+works behind NAT without port forwarding.  Peers talk to an MQTT broker (an
+editable list split into anonymous free relays and a credentialed private
+relay (mqttyyc.top preconfigured with login) — any public broker like
+broker.emqx.io works too when left anonymous).
+The broker only ever sees two things:
+
+  topic — ``clipsync/v1/<hash[:24]>`` derived from BOTH devices' relay secrets
+          (unguessable: knowing only your own secret reveals nothing)
+  data  — an AES-256-GCM ciphertext of a standard ClipSync frame; the key is
+          derived from both secrets, so the relay never sees plaintext.
+
+Secret enrollment: each device generates a random ``relay_secret`` once.  The
+secrets reach already-paired peers over the existing TLS LAN channel via the
+``relay_enroll`` message (sent by the sync manager on every successful
+connect while internet sync is on), so paired devices need no extra setup.
+Devices that have never met must pair once through the normal flow first.
+
+Replay protection: every envelope carries a wall-clock timestamp; envelopes
+outside +/- RELAY_TS_WINDOW seconds are dropped, and exact duplicate blobs are
+dropped via a bounded cache of recent ciphertext hashes kept for that same
+window.  The timestamp is also bound into the envelope with a keyed MAC, so an
+envelope whose ``ts`` was edited in flight fails authentication; a v1 envelope
+from an older build carries no MAC and is still accepted.
+
+Size cap: a frame too large for its envelope to fit under the payload cap is
+refused (the relay path is for clipboard text/images/small payloads; files
+cross the internet in chat chunks, which are cut to fit — see
+``MAX_RELAY_FRAME``).  The cap defaults to MAX_RELAY_PAYLOAD and follows
+``Config.relay_max_message_bytes`` when the relay in use publishes a different
+one; ``frame_limit_for`` is the same derivation for any of them.
+
+Everything here is deliberately decoupled from paho so the logic is testable
+without a network: ``RelayTransport`` takes a ``client_factory`` and only the
+thin adapter at the bottom touches paho-mqtt.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import logging
+import socket
+import ssl
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Callable
+
+from internal.security.encryption import _hkdf_expand, decrypt, encrypt
+
+logger = logging.getLogger(__name__)
+
+TOPIC_PREFIX = "clipsync/v1/"
+ENVELOPE_VERSION = 1
+RELAY_TS_WINDOW = 1800  # seconds of tolerated clock skew either way.
+# Kept generous (30 min) so real-world clock
+# drift can't silently break internet pairing /
+# relay sync — the window still bounds replay.
+MAX_RELAY_PAYLOAD = 256 * 1024  # refuse to publish anything larger than this
+# What that cap applies to is the *envelope*, because the envelope is what goes
+# to the broker — and an envelope is 4/3 of the frame it carries (the ciphertext
+# in base64) plus the GCM tag and the JSON shell around it.  The check used to
+# run on the frame against this same number, which is a different, larger limit
+# wearing the same name: it passed a 224 KiB chat chunk, base64 turned it into a
+# ~306 KB envelope, and the broker dropped a message the sender had already been
+# told was delivered.  The truthful frame limit is therefore this, derived
+# rather than written down, so it cannot drift when the payload cap moves.
+#   3/4 of the payload (base64's ratio), less the GCM tag, less room for the
+#   JSON shell — the largest frame whose envelope still fits under the cap.
+#   The shell reservation is a named constant because the envelope grew a
+#   ``mac`` field: a budget that kept reserving the old shell would pass a
+#   max-size frame the broker then drops, which is the failure this whole
+#   derivation exists to prevent.
+#
+# The envelope is not the whole packet either.  A broker's published limit is on
+# the PUBLISH packet, and in front of the payload sit the topic (a 2-byte length
+# prefix plus "clipsync/v1/" and 24 hex characters), the QoS-1 packet id and the
+# fixed header.  Measured against the shipped private relay: a 64209-byte
+# envelope arrives and a 65573-byte one is refused — a 65536-byte packet limit,
+# with exactly this framing accounting for the difference.  So a limit read off
+# a broker's own documentation ("64 KiB") has to be a packet budget, or a chunk
+# sized to the documented number overshoots by the framing and is refused for
+# it.  That is how the shipped default lost every chunk: the number was right
+# and what it was subtracted from was wrong.
+PUBLISH_OVERHEAD_BYTES = 64
+# Room for the envelope's JSON shell: braces, ``v``, ``ts`` (epoch seconds with
+# milliseconds), ``data``, and the ``mac`` key with its 64 hex characters.  A
+# timestamp that needs a few more digits than today's still fits.
+ENVELOPE_SHELL_BYTES = 160
+
+
+def frame_limit_for(max_payload: int) -> int:
+    """The largest frame whose PUBLISH packet still fits under *max_payload*.
+
+    *max_payload* is the whole packet — what a broker means by its message size
+    limit — so the topic and the MQTT headers are reserved out of it here.  The
+    same derivation as :data:`MAX_RELAY_FRAME`, for a relay whose limit is not
+    this build's default: see ``Config.relay_max_message_bytes``.
+    """
+    return (
+        max(64, int(max_payload)) - PUBLISH_OVERHEAD_BYTES - ENVELOPE_SHELL_BYTES
+    ) * 3 // 4 - 16
+
+
+# Derived rather than written down, so the two cannot drift apart.
+MAX_RELAY_FRAME = frame_limit_for(MAX_RELAY_PAYLOAD)
+
+# Recent ciphertext hashes remembered for duplicate suppression.  The old 512
+# was small enough that a busy window evicted an envelope's own hash before its
+# timestamp window closed, which let a replayed frame be treated as new: the
+# entry's TTL is now that window and the cap is only the memory backstop.
+# 32768 is sized for a chatty half hour (a few MiB of Python objects) and would
+# need an average of ~18 frames/second sustained for the whole window before a
+# live entry could be evicted.
+_SEEN_CAP = 32768
+
+# The QoS a subscription asks for.  Delivery QoS is the *lower* of the publish's
+# and the subscription's, so subscribing at the default 0 threw away the
+# redelivery the chunk publishes are paying for: a chunk went out at QoS 1,
+# the broker accepted it (PUBACK) and then delivered it best-effort to a
+# subscription that had only asked for 0 — one dropped packet, one lost chunk,
+# and a receiver left holding a short file.  Chunk frames therefore need both
+# halves at 1.  Asking for 1 costs nothing on the loss-tolerant frames: a
+# QoS-0 publish stays QoS 0 no matter what the subscription asked for.
+SUBSCRIBE_QOS = 1
+
+# How many QoS>0 messages may sit in paho's outgoing queue before publish()
+# refuses more.  Only reachable on a slow link: the file sender streams as
+# fast as it can read, so an unbounded queue is the whole attachment in RAM
+# (a relay attachment is now up to MAX_FILE_SIZE, not the 5 MiB it used to be
+# capped at).  When it fills, publish() reports the refusal and the sender
+# backs off instead of buffering — bounded memory, and a stall the app can
+# name rather than an OOM it cannot.
+MAX_QUEUED_MESSAGES = 256
+MAX_INFLIGHT_MESSAGES = 20
+
+# ── Internet pairing code (Round 14) ──────────────────────────────────────
+# A self-contained shared-secret bootstrap for devices that have NEVER met:
+# one device generates a short human-readable code (device tag + secret +
+# checksum), the other types it in, and both derive the SAME netpair topic+key
+# from the secret alone — no prior LAN pairing required.  The broker only ever
+# sees an unguessable topic + ciphertext, exactly like LAN-relay enrollment,
+# but the secret travels inside the code instead of over a TLS channel to an
+# already-paired peer.
+NETPAIR_TOPIC_PREFIX = "clipsync/net/v1/"
+# 32-symbol alphabet (5 bits/char).  Removes the worst confusables 0/O/1/I so a
+# code typed by hand fails loudly on a typo (checksum catches the rest).
+NETPAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_NETPAIR_ALPHA_INDEX = {c: i for i, c in enumerate(NETPAIR_ALPHABET)}
+NETPAIR_CODE_CHARS = 12  # "XXXX-XXXX-XXXX"
+NETPAIR_DEVICE_CHARS = 4  # chars [0:4]  -> 20-bit device tag
+NETPAIR_SECRET_CHARS = 7  # chars [4:11] -> 35-bit shared secret
+NETPAIR_SECRET_BITS = NETPAIR_SECRET_CHARS * 5
+# Optional user-set pairing passphrase layered on top of the code secret: the
+# code still routes (topic) while the key strength becomes the passphrase's.
+NETPAIR_PASSPHRASE_MIN = 12
+NETPAIR_PASSPHRASE_MAX = 200
+
+# Connection retry backoff across the broker list (seconds; capped).
+BACKOFF_SEQUENCE = (1, 2, 4, 8, 15, 30, 60)
+# How long to wait for the CONNACK/handshake before moving to the next broker.
+CONNECT_TIMEOUT = 10.0
+# How long stop() waits for the worker thread to exit before giving up.
+STOP_JOIN_TIMEOUT = 5.0
+# A session shorter than this counts as a failed attempt, not a success, so
+# the backoff keeps escalating against a broker that accepts the connection
+# and drops it immediately instead of hammering it once a second forever.
+MIN_USABLE_SESSION = 30.0
+
+STATE_OFF = "off"
+STATE_CONNECTING = "connecting"
+STATE_ONLINE = "online"
+STATE_ERROR = "error"
+
+try:  # optional dependency — absence degrades gracefully (state=error)
+    import paho.mqtt.client as _mqtt
+except Exception:  # pragma: no cover - exercised only without paho installed
+    _mqtt = None
+
+
+def generate_relay_secret() -> str:
+    """A fresh per-device relay secret (hex, stored in config)."""
+    import secrets as _secrets
+
+    return _secrets.token_hex(32)
+
+
+def _ca_bundle_path() -> str | None:
+    """Path to a CA bundle usable by ``ssl``, or None to use system defaults.
+
+    macOS system Pythons (and PyInstaller-frozen builds on any OS) often lack
+    the OS trust store in OpenSSL's default search paths, so every ``wss://``
+    handshake fails with ``CERTIFICATE_VERIFY_FAILED: unable to get local
+    issuer certificate`` — the exact symptom on the macOS client.  certifi
+    ships its own ``cacert.pem`` that PyInstaller bundles automatically (its
+    hook collects the data file), so prefer it whenever it is installed.
+    """
+    try:
+        import certifi
+
+        return certifi.where()
+    except Exception:
+        return None
+
+
+def _endpoint_scheme(endpoint: str | None) -> str:
+    """Normalized broker-URL scheme ("wss" when absent/unknown)."""
+    if not endpoint:
+        return "wss"
+    scheme = endpoint.split("://", 1)[0].lower().strip()
+    if scheme in ("ws", "wss", "mqtt", "mqtts", "tcp", "tls", "ssl"):
+        return scheme
+    # A bare hostname / unknown scheme is not a transport choice — keep the
+    # historical wss default rather than treating the whole string as a scheme.
+    return "wss"
+
+
+def build_paho_client(endpoint: str | None = None):
+    """Build one paho MQTT client for ``endpoint``, or None when paho is missing.
+
+    The scheme selects the wire transport.  Previously every broker was forced
+    onto WebSocket + TLS, which made private brokers on plaintext / native-TCP
+    listeners unusable — the broker-list validator even rejected non-wss URLs.
+    Now each scheme gets the transport it means:
+
+      ws://      WebSocket, no TLS        mqtt://    native TCP, no TLS
+      wss://     WebSocket, TLS (default) mqtts:///ssl:///tls://  native TCP, TLS
+
+    ``endpoint`` may be None for a bare factory call (unit tests) — that
+    resolves to the historical wss behavior.  TLS is configured HERE because
+    paho forbids ``tls_set()`` after ``connect()``; the WebSocket path is
+    transport-specific and set per-endpoint by the caller.
+    """
+    if _mqtt is None:
+        return None
+    scheme = _endpoint_scheme(endpoint)
+    transport = "websockets" if scheme in ("ws", "wss") else "tcp"
+    try:
+        client = _mqtt.Client(
+            _mqtt.CallbackAPIVersion.VERSION2, protocol=_mqtt.MQTTv311, transport=transport
+        )
+    except AttributeError:  # paho 1.x
+        client = _mqtt.Client(protocol=_mqtt.MQTTv311, transport=transport)
+    if scheme in ("wss", "ssl", "tls", "mqtts"):
+        ca = _ca_bundle_path()
+        if ca:
+            # certifi is available — pin the CA bundle so TLS verification has a
+            # trust store to check against on macOS / frozen builds.
+            client.tls_set(ca_certs=ca, cert_reqs=ssl.CERT_REQUIRED)
+        else:
+            client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+    # Bound the outgoing QoS>0 queue (see MAX_QUEUED_MESSAGES).  paho's default
+    # is 0 — unlimited — which is only safe while nothing large is published;
+    # best-effort, since a client that lacks these is still usable.
+    try:
+        client.max_queued_messages_set(MAX_QUEUED_MESSAGES)
+        client.max_inflight_messages_set(MAX_INFLIGHT_MESSAGES)
+    except Exception:
+        logger.debug("relay client queue bounds not applied", exc_info=True)
+    return client
+
+
+def _sorted_pair(secret_a: str, secret_b: str) -> tuple[str, str]:
+    a, b = sorted([secret_a or "", secret_b or ""])
+    if not a or not b:
+        raise ValueError("both relay secrets are required")
+    return a, b
+
+
+def derive_topic(secret_a: str, secret_b: str) -> str:
+    """Unguessable MQTT topic for one pair of devices."""
+    a, b = _sorted_pair(secret_a, secret_b)
+    digest = hashlib.sha256((a + "|" + b).encode("ascii")).hexdigest()
+    return TOPIC_PREFIX + digest[:24]
+
+
+def derive_key(secret_a: str, secret_b: str) -> bytes:
+    """AES-256 key both ends derive independently (HKDF-like, HMAC-SHA256)."""
+    a, b = _sorted_pair(secret_a, secret_b)
+    prk = hmac.new(b"clipsync-relay-salt", (a + "|" + b).encode("ascii"), hashlib.sha256).digest()
+    # This is HKDF-Expand with a one-block (32-byte) output — identical to
+    # the home-rolled loop below for exactly 32 bytes, so pairing stays
+    # compatible with already-paired peers.
+    return _hkdf_expand(prk, b"clipsync-relay-key", 32)
+
+
+# --------------------------------------------------- internet pairing code
+
+
+def _int_to_b32(value: int, nchars: int) -> str:
+    """Render ``value`` (at most nchars*5 bits) as nchars base32 chars."""
+    out = []
+    for i in range(nchars - 1, -1, -1):
+        out.append(NETPAIR_ALPHABET[(value >> (5 * i)) & 0x1F])
+    return "".join(out)
+
+
+def _checksum_char(data11: str) -> str:
+    """One base32 char derived from the first 11 code chars (typo detection)."""
+    digest = hashlib.sha256(b"clipsync-netpair-check|" + data11.encode("ascii")).digest()
+    return NETPAIR_ALPHABET[digest[0] & 0x1F]
+
+
+def netpair_device_tag(device_id: str) -> str:
+    """20-bit fingerprint of a device id -> 4 base32 chars (the code's device
+    field).  Lossy by design: the code is compact, so the full 12-hex device id
+    is not carried — the real identity is confirmed over the channel when the
+    partner's hello frame arrives (its source_device is verified against this
+    tag).
+    """
+    digest = hashlib.sha256(
+        b"clipsync-netpair-device|" + str(device_id or "").strip().lower().encode("ascii"),
+    ).digest()
+    return _int_to_b32(int.from_bytes(digest[:3], "big") >> 4, NETPAIR_DEVICE_CHARS)
+
+
+def generate_netpair_secret() -> str:
+    """A fresh 35-bit shared secret, rendered as 7 base32 chars."""
+    import secrets as _secrets
+
+    return _int_to_b32(_secrets.randbits(NETPAIR_SECRET_BITS), NETPAIR_SECRET_CHARS)
+
+
+def generate_netpair_code(device_id: str, secret: str) -> str:
+    """Encode (device tag, secret) into a 12-char ``XXXX-XXXX-XXXX`` code."""
+    tag = netpair_device_tag(device_id)
+    if (
+        not isinstance(secret, str)
+        or len(secret) != NETPAIR_SECRET_CHARS
+        or any(c not in _NETPAIR_ALPHA_INDEX for c in secret)
+    ):
+        raise ValueError("invalid netpair secret")
+    data = tag + secret  # 11 chars: tag(4) + secret(7)
+    code = data + _checksum_char(data)  # 12 chars: data(11) + checksum
+    return f"{code[0:4]}-{code[4:8]}-{code[8:12]}"
+
+
+def decode_netpair_code(code: str) -> tuple[str, str] | None:
+    """Parse a pairing code back into ``(device_tag, secret)``, or None when
+    the format, alphabet, length or checksum is wrong (typo on entry)."""
+    if not isinstance(code, str):
+        return None
+    norm = "".join(ch for ch in code.upper() if ch not in " -")
+    if len(norm) != NETPAIR_CODE_CHARS:
+        return None
+    if any(c not in _NETPAIR_ALPHA_INDEX for c in norm):
+        return None
+    data = norm[:11]
+    if norm[11] != _checksum_char(data):
+        return None
+    tag = data[:NETPAIR_DEVICE_CHARS]
+    secret = data[NETPAIR_DEVICE_CHARS : NETPAIR_DEVICE_CHARS + NETPAIR_SECRET_CHARS]
+    return tag, secret
+
+
+def netpair_topic(secret: str) -> str:
+    """Unguessable MQTT topic for one netpair shared secret."""
+    digest = hashlib.sha256(b"clipsync-netpair-topic|" + secret.encode("ascii")).hexdigest()
+    return NETPAIR_TOPIC_PREFIX + digest[:24]
+
+
+def netpair_key(secret: str, password: str = "") -> bytes:
+    """AES-256 key both ends derive independently (same HMAC style as relay).
+
+    *password* optionally layers a user-set pairing passphrase on top of the
+    35-bit code secret (see ``netpair_passphrase_error``): the code keeps doing
+    the routing (the topic is still ``netpair_topic(secret)``) and doubles as a
+    salt, while the actual key strength becomes the passphrase's — so brute-
+    forcing the short code no longer reveals the key.  An empty password is the
+    original secret-only derivation, byte-for-byte identical, so existing
+    pairings and tests are unchanged.
+    """
+    keying = secret.encode("utf-8")
+    if password:
+        keying = keying + b"\x00" + password.encode("utf-8")
+    prk = hmac.new(b"clipsync-netpair-salt", keying, hashlib.sha256).digest()
+    # One block, spelt as one block.  This used to be a `while len(key) < 32`
+    # loop that overwrote `key` instead of appending to it, so it ran exactly
+    # once and the counter it incremented was dead — correct by accident, and
+    # indistinguishable at a glance from the multi-block expansion the loop
+    # shape promises.
+    return hmac.new(prk, b"clipsync-netpair-key" + b"\x01", hashlib.sha256).digest()[:32]
+
+
+def netpair_session_key(secret: str, shared: bytes, password: str = "") -> bytes:
+    """The netpair channel key once the peer's X25519 public key is known.
+
+    *shared* is ``DH(our private, their public)`` from
+    :mod:`internal.security.keyexchange` — a value neither end ever transmits,
+    which is the whole point: it is what makes a recording of the channel
+    useless to someone who later cracks the 35-bit code.  The code secret and
+    the optional passphrase are still mixed in, and still matter — they are
+    what an active attacker must know to sit in the middle of the handshake,
+    and what keeps two different pairings at the same code from sharing a key.
+    """
+    keying = b"clipsync-netpair-dh|" + shared + b"|" + secret.encode("utf-8")
+    if password:
+        keying = keying + b"\x00" + password.encode("utf-8")
+    prk = hmac.new(b"clipsync-netpair-dh-salt", keying, hashlib.sha256).digest()
+    # One block, spelt as one block — see netpair_static_key.
+    return hmac.new(
+        prk, b"clipsync-netpair-dh-key" + b"\x01", hashlib.sha256
+    ).digest()[:32]
+
+
+def netpair_passphrase_error(pw: str) -> str | None:
+    """Return an error tag for an invalid pairing passphrase, or None when it
+    satisfies every rule: length within ``NETPAIR_PASSPHRASE_MIN`` .. ``MAX``,
+    plus at least one of each of uppercase, lowercase, digit and a non-alnum
+    non-space special character.  Enforced server-side on save so the strength
+    rules can't be bypassed by editing the request body."""
+    if not isinstance(pw, str):
+        return "type"
+    if not (NETPAIR_PASSPHRASE_MIN <= len(pw) <= NETPAIR_PASSPHRASE_MAX):
+        return "length"
+    if not any(c.isupper() for c in pw):
+        return "upper"
+    if not any(c.islower() for c in pw):
+        return "lower"
+    if not any(c.isdigit() for c in pw):
+        return "digit"
+    if not any(not c.isalnum() and not c.isspace() for c in pw):
+        return "special"
+    return None
+
+
+def _timestamp_mac(key: bytes, ts: float) -> str:
+    """HMAC-SHA256 binding an envelope's ``ts`` field to its channel key.
+
+    ``repr`` of a float round-trips through ``json`` exactly (both use the
+    shortest representation), so both ends compute the same bytes for a value
+    that crossed the wire and was parsed back.  The rest of the envelope needs
+    no such help: ``data`` is an AES-GCM ciphertext whose tag covers its
+    contents, while ``ts`` was authenticated by nothing at all — anyone able
+    to rewrite the envelope could slide the timestamp into a fresh window and
+    have a recorded frame accepted as new.  Older builds ignore the extra
+    field, and envelopes from older builds carry no ``mac`` and keep working.
+    """
+    return hmac.new(
+        key, b"relay-ts" + repr(float(ts)).encode("ascii"), hashlib.sha256
+    ).hexdigest()
+
+
+def pack_envelope(
+    frame_bytes: bytes, key: bytes, now: float, max_frame: int | None = None
+) -> bytes:
+    """Wrap an encoded ClipSync frame into an encrypted relay envelope.
+
+    *max_frame* overrides :data:`MAX_RELAY_FRAME` for a relay whose per-message
+    limit the user set lower (or higher) than this build's default.
+    """
+    limit = MAX_RELAY_FRAME if max_frame is None else max_frame
+    if len(frame_bytes) > limit:
+        raise ValueError(f"frame too large for relay: {len(frame_bytes)} > {limit}")
+    ts = round(float(now), 3)
+    ct = encrypt(frame_bytes, key)
+    env = {
+        "v": ENVELOPE_VERSION,
+        "ts": ts,
+        "data": base64.b64encode(ct).decode("ascii"),
+        "mac": _timestamp_mac(key, ts),
+    }
+    return json.dumps(env, separators=(",", ":")).encode("ascii")
+
+
+def _envelope_replay_key(blob: bytes) -> str:
+    """The identity a replayed envelope is recognised by.
+
+    Everything that is not the ciphertext — ``ts`` above all — is a field a
+    third party can rewrite in place, and a hash over the whole envelope turns
+    every such rewrite into a value the cache has never seen.  Keying on the
+    ciphertext alone means an edit cannot buy a fresh identity.  A blob that
+    does not parse as one of our envelopes falls back to the whole-bytes hash,
+    which is the identity it had before and is not weaker for this purpose.
+    """
+    try:
+        env = json.loads(blob.decode("ascii"))
+        data = env.get("data") if isinstance(env, dict) else None
+        if isinstance(data, str) and data:
+            return hashlib.sha256(data.encode("ascii", errors="ignore")).hexdigest()
+    except Exception:
+        pass
+    return hashlib.sha256(blob).hexdigest()
+
+
+def open_envelope_ex(blob: bytes, key: bytes, now: float) -> tuple[bytes | None, str]:
+    """Decrypt+validate an envelope, also reporting why it failed.
+
+    Returns ``(frame, "")`` on success, else ``(None, reason)`` where reason is
+    ``"format"`` (not one of our envelopes), ``"window"`` (timestamp too far
+    from now) or ``"auth"`` (right envelope, wrong key — what a mismatched
+    encryption password looks like from the receiving side).
+    """
+    try:
+        env = json.loads(blob.decode("ascii"))
+    except Exception:
+        return None, "format"
+    if not isinstance(env, dict) or env.get("v") != ENVELOPE_VERSION:
+        return None, "format"
+    ts = env.get("ts")
+    if not isinstance(ts, (int, float)) or abs(now - float(ts)) > RELAY_TS_WINDOW:
+        logger.debug("Relay envelope rejected (timestamp out of window)")
+        return None, "window"
+    # The ``mac`` is mandatory, not optional-authenticated.
+    #
+    # It used to be read as "present means it must authenticate, absent means
+    # a v1 build that predates the field".  That made the whole replay defence
+    # a field an attacker deletes: stripping ``mac`` let a recorded envelope
+    # through unauthenticated, and because ``ts`` is the one plaintext field
+    # the attacker can rewrite, sliding it into a fresh window made that
+    # recording acceptable as new.  A timestamp nobody authenticated is worth
+    # exactly as much as no check at all, so an envelope without a MAC is now
+    # refused outright.  Both ends of every exchange are this build.
+    mac = env.get("mac")
+    if (
+        not isinstance(mac, str)
+        or not mac.isascii()
+        or not hmac.compare_digest(mac, _timestamp_mac(key, float(ts)))
+    ):
+        logger.debug("Relay envelope rejected (missing or bad timestamp MAC)")
+        return None, "auth"
+    try:
+        ct = base64.b64decode(env.get("data", ""))
+    except Exception:
+        return None, "format"
+    frame = decrypt(ct, key)
+    return (frame, "") if frame is not None else (None, "auth")
+
+
+def open_envelope(blob: bytes, key: bytes, now: float) -> bytes | None:
+    """Decrypt+validate an envelope. Returns the inner frame bytes, or None."""
+    return open_envelope_ex(blob, key, now)[0]
+
+
+def probe_relay_endpoint(endpoint: str, timeout: float = 4.0) -> dict:
+    """Probe one relay broker endpoint with a TCP (+TLS) handshake.
+
+    A pure connectivity check — opens its own socket and never touches the
+    live ``RelayTransport`` client, so clicking "test connection" cannot
+    disturb an active relay session.  Returns:
+    ``{"endpoint", "ok", "latency_ms", "detail"}`` and never raises.
+    """
+    try:
+        scheme, _, rest = endpoint.partition("://")
+        host_port, _, _path = rest.partition("/")
+        host, _, port = host_port.partition(":")
+        # Scheme-aware default port, matching _parse_endpoint: native MQTT
+        # plaintext defaults to 1883, native MQTT+TLS to 8883, WebSocket keeps
+        # the historical 8884.
+        s = scheme.lower()
+        if s in ("mqtt", "tcp"):
+            default_port = 1883
+        elif s in ("mqtts", "tls", "ssl"):
+            default_port = 8883
+        else:
+            default_port = 8884
+        port = int(port or default_port)
+    except Exception:
+        return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "invalid endpoint"}
+    if not host:
+        return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "invalid endpoint"}
+    use_tls = scheme.lower() in ("wss", "ssl", "tls", "mqtts")
+    started = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            if use_tls:
+                # Same CA-bundle strategy as build_paho_client(): a default
+                # context on macOS / frozen builds can't find the OS trust
+                # store and would report every wss:// endpoint as unreachable.
+                ca = _ca_bundle_path()
+                ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+                with ctx.wrap_socket(sock, server_hostname=host):
+                    pass  # handshake completed — reachable
+        latency_ms = round((time.time() - started) * 1000.0, 1)
+        return {"endpoint": endpoint, "ok": True, "latency_ms": latency_ms, "detail": "reachable"}
+    except TimeoutError:
+        return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "timeout"}
+    except Exception as e:
+        detail = str(e) or type(e).__name__
+        return {"endpoint": endpoint, "ok": False, "latency_ms": None, "detail": detail[:120]}
+
+
+def probe_relay_endpoints(brokers, timeout: float = 4.0, join_timeout: float = 6.0) -> list[dict]:
+    """Probe several relay brokers at once: one row per broker, never raising.
+
+    Each broker is probed in its own thread (see probe_relay_endpoint), so one
+    black-holed endpoint cannot delay the rest — the caller waits at most
+    ``join_timeout`` per thread and a straggler that is still running is left
+    behind (its own probe times out and reports itself).  Reachable brokers
+    come first, then by ascending latency, which is the order the settings
+    panel renders.
+    """
+    wanted = [b.strip() for b in (brokers or []) if isinstance(b, str) and b.strip()]
+    results: list[dict] = []
+    lock = threading.Lock()
+
+    def probe(endpoint: str) -> None:
+        try:
+            row = probe_relay_endpoint(endpoint, timeout=timeout)
+        except Exception:  # probe_relay_endpoint promises not to raise
+            logger.debug("relay probe crashed for %s", endpoint, exc_info=True)
+            row = {
+                "endpoint": endpoint, "ok": False, "latency_ms": None, "detail": "probe failed",
+            }
+        with lock:
+            results.append(row)
+
+    threads = [threading.Thread(target=probe, args=(b,), daemon=True) for b in wanted]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=join_timeout)
+    results.sort(
+        key=lambda r: (not r.get("ok"), r.get("latency_ms") is None, r.get("latency_ms") or 0)
+    )
+    return results
+
+
+class _MirrorConnection:
+    """Publish-only connection to one non-primary broker.
+
+    MQTT brokers do not federate, so two paired devices that fail over onto
+    different brokers never see each other's frames.  These mirrors keep every
+    *other* broker open for publishing only, so a frame is sent to all of them
+    and reaches the peer wherever it happens to be connected.  A mirror never
+    subscribes — receiving stays on the primary client, leaving the dedup /
+    online-tracking / netpair handshake paths untouched.
+    """
+
+    def __init__(self, transport, index: int, endpoint: str):
+        self._transport = transport
+        self._index = index
+        self._endpoint = endpoint
+        self._client = None
+        self._connected = False
+        self._stop = threading.Event()
+        self._wakeup = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"relay-mirror-{index}", daemon=True)
+
+    # ------------------------------------------------------------- state --
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    @property
+    def client(self):
+        return self._client
+
+    # ------------------------------------------------------------ public --
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wakeup.set()
+        self._teardown()
+        if self._thread is not None:
+            self._thread.join(timeout=STOP_JOIN_TIMEOUT)
+
+    # -------------------------------------------------------------- loop --
+    def _run(self) -> None:
+        attempt = 0
+        while not self._stop.is_set():
+            if self._connect_once():
+                attempt = 0
+                self._wait_until_lost()
+            else:
+                delay = BACKOFF_SEQUENCE[min(attempt, len(BACKOFF_SEQUENCE) - 1)]
+                attempt += 1
+                self._sleep_backoff(delay)
+        self._teardown()
+
+    def _sleep_backoff(self, delay: float) -> None:
+        """Back off, but wake up on THIS mirror's stop().
+
+        ``_transport._sleeper`` waits on (and clears) the transport's own
+        ``_wakeup``, which both ignores this mirror's stop() and swallows the
+        main worker's stop signal.  A caller-injected sleeper is still honoured
+        so tests can shorten the backoff.
+        """
+        sleeper = self._transport._sleeper
+        if sleeper != self._transport._interruptible_sleep:
+            sleeper(delay)
+            return
+        self._wakeup.wait(timeout=delay)
+        self._wakeup.clear()
+
+    def _connect_once(self) -> bool:
+        parsed = self._transport._parse_endpoint(self._endpoint)
+        if parsed is None:
+            return False
+        host, port, path = parsed
+        client = self._transport._new_client(self._endpoint)
+        if client is None:
+            return False
+        client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
+        self._client = client
+        self._connected = False
+        try:
+            # TLS/transport comes from the scheme-aware factory; only the
+            # WebSocket path is transport-specific and set per-endpoint.
+            if _endpoint_scheme(self._endpoint) in ("ws", "wss"):
+                client.ws_set_options(path=path)
+            client.connect(host, port, keepalive=45)
+            client.loop_start()
+        except Exception:
+            if self._client is client:
+                self._client = None
+            return False
+        deadline = time.time() + CONNECT_TIMEOUT
+        while time.time() < deadline:
+            if self._connected and self._client is client:
+                return True
+            if self._stop.is_set():
+                self._teardown()
+                return False
+            time.sleep(0.05)
+        self._teardown()
+        return False
+
+    def _wait_until_lost(self) -> None:
+        while not self._stop.is_set() and self._connected:
+            self._wakeup.wait(timeout=0.5)
+            self._wakeup.clear()
+        self._teardown()
+
+    def _teardown(self) -> None:
+        client = self._client
+        self._client = None
+        self._connected = False
+        if client is not None:
+            try:
+                client.loop_stop()
+                client.disconnect()
+            except Exception:
+                logger.debug("relay mirror cleanup failed", exc_info=True)
+
+    # --------------------------------------------------------- callbacks --
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        try:
+            ok = int(reason_code) == 0
+        except Exception:
+            ok = str(reason_code) in ("0", "Success")
+        if not ok or client is not self._client:
+            return  # refused, or a retired client's late CONNACK
+        self._connected = True
+
+    def _on_disconnect(self, client, userdata, *args):
+        if client is self._client:
+            self._connected = False
+
+
+class RelayTransport:
+    """Connection lifecycle + pub/sub over a failover list of MQTT brokers.
+
+    Parameters:
+      brokers           -- anonymous (free/public) endpoints, no credentials
+      private_brokers   -- credentialed endpoints; these authenticate with
+                           ``username``/``password``.  Combined into one failover
+                           list with the private endpoints FIRST (a self-hosted
+                           broker is the preferred primary), and credentials are
+                           only ever sent to a private endpoint — an anonymous
+                           public broker must not see them.
+      get_channels      -- returns {topic: key}; re-read on reconnect and when
+                           ``refresh_channels`` is called (new enrollments)
+      on_frame          -- called with (inner frame bytes, topic, key_index) for
+                           received frames; the topic lets the owner map a frame
+                           back to the channel/secret it arrived on (netpair
+                           handshake), and key_index says which entry of that
+                           channel's key list decrypted it — 0 is the channel's
+                           current key, and anything else means the frame rode
+                           an older key the channel keeps only for the handshake
+                           (see ``_decrypt_keys``)
+      on_state          -- called with one of STATE_* on every change
+      on_undecryptable  -- called with the topic when a frame arrives on a
+                           subscribed channel but will not decrypt (the two
+                           devices derived different keys — usually mismatched
+                           encryption passwords)
+      client_factory    -- returns a paho-compatible client, or None when the
+                           optional dependency is missing (tests inject fakes)
+      sleeper           -- called between retries (tests inject instant sleep);
+                           defaults to a stop-interruptible sleep
+    """
+
+    def __init__(
+        self,
+        brokers: list[str],
+        get_channels: Callable[[], dict[str, bytes]],
+        on_frame: Callable[[bytes], None],
+        on_state: Callable[[str], None],
+        client_factory: Callable | None = None,
+        sleeper: Callable[[float], None] | None = None,
+        username: str = "",
+        password: str = "",
+        private_brokers: list[str] | None = None,
+        on_undecryptable: Callable[[str], None] | None = None,
+        max_payload: int | None = None,
+    ):
+        # The broker's own ceiling, in bytes.  ``None`` keeps the default this
+        # module has always used; a configured value moves the envelope check
+        # here and, through :func:`frame_limit_for`, the chunk size chat
+        # derives from it (``ChatManager.relay_chunk_for``).
+        self._max_frame = frame_limit_for(
+            MAX_RELAY_PAYLOAD if max_payload is None else max_payload
+        )
+        self._free_brokers = [b for b in brokers if isinstance(b, str) and b]
+        self._private_brokers = [b for b in (private_brokers or []) if isinstance(b, str) and b]
+        # Private endpoints first: a self-hosted broker is the preferred
+        # primary; the free/public list becomes mirrors + failover.  The same
+        # endpoint may legitimately appear in both sections (e.g. mqtt:// vs
+        # ws:// differ, but an exact duplicate must not be connected twice).
+        self._brokers = list(dict.fromkeys(self._private_brokers + self._free_brokers))
+        self._private_endpoints = frozenset(self._private_brokers)
+        self._get_channels = get_channels
+        self._on_frame = on_frame
+        self._on_state = on_state
+        self._on_undecryptable = on_undecryptable
+        self._client_factory = client_factory or build_paho_client
+        self._username = username or ""
+        self._password = password or ""
+        self._sleeper = sleeper if sleeper is not None else self._interruptible_sleep
+        self._lock = threading.RLock()
+        self._thread: threading.Thread | None = None
+        self._client = None
+        self._stop = threading.Event()
+        self._wakeup = threading.Event()
+        self._subscribed: set[str] = set()
+        self._seen: OrderedDict[str, float] = OrderedDict()
+        self._connected_on_broker: int | None = None
+        self._state = STATE_OFF
+        # index -> publish-only connection to every broker the primary is NOT
+        # currently on (see _MirrorConnection / _sync_mirrors).
+        self._mirror_clients: dict[int, object] = {}
+
+    # ------------------------------------------------------------- state --
+    @property
+    def state(self) -> str:
+        with self._lock:
+            return self._state
+
+    @property
+    def max_frame(self) -> int:
+        """Largest frame one message of this relay's configuration carries.
+
+        The publish path refuses against exactly this number, so a caller that
+        has to decide whether a frame needs cutting (the clipboard's fragmented
+        carriage, ``internal/transport/relay_chunks.py``) reads it here rather
+        than re-deriving it from the configuration and risking a second answer.
+        """
+        return self._max_frame
+
+    @property
+    def current_broker(self) -> str:
+        """Endpoint URL of the broker the primary client is connected to
+        ("" when offline).  The UI shows this so a user can tell at a glance
+        whether two paired devices are on the same broker."""
+        with self._lock:
+            idx = self._connected_on_broker
+        return self._brokers[idx] if idx is not None else ""
+
+    def _set_state(self, state: str) -> None:
+        with self._lock:
+            if self._state == state:
+                return
+            self._state = state
+        try:
+            self._on_state(state)
+        except Exception:
+            logger.debug("state callback failed", exc_info=True)
+
+    # ------------------------------------------------------------ public --
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None:
+                return
+            if not self._brokers:
+                self._set_state(STATE_ERROR)
+                return
+            # A fresh event per worker rather than clearing the shared one:
+            # stop()'s join is bounded, so the previous worker may still be
+            # inside a blocking broker call.  Clearing the event it is watching
+            # would un-stop it and leave two workers fighting over _client.
+            self._stop = threading.Event()
+            worker_stop = self._stop
+            self._wakeup.clear()  # a prior stop() left it set; don't let the
+            # fresh worker inherit a spurious wakeup
+            self._set_state(STATE_CONNECTING)
+            self._thread = threading.Thread(
+                target=self._run, args=(worker_stop,), name="relay-sync", daemon=True
+            )
+
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wakeup.set()
+        with self._lock:
+            client, self._client = self._client, None
+            thread = self._thread
+            self._thread = None
+            self._subscribed.clear()
+            self._connected_on_broker = None
+            mirrors = list(self._mirror_clients.values())
+            self._mirror_clients.clear()
+        if client is not None:
+            try:
+                client.loop_stop()
+                client.disconnect()
+            except Exception:
+                logger.debug("relay disconnect during stop failed", exc_info=True)
+        for conn in mirrors:
+            try:
+                conn.stop()
+            except Exception:
+                logger.debug("relay mirror stop during stop failed", exc_info=True)
+        if thread is not None:
+            # Wait (bounded) for the worker to notice _stop and exit before a
+            # rapid stop() → start() restart can spawn a second worker running
+            # alongside the old one (which would still be mid-CONNACK wait or
+            # backoff).  The worker's waits are all stop-aware, so this returns
+            # promptly in practice and only falls through on the timeout if a
+            # blocking broker call itself never returns.
+            thread.join(timeout=STOP_JOIN_TIMEOUT)
+        self._set_state(STATE_OFF)
+
+    def restart(self) -> None:
+        """Re-read brokers/channels after a settings change."""
+        self.stop()
+        self.start()
+
+    def set_brokers(self, brokers: list | None = None, private_brokers: list | None = None) -> None:
+        """Replace the broker list(s) *before* a restart.
+
+        ``restart()`` alone only re-runs the worker — it still reads the
+        brokers captured at construction, so a broker-list edit in settings
+        would otherwise restart against the OLD list.  Call this first with
+        the new list(s), then ``restart()``.  A ``None`` argument keeps the
+        current list for that group, so a settings save that touches only one
+        group cannot wipe the other.  The live worker is untouched here; the
+        swap only takes effect on the next connect loop.
+        """
+        with self._lock:
+            if brokers is not None:
+                self._free_brokers = [b for b in brokers if isinstance(b, str) and b]
+            if private_brokers is not None:
+                self._private_brokers = [b for b in private_brokers if isinstance(b, str) and b]
+            self._brokers = list(dict.fromkeys(self._private_brokers + self._free_brokers))
+            self._private_endpoints = frozenset(self._private_brokers)
+
+    def set_credentials(self, username: str, password: str) -> None:
+        """Replace the broker credentials *before* a restart.
+
+        Like ``set_brokers`` this only swaps the stored value — the live
+        worker keeps the old creds until the next connect loop (call
+        ``restart()``).  Empty username+password = anonymous, the historical
+        public-broker behavior.
+        """
+        with self._lock:
+            self._username = username or ""
+            self._password = password or ""
+
+    def refresh_channels(self) -> None:
+        """Channel set changed — resubscribe without dropping the link.
+
+        Subscribes any topic that is not yet subscribed AND unsubscribes any
+        topic that is no longer in the current channel set (e.g. an internet
+        pair was removed), so a stale subscription cannot keep delivering
+        frames from an unpaired peer.
+        """
+        with self._lock:
+            client = self._client
+        if client is None:
+            return
+        channels = self._safe_channels()
+        for topic, _key in channels.items():
+            if topic in self._subscribed:
+                continue
+            try:
+                client.subscribe(topic, qos=SUBSCRIBE_QOS)
+                # _on_connect reassigns self._subscribed under the lock, so
+                # guard the mutation to avoid a lost update on a reconnect race.
+                with self._lock:
+                    self._subscribed.add(topic)
+            except Exception:
+                logger.debug("subscribe %s failed", topic, exc_info=True)
+        for topic in list(self._subscribed):
+            if topic in channels:
+                continue
+            try:
+                client.unsubscribe(topic)
+            except Exception:
+                logger.debug("unsubscribe %s failed", topic, exc_info=True)
+            with self._lock:
+                self._subscribed.discard(topic)
+
+    def publish(self, frame_bytes: bytes, topic: str, key: bytes, qos: int = 0) -> bool:
+        """Publish one encoded frame to ``topic`` on every connected broker.
+
+        The primary client sends on the broker we are currently subscribed to;
+        the mirror clients send on all the *other* brokers, so the receiving
+        peer gets the frame whichever broker it landed on during its own
+        failover (MQTT brokers don't federate).  Returns True if *any*
+        connected client accepted the frame — a peer reachable only through a
+        mirror counts as delivered (the offline-queue path only applies when
+        nothing at all is connected).
+
+        ``qos`` is the MQTT delivery level.  File chunks ride the relay at
+        QoS 1 so a best-effort public broker redelivers a dropped packet
+        (paho requeues un-acked QoS>0 messages across reconnects); the
+        receiver's envelope ``_seen`` dedup already absorbs at-least-once
+        duplicates.  Clipboard/text frames stay QoS 0 (cheap, loss-tolerant).
+        """
+        with self._lock:
+            client = self._client
+            # Gate on a *confirmed* connection (CONNACK received), not just the
+            # last remembered state: after a disconnect the state may lag until
+            # the worker reconnects, and publish() must not report frames as
+            # sent into a dead link.
+            primary_online = self._connected_on_broker is not None and client is not None
+            mirrors = [conn for conn in self._mirror_clients.values() if conn.connected]
+        if not primary_online and not mirrors:
+            return False
+        try:
+            blob = pack_envelope(frame_bytes, key, time.time(), max_frame=self._max_frame)
+        except ValueError:
+            # Warning, not debug: this is the frame that never arrives, and the
+            # size the user set is the only thing that can explain it.  Saying so
+            # here is what turns "file transfer stalls halfway" into a line that
+            # names the limit and the frame that missed it.
+            logger.warning(
+                "relay publish skipped: %d-byte frame exceeds this relay's %d-byte limit "
+                "(see the relay message size setting)",
+                len(frame_bytes),
+                self._max_frame,
+            )
+            return False
+        except Exception:
+            logger.debug("relay pack failed", exc_info=True)
+            return False
+        delivered = False
+        if primary_online:
+            try:
+                info = client.publish(topic, blob, qos=qos)
+                delivered = delivered or (getattr(info, "rc", 0) == 0)
+            except Exception:
+                logger.debug("relay publish (primary) failed", exc_info=True)
+        for conn in mirrors:
+            mirror_client = conn.client
+            if mirror_client is None:
+                continue
+            try:
+                info = mirror_client.publish(topic, blob, qos=qos)
+                delivered = delivered or (getattr(info, "rc", 0) == 0)
+            except Exception:
+                logger.debug("relay publish (mirror) failed", exc_info=True)
+        return delivered
+
+    # ------------------------------------------------------------- worker --
+    def _safe_channels(self) -> dict[str, bytes]:
+        try:
+            return dict(self._get_channels() or {})
+        except Exception:
+            logger.debug("get_channels failed", exc_info=True)
+            return {}
+
+    def _interruptible_sleep(self, delay: float) -> None:
+        """Default between-retry sleep; stop() can interrupt it via _wakeup.
+
+        A plain ``time.sleep(delay)`` here would let the worker miss a stop()
+        that lands mid-backoff and keep running alongside the restarted one;
+        waiting on ``_wakeup`` (set by stop()) returns as soon as the transport
+        is stopping, so restart()'s join actually sees the old thread exit.
+        """
+        self._wakeup.wait(timeout=delay)
+        self._wakeup.clear()
+
+    def _run(self, stop: threading.Event | None = None) -> None:
+        # Each worker holds the stop event it was started with, so a worker
+        # that outlived stop()'s bounded join (blocking broker call) keeps
+        # seeing "stopping" instead of inheriting the fresh event start()
+        # installed for its replacement -- two live workers on one client
+        # churn failover against each other.
+        if stop is None:
+            stop = self._stop
+        attempt = 0
+        while not stop.is_set():
+            for index, _endpoint in enumerate(self._brokers):
+                if stop.is_set():
+                    return
+                try:
+                    ok = self._connect_one(index, stop)
+                except Exception:
+                    # Never let an unexpected setup/connect error kill the
+                    # worker thread silently (a dead thread leaves the state
+                    # stuck on "connecting" with no recovery path).
+                    logger.warning("relay broker #%d raised during connect", index, exc_info=True)
+                    ok = False
+                if ok:
+                    served_from = time.monotonic()
+                    self._serve_until_lost(index, stop)
+                    if stop.is_set():
+                        return
+                    # Reset the backoff only for a session that was actually
+                    # usable.  A broker that answers CONNACK and drops the
+                    # socket a second later used to reset `attempt` on every
+                    # cycle, pinning the delay at BACKOFF_SEQUENCE[0] == 1s --
+                    # an endless once-a-second reconnect storm that never
+                    # escalated and never failed over for long.
+                    if time.monotonic() - served_from >= MIN_USABLE_SESSION:
+                        attempt = 0
+                    else:
+                        attempt += 1
+                        logger.debug(
+                            "broker #%d dropped after %.1fs -- backoff step %d",
+                            index,
+                            time.monotonic() - served_from,
+                            attempt,
+                        )
+                    break  # connection lost — restart from the first broker
+            else:
+                attempt += 1
+            delay = BACKOFF_SEQUENCE[min(attempt, len(BACKOFF_SEQUENCE) - 1)]
+            if not stop.is_set():
+                self._set_state(STATE_CONNECTING)
+                self._sleeper(delay)
+        # all brokers failing permanently is signalled by the owner via stop()
+
+    def _parse_endpoint(self, endpoint: str) -> tuple[str, int, str] | None:
+        try:
+            scheme = _endpoint_scheme(endpoint)
+            rest = endpoint.split("://", 1)[1]
+            host_port, _, path = rest.partition("/")
+            host, _, port = host_port.partition(":")
+            if not host:
+                return None
+            # Scheme-aware default ports (only when the URL omits one):
+            # native MQTT plaintext defaults to 1883, native MQTT+TLS to 8883,
+            # WebSocket keeps the historical 8884.
+            if scheme in ("mqtt", "tcp"):
+                default_port = 1883
+            elif scheme in ("mqtts", "tls", "ssl"):
+                default_port = 8883
+            else:
+                default_port = 8884
+            return host, int(port or default_port), "/" + path.lstrip("/") if path else "/mqtt"
+        except Exception:
+            return None
+
+    def _new_client(self, endpoint: str):
+        """Build a scheme-appropriate paho client for ``endpoint``.
+
+        The factory is handed the endpoint so it can pick transport + TLS
+        (see ``build_paho_client``).  A caller-supplied factory may be a bare
+        no-arg callable (the unit-test fakes) — fall back to calling it
+        without the endpoint when it doesn't accept one.  Broker credentials
+        (when configured) are applied here, once, for both primary and mirror
+        connections.
+        """
+        factory = self._client_factory
+        try:
+            client = factory(endpoint)
+        except TypeError:
+            client = factory()
+        # Credentials go ONLY to private endpoints — an anonymous public broker
+        # must never be handed the private broker's password.
+        if (
+            client is not None
+            and endpoint in self._private_endpoints
+            and (self._username or self._password)
+        ):
+            client.username_pw_set(self._username, self._password)
+        return client
+
+    def _connect_one(self, index: int, stop: threading.Event | None = None) -> bool:
+        if stop is None:
+            stop = self._stop
+        endpoint = self._brokers[index]
+        parsed = self._parse_endpoint(endpoint)
+        if parsed is None:
+            logger.warning("Invalid relay broker endpoint: %r", endpoint)
+            return False
+        host, port, path = parsed
+        with self._lock:
+            old_client, self._client = self._client, None
+            self._connected_on_broker = None
+        if old_client is not None:
+            # A previous attempt's client may still be running (loop_start()
+            # spawned its own network thread).  Stop it before installing the
+            # new one — an orphaned client leaks a thread + socket, and its
+            # late on_connect would otherwise satisfy the next CONNACK wait
+            # with a stale "connected" and churn failover.
+            try:
+                old_client.loop_stop()
+                old_client.disconnect()
+            except Exception:
+                logger.debug("relay client cleanup failed", exc_info=True)
+        client = self._new_client(endpoint)
+        if client is None:
+            logger.warning("paho-mqtt not available — internet sync disabled")
+            self._set_state(STATE_ERROR)
+            self._stop.set()
+            return False
+        client.on_connect = self._make_on_connect(index)
+        client.on_disconnect = self._make_on_disconnect(index)
+        client.on_message = self._on_message
+        with self._lock:
+            self._client = client
+        try:
+            # NOTE: TLS/transport is configured inside build_paho_client()
+            # (the scheme-aware factory).  Calling client.tls_set() again here
+            # raises "SSL/TLS has already been configured" on paho 2.x, which
+            # killed the relay thread on real paho (unit fakes never noticed).
+            # Only the websocket path is transport-specific and set per-
+            # endpoint (native-TCP clients have no path).
+            if _endpoint_scheme(endpoint) in ("ws", "wss"):
+                client.ws_set_options(path=path)
+            client.connect(host, port, keepalive=45)
+            client.loop_start()
+        except TimeoutError:
+            # A broker that never accepts (offline / firewalled / wrong port)
+            # hits the socket timeout — a routine condition, so log a one-liner
+            # instead of a full traceback.
+            logger.warning("relay connect to %s:%s timed out", host, port)
+            with self._lock:
+                self._client = None
+            return False
+        except OSError as exc:
+            # Same for refused/reset/unreachable — expected when the endpoint
+            # is down, not a code bug worth a stack trace for.
+            logger.warning(
+                "relay connect to %s:%s failed (%s: %s)", host, port, type(exc).__name__, exc
+            )
+            with self._lock:
+                self._client = None
+            return False
+        except Exception:
+            logger.warning("relay connect to %s:%s failed", host, port, exc_info=True)
+            with self._lock:
+                self._client = None
+            return False
+        # paho's connect() returns before CONNACK; on_connect fires from the
+        # network thread later.  Wait here so the retry loop doesn't treat
+        # "handshake in flight" as "connection lost" and hot-reconnect.
+        deadline = time.time() + CONNECT_TIMEOUT
+        while time.time() < deadline:
+            with self._lock:
+                if self._connected_on_broker == index:
+                    return True
+                if self._client is not client or stop.is_set():
+                    return False  # stop()/restart replaced us
+            time.sleep(0.05)
+        logger.debug("relay handshake timeout to broker #%d (%s:%s)", index, host, port)
+        with self._lock:
+            if self._client is client:
+                self._client = None
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except Exception:
+            logger.debug("cleanup after handshake timeout failed", exc_info=True)
+        return False
+
+    def _serve_until_lost(self, index: int, stop: threading.Event | None = None) -> None:
+        if stop is None:
+            stop = self._stop
+        while not stop.is_set():
+            with self._lock:
+                connected = self._connected_on_broker == index
+            if connected:
+                self._wakeup.wait(timeout=1.0)
+                self._wakeup.clear()
+            else:
+                break
+
+    # -------------------------------------------------------------- mirrors --
+    def _sync_mirrors(self) -> None:
+        """Reconcile the mirror set to every broker the primary is not on.
+
+        Called on every primary connect/disconnect.  ``publish`` fans out to
+        the primary + all connected mirrors, so as long as the peer holds a
+        subscription on *some* broker it receives the frame — even when the
+        two devices landed on different brokers after their own failovers.
+        A broker the primary just moved to is dropped from the mirror set so
+        the same frame is never handed to one broker twice.
+
+        Called from paho's ``on_connect``/``on_disconnect``, i.e. on the
+        network-loop thread of the primary client -- so nothing here may block.
+        Retiring a mirror joins its thread for up to ``STOP_JOIN_TIMEOUT``,
+        which on that thread stalls keepalive long enough to cause the very
+        disconnect it is reacting to, so the teardown is handed to a throwaway
+        thread instead.
+        """
+        with self._lock:
+            primary_idx = self._connected_on_broker
+            targets: set[int] = set()
+            for idx, endpoint in enumerate(self._brokers):
+                if self._parse_endpoint(endpoint) is not None:
+                    targets.add(idx)
+            if primary_idx is not None:
+                targets.discard(primary_idx)
+            stale = [i for i in self._mirror_clients if i not in targets]
+            missing = [i for i in targets if i not in self._mirror_clients]
+            # Detach the stale mirrors here, but stop them OUTSIDE the lock:
+            # stop() joins the mirror thread for up to STOP_JOIN_TIMEOUT, and
+            # holding _lock across that blocks publish() and every connect
+            # callback for as long as the join takes.
+            dying = [self._mirror_clients.pop(i) for i in stale]
+            for idx in missing:
+                conn = _MirrorConnection(self, idx, self._brokers[idx])
+                self._mirror_clients[idx] = conn
+                try:
+                    conn.start()
+                except Exception:
+                    logger.debug("relay mirror start failed", exc_info=True)
+                    self._mirror_clients.pop(idx, None)
+        if dying:
+            threading.Thread(
+                target=self._retire_mirrors,
+                args=(dying,),
+                name="relay-mirror-retire",
+                daemon=True,
+            ).start()
+
+    @staticmethod
+    def _retire_mirrors(dying: list) -> None:
+        for conn in dying:
+            try:
+                conn.stop()
+            except Exception:
+                logger.debug("relay mirror stop failed", exc_info=True)
+
+    # ----------------------------------------------------------- callbacks --
+    def _make_on_connect(self, index: int):
+        def _on_connect(client, userdata, flags, reason_code, properties=None):
+            try:
+                ok = int(reason_code) == 0
+            except Exception:
+                ok = str(reason_code) in ("0", "Success")
+            if not ok:
+                logger.debug("broker #%d refused connection: %s", index, reason_code)
+                return
+            with self._lock:
+                installed = self._client
+            if client is not installed:
+                # A callback from a retired/stale client (one that was
+                # superseded by a restart or dropped during failover) must not
+                # claim the broker slot for a connection that is no longer
+                # installed — it would overwrite the healthy client's state.
+                logger.debug("broker #%d on_connect ignored: stale client", index)
+                return
+            with self._lock:
+                self._connected_on_broker = index
+                self._subscribed = set(self._safe_channels())
+            for topic in list(self._subscribed):
+                try:
+                    client.subscribe(topic, qos=SUBSCRIBE_QOS)
+                except Exception:
+                    logger.debug("subscribe %s failed", topic, exc_info=True)
+            logger.info("Relay online via broker #%d", index)
+            self._set_state(STATE_ONLINE)
+            self._sync_mirrors()
+
+        return _on_connect
+
+    def _make_on_disconnect(self, index: int):
+        def _on_disconnect(client, userdata, *args):
+            was_current = False
+            with self._lock:
+                # Only a drop of the *installed* client counts — a stale
+                # callback from a retired client (or one mid-cleanup) must not
+                # pull a healthy new connection back out of ONLINE.
+                if self._client is client and self._connected_on_broker == index:
+                    self._connected_on_broker = None
+                    was_current = True
+            if was_current:
+                # An observed drop (TCP close or keepalive timeout) must leave
+                # ONLINE immediately — on a silent partition publish() would
+                # otherwise keep reporting frames as sent while they are being
+                # silently dropped.  CONNECTING makes publish() return False so
+                # frames queue/retry instead of being reported as delivered.
+                self._set_state(STATE_CONNECTING)
+                # The primary left its broker: while the worker reconnects,
+                # mirror every broker so publishing keeps reaching the peer.
+                self._sync_mirrors()
+            logger.debug("relay disconnected from broker #%d", index)
+
+        return _on_disconnect
+
+    def _decrypt_keys(self, topic) -> list[bytes]:
+        """Every key a frame on *topic* may be under, most current first.
+
+        One key for almost every channel.  A netpair channel has two while a
+        pairing is being established: the DH-derived session key, and the
+        code-derived key the handshake hello itself rides — the hello is where
+        each side learns the other's public key, so it cannot be protected by
+        the session key it exists to establish.  The runtime builds that pair
+        (see ``InternetPairingService.channels``); this only has to try them.
+        """
+        entry = self._safe_channels().get(topic)
+        if entry is None:
+            return []
+        if isinstance(entry, (bytes, bytearray)):
+            return [bytes(entry)]
+        try:
+            return [bytes(key) for key in entry]
+        except TypeError:
+            logger.debug("relay channel key for %s is unusable", topic, exc_info=True)
+            return []
+
+    def _remember_blob(self, blob: bytes) -> bool:
+        """Remember one envelope blob; True when it was already seen recently.
+
+        The cache is insertion-ordered, so the front is the closest to expiry:
+        draining from the front drops everything that has aged out and stops at
+        the first entry still inside the window.  An entry lives one window from
+        ``max(received_at, ts)``, not merely from receipt: a sender whose clock
+        runs ahead is accepted for up to a window into the future, and a replay
+        inside that extra span would otherwise outlive the hash that refuses it.
+        The cap is only the memory backstop after the expiry sweep.  Called
+        under the transport's lock because the receive callbacks share it.
+        """
+        now = time.time()
+        # Keyed on the ciphertext, not on the whole blob.  The blob carries
+        # ``ts``, which is exactly the field an attacker rewrites to slide a
+        # recorded envelope into a fresh window: hashing the blob gave every
+        # such edit a hash the cache had never seen, so the one defence left
+        # after the MAC was stripped was defeated by the same edit.  The
+        # ciphertext is the part they cannot touch without the channel key.
+        blob_hash = _envelope_replay_key(blob)
+        keep_until = now + RELAY_TS_WINDOW
+        try:
+            ts = json.loads(blob).get("ts")
+            if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                keep_until = max(now, float(ts)) + RELAY_TS_WINDOW
+        except Exception:
+            pass  # not an envelope shape; the receive-time window is all of it
+        with self._lock:
+            expiry = self._seen.get(blob_hash)
+            if expiry is not None and expiry > now:
+                return True  # exact duplicate (broker redelivery / our own echo)
+            if expiry is not None:
+                # Aged out.  A replay of it cannot pass the timestamp check the
+                # TTL was sized around, so forgetting it re-opens nothing.
+                del self._seen[blob_hash]
+            while self._seen:
+                oldest = next(iter(self._seen.values()))
+                if oldest > now:
+                    break
+                self._seen.popitem(last=False)
+            self._seen[blob_hash] = keep_until
+            while len(self._seen) > _SEEN_CAP:
+                self._seen.popitem(last=False)
+            return False
+
+    def _on_message(self, client, userdata, msg):
+        keys = self._decrypt_keys(msg.topic)
+        if not keys:
+            return
+        if self._remember_blob(bytes(msg.payload)):
+            return  # exact duplicate within the replay window
+        frame = None
+        reasons = []
+        key_index = 0
+        for index, key in enumerate(keys):
+            frame, why = open_envelope_ex(bytes(msg.payload), key, time.time())
+            if frame is not None:
+                key_index = index
+                break
+            reasons.append(why)
+        if frame is None:
+            # "auth" only when every key said so: one of them disagreeing means
+            # this was never our envelope, and reporting a password mismatch
+            # over someone else's frame would send the user after the wrong
+            # thing.
+            why = "auth" if reasons and all(r == "auth" for r in reasons) else reasons[0]
+            logger.debug("relay frame dropped (%s)", why)
+            if why == "auth" and self._on_undecryptable is not None:
+                # Right envelope on a channel we subscribe to, wrong key — the
+                # owner can tell the user (mismatched encryption password).
+                try:
+                    self._on_undecryptable(msg.topic)
+                except Exception:
+                    logger.debug("on_undecryptable callback failed", exc_info=True)
+            return
+        try:
+            self._on_frame(frame, msg.topic, key_index)
+        except Exception:
+            logger.debug("relay on_frame callback failed", exc_info=True)

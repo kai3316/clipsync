@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-phone-chat-list"
+description = "Enables the phone_chat_list command without any pre-configured scope."
+commands.allow = ["phone_chat_list"]
+
+[[permission]]
+identifier = "deny-phone-chat-list"
+description = "Denies the phone_chat_list command without any pre-configured scope."
+commands.deny = ["phone_chat_list"]

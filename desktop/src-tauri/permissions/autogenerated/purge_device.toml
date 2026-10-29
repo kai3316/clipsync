@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-purge-device"
+description = "Enables the purge_device command without any pre-configured scope."
+commands.allow = ["purge_device"]
+
+[[permission]]
+identifier = "deny-purge-device"
+description = "Denies the purge_device command without any pre-configured scope."
+commands.deny = ["purge_device"]

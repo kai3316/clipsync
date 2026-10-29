@@ -1,0 +1,762 @@
+"""Clipboard history API handlers.
+
+All handlers return a (data_dict, status_code) tuple.
+"""
+
+import json
+import logging
+import time
+import uuid
+
+from internal.application.use_cases.history import KINDS, SORTS, matches_kind, searchable
+from internal.application.use_cases.search import matcher as query_matcher
+from internal.clipboard.format import decode_text
+from internal.clipboard.history_db import HistoryWriteError
+from internal.config.config import FIELD_RULES, known_device_names
+
+logger = logging.getLogger(__name__)
+
+
+def _storage_unavailable():
+    """The answer for a write the history database refused.
+
+    A 500 with an error, never ``{"ok": true}``: a delete or a pin that did not
+    reach the disk comes back at the next start, so the panel must be told
+    rather than shown a row that quietly returns tomorrow.  The code matches
+    what the sidecar reports for the same failure (``STORAGE_ERROR``).
+    """
+    return {"ok": False, "error": "storage unavailable", "code": "STORAGE_ERROR"}, 500
+
+# The largest page an API client may ask for, taken from the one table that
+# owns this field's bounds so the API and the config loader cannot disagree.
+WEB_HISTORY_LIMIT_MAX = FIELD_RULES["web_history_limit"][2]
+
+
+def _source_label(sid: str, device_names: dict, cfg) -> str:
+    """Map a history row's ``source_device`` to a display name.
+
+    A locally captured clip carries an empty ``source_device`` (the clipboard
+    monitor never stamps the local id), which used to surface as "unknown" in
+    the web detail view.  Fall back to the local device name so a brand-new
+    clip reads as coming from this device instead.
+    """
+    name = device_names.get(sid, sid)
+    return name or device_names.get(cfg.device_id, "")
+
+
+# ``?source=`` has no fixed vocabulary to validate against — a device id is
+# whatever this machine's pairings called it — so the one name it does need is
+# the token for "the rows this machine captured itself".  Those carry an empty
+# ``source_device`` (the clipboard monitor never stamps the local id), and an
+# empty query parameter is indistinguishable from no filter at all.
+LOCAL_SOURCE = "local"
+
+
+def _source_key(value):
+    """What ``?source=`` asks for: a ``source_device`` to match, "" for local
+    rows, or ``None`` for "do not filter by source at all"."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text == LOCAL_SOURCE:
+        return ""
+    # Long enough for any id this machine mints, short enough that a client
+    # cannot make the comparison the expensive half of a request.
+    return text[:128]
+
+
+def _clean_choice(value, allowed, default):
+    """One of ``allowed``, or ``default`` for anything the caller invents.
+
+    A phone and the window share this endpoint, and a filter the server does
+    not know is worse than no filter: ``matches_kind`` answers an unrecognised
+    name with True, so an invented ``kind`` would show every row while the
+    client highlights a chip — a filter that looks applied and is not.  The
+    echo below is what lets the client's chip stay honest.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in allowed else default
+
+
+def get_history(
+    history,
+    cfg,
+    limit_str=None,
+    offset_str=None,
+    query_str=None,
+    kind_str=None,
+    sort_str=None,
+    source_str=None,
+):
+    """Return clipboard history list with device name mapping.
+
+    Args:
+        history: ClipboardHistoryDB instance.
+        cfg: Config instance.
+        limit_str: Optional string from ``?limit=N`` query param.
+                   Overrides cfg.web_history_limit when present.
+        offset_str: Optional string from ``?offset=N`` query param.
+                    Number of items to skip.
+        query_str: Optional string from ``?q=`` — a case-insensitive search
+                   over everything a row shows (see ``searchable``).
+        kind_str: Optional string from ``?kind=`` — one of ``KINDS``.
+        sort_str: Optional string from ``?sort=`` — one of ``SORTS``.
+        source_str: Optional string from ``?source=`` — a ``source_device`` to
+                    keep only, or ``local`` for the rows captured here.
+
+    The filtering is the window's own (``matches_kind`` / ``searchable`` /
+    pinned-first ordering), so a phone and the window agree on what 链接 means
+    and on which rows a word finds.  ``total`` is the number of *matching*
+    rows, so a phone paginating a filtered list stops at the right place.
+    """
+    items = history.get_all()
+
+    # Allow callers (e.g. quick-paste window) to request more items than the
+    # configured page size -- but not without a ceiling.  The response is one
+    # JSON document built in memory, and this endpoint is reachable by any client
+    # holding the web token, so `?limit=100000000` was a way to ask for every row
+    # this machine has ever kept.  The cap is the same one the settings page
+    # enforces on this field (`FIELD_RULES["web_history_limit"]`).
+    limit = cfg.web_history_limit
+    if limit_str is not None:
+        try:
+            parsed = int(limit_str)
+            if parsed > 0:
+                limit = min(parsed, WEB_HISTORY_LIMIT_MAX)
+        except (ValueError, TypeError):
+            pass
+
+    offset = 0
+    if offset_str is not None:
+        try:
+            parsed = int(offset_str)
+            if parsed > 0:
+                offset = parsed
+        except (ValueError, TypeError):
+            pass
+
+    kind = _clean_choice(kind_str, KINDS, "all")
+    sort = _clean_choice(sort_str, SORTS, "newest")
+    source = _source_key(source_str)
+
+    # ``has_history`` answers "is there anything to filter", which is not the
+    # same as "did this search match" — a chip bar that vanishes the moment a
+    # typo matches nothing takes the way back out with it.
+    has_history = bool(items)
+    if str(query_str or "").strip():
+        hit = query_matcher(query_str)
+        items = [entry for entry in items if hit(searchable(entry))]
+    # Source is a second narrowing of the same set, applied before the badges:
+    # a chip's number is the number of rows clicking it yields, and clicking a
+    # chip under a source filter yields that source's rows again.
+    if source is not None:
+        items = [entry for entry in items if str(entry.get("source_device") or "") == source]
+    # Chip badges count the rows each chip *would* show under the current
+    # search, so the number on a chip is the number clicking it yields.
+    counts = {name: sum(1 for entry in items if matches_kind(entry, name)) for name in KINDS}
+    if kind != "all":
+        items = [entry for entry in items if matches_kind(entry, kind)]
+    # Two stable passes: the order asked for, then pinned floated to the top.
+    # A compound key would have to reverse the pinned half too, which drops
+    # pinned rows to the bottom in one of the two orders.
+    items.sort(key=lambda entry: entry.get("timestamp", 0), reverse=sort != "oldest")
+    items.sort(key=lambda entry: not entry.get("pinned", False))
+
+    total = len(items)
+    if offset > 0:
+        items = items[offset:]
+    if limit > 0 and len(items) > limit:
+        items = items[:limit]
+    device_names = {cfg.device_id: cfg.device_name}
+    # Every name this machine knows, not only the LAN peers: a clip from an
+    # internet-paired device used to be labelled with its raw peer id here for
+    # the same reason the window did it.  See `config.known_device_names`.
+    device_names.update(known_device_names(cfg))
+    device_names["__web__"] = "\U0001f4f1 Web"
+    result = []
+    for entry in items:
+        sid = entry.get("source_device", "")
+        # List responses deliberately omit the full base64 ``types`` dict —
+        # it can be large (images, rich text) and is only needed when the
+        # user wants to copy/use a specific item.  Clients fetch the full
+        # content via GET /api/history/item when required.
+        result.append(
+            {
+                "timestamp": entry.get("timestamp"),
+                "content_type": entry.get("content_type", "TEXT"),
+                # Wire-level image format hint ("png"/"bmp"/"tiff"); clients
+                # use it to pick the right MIME when rendering IMAGE entries.
+                "image_fmt": entry.get("image_fmt", ""),
+                "text_preview": entry.get("text_preview", ""),
+                "source_device": sid,
+                "source_name": _source_label(sid, device_names, cfg),
+                "source_app": entry.get("source_app", ""),
+                "source_title": entry.get("source_title", ""),
+                # Which link carried it ("lan"/"relay"), or "web" for a push
+                # from this machine's own web server, empty for a clip captured
+                # here.  The row already names the device, and the phone is the
+                # place the difference matters most: it is the device that can
+                # be on either side of the relay.
+                "transport": entry.get("transport", ""),
+                "entry_id": entry.get("entry_id"),
+                "pinned": entry.get("pinned", False),
+                "paste_count": entry.get("paste_count", 0),
+            }
+        )
+    return {
+        "items": result,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "kind": kind,
+        "sort": sort,
+        # Echoed so the phone's "来源：xxx" chip names the filter actually
+        # applied, rather than the one it hoped for.
+        "source": LOCAL_SOURCE if source == "" else (source or ""),
+        "counts": counts,
+        "has_history": has_history,
+    }, 200
+
+
+def get_history_item(query_params, history, cfg):
+    """Return a single history entry's full content, including ``types``.
+
+    This is the counterpart to ``get_history``: list responses ship only
+    metadata + ``text_preview`` to keep the payload small, and clients that
+    need the full base64 content (copy, add-to-favorites, view detail) fetch
+    it here by ``entry_id``.
+    """
+    entry_id = (query_params.get("entry_id", [""])[0] or "").strip()
+    if not entry_id:
+        return {"ok": False, "error": "entry_id required"}, 400
+
+    _, entry = history.find_by_id(entry_id)
+    if entry is None:
+        return {"ok": False, "error": "not found"}, 404
+
+    device_names = {cfg.device_id: cfg.device_name}
+    device_names.update(known_device_names(cfg))
+    sid = entry.get("source_device", "")
+    result = {
+        "timestamp": entry.get("timestamp"),
+        "content_type": entry.get("content_type", "TEXT"),
+        # Wire-level image format hint ("png"/"bmp"/"tiff"); clients
+        # use it to pick the right MIME when rendering IMAGE entries.
+        "image_fmt": entry.get("image_fmt", ""),
+        "text_preview": entry.get("text_preview", ""),
+        # `dict(...)`, not the mapping itself: a loaded row carries a lazy
+        # payload mapping that reads its own column on first use, and `json`
+        # serialises a dict through its C storage without calling an override --
+        # so handing it the mapping as it stands would ship `{}` for the formats
+        # while the row still looked right everywhere else.
+        "types": dict(entry.get("types") or {}),
+        "source_device": sid,
+        "source_name": _source_label(sid, device_names, cfg),
+        "source_app": entry.get("source_app", ""),
+        "source_title": entry.get("source_title", ""),
+        "entry_id": entry.get("entry_id"),
+        "pinned": entry.get("pinned", False),
+        "paste_count": entry.get("paste_count", 0),
+    }
+    return {"item": result}, 200
+
+
+def get_history_preview(query_params, history):
+    """A downscaled picture for one entry, for clients that cannot fetch it whole.
+
+    The full item is the wrong read for a phone on a relay: an image clip's
+    ``types`` carries megabytes, and the tunnel's frame budget refuses it.  This
+    returns the same 480 px preview the desktop hover card uses, so a phone tap
+    costs kilobytes instead of a multi-megabyte round trip.
+
+    A vector-only row (older captures, before Windows capture started rendering
+    the bitmap beside it) is rendered here too, once, rather than staying the
+    label "Vector Image".
+    """
+    entry_id = (query_params.get("entry_id", [""])[0] or "").strip()
+    if not entry_id:
+        return {"ok": False, "error": "entry_id required"}, 400
+    _, entry = history.find_by_id(entry_id)
+    if entry is None:
+        return {"ok": False, "error": "not found"}, 404
+
+    from internal.application.use_cases.history import decode_formats
+    from internal.clipboard.format import ContentType
+
+    try:
+        types = decode_formats(entry)
+    except (ValueError, TypeError):
+        return {"ok": False, "error": "invalid data"}, 400
+    data = types.get(ContentType.IMAGE_PNG)
+    if data is None and ContentType.IMAGE_EMF in types:
+        from internal.clipboard.emf import render_emf_to_png
+
+        data = render_emf_to_png(types[ContentType.IMAGE_EMF])
+    if not data:
+        return {"ok": False, "error": "no preview"}, 404
+    url, width, height = _phone_preview(data)
+    if not url:
+        return {"ok": False, "error": "no preview"}, 404
+    return {"ok": True, "kind": "image", "image": url, "width": width, "height": height}, 200
+
+
+def _phone_preview(data: bytes) -> tuple[str, int, int]:
+    """A small JPEG/PNG data URL that fits the relay's inner-frame budget.
+
+    The desktop hover preview is 480 px PNG, which is right for a local hover
+    and wrong for a relayed phone tap: a screenshot's PNG at that size is often
+    60 KB, over the tunnel's 32 KiB frame.  320 px JPEG is a fraction of that
+    and still plenty for a phone modal.  Falls back to PNG for small pictures
+    where JPEG would be larger.
+    """
+    import base64
+    from io import BytesIO
+
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            width, height = image.size
+            converted = image.convert("RGBA")
+            canvas = Image.new("RGB", converted.size, (255, 255, 255))
+            canvas.paste(converted, mask=converted.split()[-1])
+            canvas.thumbnail((320, 320), Image.LANCZOS)
+            out = BytesIO()
+            canvas.save(out, format="JPEG", quality=72, optimize=True)
+            encoded = out.getvalue()
+            mime = "jpeg"
+            if len(encoded) > 24 * 1024:
+                png = BytesIO()
+                canvas.save(png, format="PNG", optimize=True)
+                if len(png.getvalue()) < len(encoded):
+                    encoded, mime = png.getvalue(), "png"
+    except Exception:
+        logger.debug("Phone preview could not be decoded", exc_info=True)
+        return "", 0, 0
+    return f"data:image/{mime};base64,{base64.b64encode(encoded).decode('ascii')}", width, height
+
+
+def push_text(body, cfg, sync_mgr, history):
+    """Push text to local clipboard, record it and broadcast to peers.
+
+    Replicates the existing POST /api/push logic from server.py
+    (original lines 1333-1372), plus the announcement of the row it records:
+    a push is a change to the history every listener should hear about, and
+    ``sync_mgr`` is the object that carries that news.
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    text = data.get("text", "")
+    if not isinstance(text, str) or not text.strip():
+        return {"ok": False, "error": "empty text"}, 400
+    text = text.strip()
+
+    from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
+
+    tee_bytes = text.encode("utf-8")
+    WEB_SOURCE = "__web__"  # noqa: N806
+    content = ClipboardContent(
+        types={ContentType.TEXT: tee_bytes},
+        source_device=WEB_SOURCE,
+        # ...and the route, which for a push is the third one: this is not a
+        # peer link at all but this machine's own web server answering a
+        # browser.  Recorded rather than left empty, because the row would
+        # otherwise carry a source name and no route, and a push from a phone
+        # is exactly the case where "which way did this come in" has an answer
+        # the device name cannot give.  The sender's own value for this field
+        # travels in the outgoing message (as its device id does) and is
+        # overwritten on arrival by the receiving sync manager, so no peer
+        # row can inherit it.
+        transport="web",
+    )
+
+    from internal.clipboard.platform import create_writer
+
+    writer = create_writer()
+    # write() returns False when the platform clipboard refused the write
+    # (Win32 OpenClipboard held by another app, no xclip/wl-copy on Linux,
+    # pbcopy failure on macOS).  Reporting {"ok": true} there told the user
+    # the text was on their clipboard when it was not -- and paste silently
+    # produced whatever was there before.  Bail out instead of also
+    # broadcasting: peers would receive text the host itself never got, and
+    # the user's natural retry would then send it twice.
+    try:
+        wrote = writer.write(content)
+    except Exception:
+        logger.debug("Web push clipboard write raised", exc_info=True)
+        wrote = False
+    if not wrote:
+        logger.warning("Web push: clipboard write failed (%d chars)", len(text))
+        return {"ok": False, "error": "clipboard write failed"}, 500
+
+    # Absorb the monitor event from this write so the pushed text is not
+    # captured again and re-broadcast as a duplicate (on_send below sends
+    # it to peers exactly once).
+    if sync_mgr is not None:
+        sync_mgr._monitor.suppress_for(2.0)
+
+    try:
+        history.add(content)
+    except Exception:
+        logger.debug("Failed to add web push to history", exc_info=True)
+    else:
+        # A pushed row is a history change like any other, and the sync
+        # manager's own notification hook is what says so — the same call it
+        # makes for a clip captured here or one that arrived from a peer.
+        # Without it the row existed and nothing announced it: the phone that
+        # pushed saw its own text only after a reload (legacy's panel polled,
+        # and the panel that replaced it does not), and the window learned of
+        # it only when the next unrelated event made it re-read.
+        #
+        # Only on a recorded row: a push whose history write failed still
+        # reached the clipboard, but announcing a row that is not there would
+        # send every listener after something that does not exist.
+        if sync_mgr is not None:
+            try:
+                sync_mgr._notify_history_change()
+            except Exception:
+                logger.debug("History change notification failed", exc_info=True)
+
+    msg = SyncMessage(
+        content=content,
+        msg_id=uuid.uuid4().hex,
+        source_device=cfg.device_id,
+    )
+    # sync_mgr is None when sync is off (guarded at the suppress_for call
+    # above); dereferencing .on_send here raised AttributeError -> 500 even
+    # though the clipboard write had already succeeded.
+    if sync_mgr is not None and sync_mgr.on_send:
+        try:
+            sync_mgr.on_send(msg)
+        except Exception:
+            logger.debug("Web push broadcast failed", exc_info=True)
+
+    logger.info("Web push: %d chars", len(text))
+    return {"ok": True, "len": len(text)}, 200
+
+
+def delete_item(body, history):
+    """Delete a history item by index.
+
+    Replicates the existing POST /api/delete logic from server.py
+    (original lines 1428-1439).
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    entry_id = data.get("entry_id")
+    if entry_id is not None:
+        # Only a scalar id: anything else (an object, a list) went straight
+        # into the SQLite bind and answered 500 from a malformed body rather
+        # than 400.
+        if isinstance(entry_id, (dict, list, tuple, bool)):
+            return {"ok": False, "error": "invalid entry_id"}, 400
+        try:
+            count = history.batch_delete([entry_id])
+        except HistoryWriteError:
+            return _storage_unavailable()
+        return {"ok": count > 0}, 200
+
+    idx = data.get("index", -1)
+    if not isinstance(idx, int) or idx < 0:
+        return {"ok": False, "error": "invalid index"}, 400
+
+    try:
+        ok = history.delete(idx)
+    except HistoryWriteError:
+        return _storage_unavailable()
+    return {"ok": ok}, 200
+
+
+def toggle_pin(body, history):
+    """Toggle pin state of a history item.
+
+    Replicates the existing POST /api/pin logic from server.py
+    (original lines 1441-1460).
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    entry_id = data.get("entry_id")
+    if entry_id is not None:
+        _, entry = history.find_by_id(entry_id)
+        if entry is None:
+            return {"ok": False, "error": "not found"}, 404
+        pinned = not entry.get("pinned", False)
+        try:
+            count = history.batch_set_pinned([entry_id], pinned)
+        except HistoryWriteError:
+            return _storage_unavailable()
+        return {"ok": count > 0, "pinned": pinned}, 200
+
+    idx = data.get("index", -1)
+    if not isinstance(idx, int) or idx < 0:
+        return {"ok": False, "error": "invalid index"}, 400
+
+    entry = history.get(idx)
+    if entry is None:
+        return {"ok": False, "error": "not found"}, 404
+
+    try:
+        if entry.get("pinned"):
+            history.unpin(idx)
+            return {"ok": True, "pinned": False}, 200
+        history.pin(idx)
+        return {"ok": True, "pinned": True}, 200
+    except HistoryWriteError:
+        return _storage_unavailable()
+
+
+def increment_paste_count(body, history):
+    """Increment the paste count for a history entry by entry_id.
+
+    Called when the user copies an item to clipboard from the web UI.
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    entry_id = data.get("entry_id")
+    if entry_id is None:
+        return {"ok": False, "error": "entry_id required"}, 400
+
+    try:
+        new_count = history.increment_paste(entry_id)
+    except HistoryWriteError:
+        return _storage_unavailable()
+    if new_count is not None:
+        return {"ok": True, "paste_count": new_count}, 200
+
+    return {"ok": False, "error": "not found"}, 404
+
+
+def batch_pin(body, history):
+    """Set pinned state on multiple history entries at once.
+
+    Expects: {"entry_ids": [...], "pinned": true/false}
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    entry_ids = data.get("entry_ids", [])
+    if not isinstance(entry_ids, list) or not entry_ids:
+        return {"ok": False, "error": "entry_ids list required"}, 400
+
+    pinned = data.get("pinned", True)
+
+    try:
+        count = history.batch_set_pinned(entry_ids, pinned)
+    except HistoryWriteError:
+        return _storage_unavailable()
+
+    return {"ok": True, "count": count}, 200
+
+
+def batch_delete(body, history):
+    """Delete multiple history entries at once.
+
+    Expects: {"entry_ids": [...]}
+    """
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    entry_ids = data.get("entry_ids", [])
+    if not isinstance(entry_ids, list) or not entry_ids:
+        return {"ok": False, "error": "entry_ids list required"}, 400
+
+    try:
+        count = history.batch_delete(entry_ids)
+    except HistoryWriteError:
+        return _storage_unavailable()
+
+    return {"ok": True, "count": count}, 200
+
+
+def batch_favorite(body, history):
+    """Add multiple history entries to favorites at once.
+
+    Expects: {"entry_ids": [...], "group": ""}
+
+    Inserts each favorite incrementally (mirroring add_favorite) instead of
+    load-modify-save: the old path snapshotted the table, then deleted and
+    re-inserted everything — a favorite added or edited by another tab or
+    the desktop UI during the batch was silently rolled back.
+    """
+    import base64
+    import uuid
+
+    from internal.web.api.favorites import _ensure_db, _get_conn, _maybe_migrate
+
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    entry_ids = data.get("entry_ids", [])
+    if not isinstance(entry_ids, list) or not entry_ids:
+        return {"ok": False, "error": "entry_ids list required"}, 400
+
+    group = data.get("group", "").strip()
+
+    _ensure_db()
+    _maybe_migrate()
+
+    conn = _get_conn()
+    added = []
+    try:
+        # Append after the current max position so batch insertion preserves
+        # selection order and never fights drag-reorder positions.
+        row = conn.execute("SELECT COALESCE(MAX(position), -1) FROM favorites").fetchone()
+        next_position = (row[0] + 1) if row else 0
+        for entry_id in entry_ids:
+            _, entry = history.find_by_id(entry_id)
+            if entry is None:
+                continue
+            # Store the FULL text, not the 200-char preview: text_preview is
+            # truncated at ingest, and silently favouriting a cut-down clip
+            # lost content the user expected to keep.
+            types = entry.get("types") or {}
+            text_b64 = types.get("TEXT", "") or ""
+            full_text = ""
+            if text_b64:
+                try:
+                    # A favourite keeps this text for good, and a payload from a
+                    # zh_CN Mac is GBK: decoding it as UTF-8 with replacement
+                    # would freeze a name into U+FFFD inside the favourite.
+                    full_text = decode_text(base64.b64decode(text_b64))
+                except Exception:
+                    full_text = ""
+            content = full_text or entry.get("text_preview", "") or ""
+            preview = full_text or entry.get("text_preview", "")
+            title = preview[:50] if preview else "(empty)"
+            fav_id = uuid.uuid4().hex[:12]
+            conn.execute(
+                'INSERT INTO favorites (id, title, content, "group", position, created) '
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (fav_id, title, content, group, next_position, time.time()),
+            )
+            next_position += 1
+            added.append(fav_id)
+        conn.commit()
+    except Exception as exc:
+        logger.error("Batch favorite failed: %s", exc)
+        return {"ok": False, "error": "database error"}, 500
+    finally:
+        conn.close()
+
+    logger.info("Batch favorite: added %d items", len(added))
+    return {"ok": True, "count": len(added)}, 200
+
+
+def paste_rich(body, history, on_reset_dedup=None):
+    """Paste all available formats for a history entry to the clipboard.
+
+    Looks up the entry by index, decodes all stored format types
+    (TEXT, HTML, RTF, IMAGE, IMAGE_EMF, FILE, URL) from base64, and
+    writes them all at once to the platform clipboard via the native
+    writer.
+
+    *on_reset_dedup* is an optional callback (wired by the host app) that
+    clears the sync manager's dedup state before the write, so the monitor
+    event from this paste is synced to peers instead of being filtered as
+    a duplicate.
+
+    Returns a list of format names that were successfully decoded.
+    """
+    import base64
+
+    from internal.clipboard.format import ClipboardContent, ContentType
+
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {"ok": False, "error": "invalid json"}, 400
+
+    entry_id = data.get("entry_id")
+    if entry_id is None:
+        # Allow index-based lookup as fallback
+        idx = data.get("index")
+        if isinstance(idx, int) and idx >= 0:
+            entry = history.get(idx)
+        else:
+            return {"ok": False, "error": "entry_id or index required"}, 400
+    else:
+        _, entry = history.find_by_id(entry_id)
+
+    if entry is None:
+        return {"ok": False, "error": "entry not found"}, 404
+
+    raw_types: dict = entry.get("types", {})
+    if not raw_types:
+        return {"ok": False, "error": "entry has no stored types"}, 400
+
+    _label_map: dict[str, ContentType] = {
+        "TEXT": ContentType.TEXT,
+        "HTML": ContentType.HTML,
+        "RTF": ContentType.RTF,
+        "IMAGE": ContentType.IMAGE_PNG,
+        "IMAGE_EMF": ContentType.IMAGE_EMF,
+        "FILE": ContentType.FILE,
+        "URL": ContentType.URL,
+    }
+
+    decoded_types: dict[ContentType, bytes] = {}
+    decoded_names: list[str] = []
+    for label, b64_data in raw_types.items():
+        ct = _label_map.get(label)
+        if ct is None:
+            continue
+        try:
+            decoded_types[ct] = base64.b64decode(b64_data)
+            decoded_names.append(label)
+        except Exception:
+            logger.debug("Failed to decode base64 for type %s", label)
+
+    if not decoded_types:
+        return {"ok": False, "error": "no valid types could be decoded"}, 400
+
+    from internal.clipboard.platform import create_writer
+
+    content = ClipboardContent(
+        types=decoded_types,
+        source_device=entry.get("source_device", ""),
+    )
+    # Clear dedup state so the monitor event from this write is not
+    # suppressed and the pasted content re-syncs to peers.
+    if on_reset_dedup is not None:
+        try:
+            on_reset_dedup()
+        except Exception:
+            logger.debug("reset_dedup callback failed", exc_info=True)
+    writer = create_writer()
+    writer.write(content)
+
+    # Increment paste count
+    eid = entry.get("entry_id")
+    if eid is not None:
+        # The clipboard write already happened; a counter that could not be
+        # saved is worth a log line, not a failed paste.
+        try:
+            history.increment_paste(eid)
+        except HistoryWriteError:
+            logger.debug("paste count could not be stored for entry %s", eid)
+
+    logger.info(
+        "paste_rich: wrote %d format(s) to clipboard for entry %s",
+        len(decoded_names),
+        entry.get("entry_id", "?"),
+    )
+    return {"ok": True, "formats": decoded_names, "count": len(decoded_names)}, 200

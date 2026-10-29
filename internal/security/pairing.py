@@ -1,0 +1,892 @@
+"""Device pairing and certificate management.
+
+Security model:
+1. Each device generates an Ed25519 keypair + self-signed X.509 certificate.
+2. Devices discover each other via mDNS on the LAN.
+3. On first contact, each device generates an 8-digit pairing code.
+   The user must verify the codes match on both devices.
+4. Upon code confirmation, certificates are exchanged and pinned (TOFU).
+5. Future connections require the pinned certificate — any change is rejected.
+6. Certificate fingerprints (SHA-256) are available for out-of-band verification.
+
+Threats addressed:
+- Eavesdropping: TLS 1.3 encrypts all traffic.
+- Impersonation: Certificate pinning prevents MITM after first pairing, and the
+  handshake now proves the peer holds the private key for the certificate it
+  names (see ``sign_handshake_nonce`` / ``verify_handshake_nonce``): a pinned
+  certificate *copied* off the wire used to be enough to be taken for its owner,
+  because the accepting side never obtained the certificate the peer actually
+  presented over TLS.
+- Brute-force pairing: 8-digit code (10^8 space) + rate limiting (5 attempts).
+- Rogue devices: Only paired peers can connect.
+"""
+
+import datetime
+import hashlib
+import hmac
+import logging
+import secrets
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.x509.oid import NameOID
+
+# Pairing code: 8 digits = 100 million combinations
+PAIRING_CODE_LENGTH = 8
+PAIRING_CODE_BYTES = 5
+
+# Rate limiting for pairing confirmation attempts
+MAX_PAIRING_ATTEMPTS = 5
+PAIRING_ATTEMPT_WINDOW = 300  # 5 minutes
+
+# A pending pairing request expires after this long (no confirmation either way)
+PAIRING_TIMEOUT = 300  # 5 minutes
+
+# Transient pairing lifecycle states (per peer).  The persistent trust flag is
+# ``PeerIdentity.paired``; these states describe the in-progress handshake.
+#   pending            — code shown, awaiting the LOCAL user's decision
+#   confirmed_waiting  — local user confirmed, awaiting the peer's confirm
+#   peer_confirmed     — peer confirmed, awaiting the local user's confirm
+#   paired             — both sides confirmed
+#   cancelled          — rejected / unpaired
+#   expired            — nobody answered within ``PAIRING_TIMEOUT``
+PAIRING_STATUS_PENDING = "pending"
+PAIRING_STATUS_CONFIRMED_WAITING = "confirmed_waiting"
+PAIRING_STATUS_PEER_CONFIRMED = "peer_confirmed"
+PAIRING_STATUS_PAIRED = "paired"
+PAIRING_STATUS_CANCELLED = "cancelled"
+# Its own word rather than ``cancelled``, which it used to share.  A rejection
+# is somebody's answer — the other side said no — while an expiry is nobody's:
+# the request simply ran out of time, and a user who left the prompt on screen
+# came back to 已取消, which reads as a refusal they never gave and cannot tell
+# apart from one they would have to answer differently (retry deliberately
+# rather than look for a fault on the other end).
+PAIRING_STATUS_EXPIRED = "expired"
+# The statuses that mean the handshake is over and cannot be revived: a late
+# ``pairing_confirm`` from the peer must not resurrect either one.
+PAIRING_STATUS_DEAD = (PAIRING_STATUS_CANCELLED, PAIRING_STATUS_EXPIRED)
+# Not a lifecycle state so much as the absence of one: this peer has no pairing
+# in flight.  It is what a merely-discovered device reports, and it is spelled
+# with the same empty string the removed-device rows already use for the field.
+PAIRING_STATUS_NONE = ""
+
+logger = logging.getLogger(__name__)
+
+
+def fingerprint_pem(certificate_pem: str) -> str:
+    """SHA-256 fingerprint of a PEM certificate, colon-separated hex."""
+    cert = x509.load_pem_x509_certificate(certificate_pem.encode())
+    der = cert.public_bytes(serialization.Encoding.DER)
+    digest = hashlib.sha256(der).hexdigest()
+    return ":".join(digest[i : i + 2] for i in range(0, len(digest), 2))
+
+
+def fingerprint_short(certificate_pem: str) -> str:
+    """Short version: first and last 8 hex chars."""
+    fp = fingerprint_pem(certificate_pem).replace(":", "")
+    return f"{fp[:8]}...{fp[-8:]}"
+
+
+@dataclass
+class DeviceIdentity:
+    """A device's cryptographic identity."""
+
+    device_id: str
+    device_name: str
+    private_key: ed25519.Ed25519PrivateKey
+    certificate: x509.Certificate
+    certificate_pem: str
+    private_key_pem: str
+    fingerprint: str = ""
+    fingerprint_short: str = ""
+
+
+@dataclass
+class PeerIdentity:
+    """A known peer's pinned identity."""
+
+    device_id: str
+    device_name: str
+    certificate_pem: str
+    paired: bool = True
+    fingerprint: str = ""
+
+
+class PairingManager:
+    """Manages device identity, pairing codes, and peer certificates."""
+
+    def __init__(self, device_id: str, device_name: str):
+        self._device_id = device_id
+        self._device_name = device_name
+        self._identity: DeviceIdentity | None = None
+        self._peers: dict[str, PeerIdentity] = {}
+        self._pending_pairings: dict[str, tuple[str, float]] = {}  # peer_id -> (code, timestamp)
+        # peer_id -> transient pairing lifecycle status (see module constants).
+        self._pairing_status: dict[str, str] = {}
+        # peer_id -> terminal status (`cancelled`/`expired`) that has happened but
+        # that no owner has been told about yet.  Drained by
+        # ``drain_terminal_statuses()``: the owner publishes one
+        # ``pairing.resolved`` per entry and the row that carried the status goes
+        # away with it.  Without this queue a rejected or expired request left
+        # its status on the peer's device row forever (the row's own filter keeps
+        # any row whose status is non-empty), and nothing ever said the request
+        # had ended.
+        self._terminal_statuses: dict[str, str] = {}
+        # peer_id -> list of attempt timestamps. NOTE: keyed only by peer_id,
+        # so an attacker who rotates device identities can reset the count per
+        # new identity. Low impact (each identity still pays the 5/5min cost)
+        # and intentionally not restructured — see MAX_PAIRING_ATTEMPTS.
+        self._pairing_attempts: dict[str, list[float]] = {}
+        # Peers whose `paired` flag an expiry rolled back, awaiting the owner's
+        # persist. Drained by drain_expiry_rollbacks().
+        self._expiry_rollbacks: list[str] = []
+        self._lock = threading.Lock()
+        self._on_new_pairing: Callable | None = None  # called when a new pairing code is generated
+
+    def set_on_new_pairing(self, callback: Callable):
+        """Set callback invoked when a new pairing code is generated.
+
+        Called as ``callback(peer_id, code, peer_name)`` so the UI can
+        notify the user and show the pairing dialog on the target device.
+        """
+        self._on_new_pairing = callback
+
+    def set_device_name(self, device_name: str):
+        """Rename this device — the name a peer is told when it connects.
+
+        The certificate's OU carries a name too, and it is the wrong one to
+        change: it is written once when the identity is minted, and every paired
+        device pins the fingerprint of the certificate it holds, so reissuing it
+        on a rename would read to all of them as a certificate change.  The name
+        travels in the identity frame instead (see
+        :func:`internal.security.handshake.encode_identity`), and this is the copy
+        it is read from — stale here meant a rename never reached the other side
+        at all until both devices restarted.
+        """
+        name = (device_name or "").strip()
+        if not name:
+            return
+        with self._lock:
+            self._device_name = name
+            if self._identity is not None:
+                self._identity.device_name = name
+
+    def set_peer_name(self, device_id: str, device_name: str) -> bool:
+        """Record the name a peer gives itself; True when it changed.
+
+        The name on a peer's record was written when it was last heard from, and
+        the record is what every surface falls back to when the peer is not
+        advertising — so a device renamed on the other side went on being listed
+        here under the name it used to have.  Only the peer's own answer may be
+        written through, which is the caller's to decide: a name guessed from a
+        truncated instance label is not one.
+        """
+        name = (device_name or "").strip()
+        if not name:
+            return False
+        with self._lock:
+            peer = self._peers.get(device_id)
+            if peer is None or peer.device_name == name:
+                return False
+            logger.info("Peer %s is now called %s", device_id[:12], name)
+            peer.device_name = name
+            return True
+
+    def load_or_create_identity(
+        self,
+        private_key_pem: str,
+        certificate_pem: str,
+    ) -> DeviceIdentity:
+        """Load existing identity from saved keys, or create new one."""
+        if private_key_pem and certificate_pem:
+            logger.info("Loading existing device identity")
+            private_key = serialization.load_pem_private_key(
+                private_key_pem.encode(),
+                password=None,
+            )
+            certificate = x509.load_pem_x509_certificate(certificate_pem.encode())
+            fp = fingerprint_pem(certificate_pem)
+            self._identity = DeviceIdentity(
+                device_id=self._device_id,
+                device_name=self._device_name,
+                private_key=private_key,
+                certificate=certificate,
+                certificate_pem=certificate_pem,
+                private_key_pem=private_key_pem,
+                fingerprint=fp,
+                fingerprint_short=fingerprint_short(certificate_pem),
+            )
+        else:
+            self._identity = self._create_identity()
+        return self._identity
+
+    def get_identity(self) -> DeviceIdentity:
+        if self._identity is None:
+            raise RuntimeError("Identity not loaded")
+        return self._identity
+
+    def add_peer(self, device_id: str, device_name: str, certificate_pem: str, paired: bool = True):
+        # A peer may legitimately have no pinned certificate yet: restore_peer
+        # leaves it empty on purpose (re-pinned on the next handshake), and
+        # _save_cfg_and_peers persists that empty value.  Feeding "" to
+        # fingerprint_pem raises MalformedFraming, and the startup loop in
+        # src/main.py logged "Skipping peer <name>" and DROPPED the peer from
+        # the known list — a restored device silently half-vanished after a
+        # restart.  Treat "no certificate" as "not pinned yet" instead.
+        fp = fingerprint_pem(certificate_pem) if (certificate_pem or "").strip() else ""
+        with self._lock:
+            existing = self._peers.get(device_id)
+            # A restored peer starts with an empty certificate (restore_peer
+            # pins it on the next handshake), so only flag a change when there
+            # is actually a prior pin to compare against AND the incoming PEM
+            # is non-empty (an empty PEM is just "not yet pinned", not a real
+            # certificate change — otherwise the startup loop in main.py
+            # drops every restored peer with "Skipping peer <name>").
+            if (
+                existing
+                and existing.paired
+                and existing.fingerprint
+                and fp
+                and existing.fingerprint != fp
+            ):
+                # Certificate changed for a paired peer — reject!
+                logger.error(
+                    "Certificate changed for %s (%s)! Expected: %s... Got: %s...",
+                    device_name,
+                    device_id,
+                    existing.fingerprint[:16],
+                    fp[:16],
+                )
+                raise CertificateChangedError(
+                    f"Certificate for {device_name} ({device_id}) has changed! "
+                    f"Expected: {existing.fingerprint[:16]}... "
+                    f"Got: {fp[:16]}..."
+                )
+            self._peers[device_id] = PeerIdentity(
+                device_id=device_id,
+                device_name=device_name,
+                # An empty incoming PEM must not wipe an existing pin — keep
+                # whatever we already trust and let a real handshake replace it.
+                certificate_pem=certificate_pem or (existing.certificate_pem if existing else ""),
+                paired=paired,
+                fingerprint=fp or (existing.fingerprint if existing else ""),
+            )
+
+    def update_peer_certificate(self, device_id: str, certificate_pem: str) -> bool:
+        """Replace a paired peer's pinned certificate (re-trust after reinstall/reset).
+
+        Returns True only when the pin was really replaced: the peer exists,
+        **is currently paired**, the incoming certificate parses, and its
+        fingerprint differs from the pin already held.  Every other case returns
+        False and writes nothing, because each of them is a question this call
+        must not answer on the user's behalf:
+
+        * an unknown peer — there is nothing to re-trust;
+        * a peer that is not paired — the pairing ended (a rejection, an expiry,
+          or the peer's own ``pairing_unpair``).  Writing ``paired = True`` here
+          used to resurrect a pairing one side had already ended, and the other
+          side then waited forever for a confirmation this side would swallow
+          (see ``_adopt_peer_pairing``'s guard);
+        * the same fingerprint — nothing changed, so "trust again" is a no-op;
+          re-pinning the value that is already pinned cannot fix anything;
+        * an empty or unparsable certificate — not a certificate to pin.
+        """
+        fp = fingerprint_pem(certificate_pem) if (certificate_pem or "").strip() else ""
+        with self._lock:
+            peer = self._peers.get(device_id)
+            if peer is None:
+                logger.warning(
+                    "Cannot update certificate for unknown peer %s",
+                    device_id,
+                )
+                return False
+            if not peer.paired:
+                logger.info(
+                    "Not re-pinning %s (%s): the pairing is not active",
+                    peer.device_name,
+                    device_id,
+                )
+                return False
+            if not fp:
+                logger.warning(
+                    "Refusing to pin an empty certificate for %s (%s)",
+                    peer.device_name,
+                    device_id,
+                )
+                return False
+            if peer.fingerprint == fp:
+                logger.info(
+                    "Certificate for %s (%s) is unchanged — nothing to re-pin",
+                    peer.device_name,
+                    device_id,
+                )
+                return False
+            peer.certificate_pem = certificate_pem
+            peer.fingerprint = fp
+            logger.info(
+                "Updated pinned certificate for %s (%s) — new fp: %s...",
+                peer.device_name,
+                device_id,
+                fp[:16],
+            )
+            return True
+
+    def is_peer_paired(self, device_id: str) -> bool:
+        with self._lock:
+            peer = self._peers.get(device_id)
+            return peer is not None and peer.paired
+
+    def get_peer_certificate(self, device_id: str) -> str | None:
+        with self._lock:
+            peer = self._peers.get(device_id)
+            return peer.certificate_pem if peer else None
+
+    def get_peer_fingerprint(self, device_id: str) -> str:
+        """Return the SHA-256 fingerprint of a peer's certificate, or '' if unknown."""
+        with self._lock:
+            peer = self._peers.get(device_id)
+            return peer.fingerprint if peer else ""
+
+    def verify_peer_fingerprint(self, device_id: str, fingerprint: str) -> bool:
+        """Verify a peer's certificate fingerprint (for out-of-band verification)."""
+        with self._lock:
+            peer = self._peers.get(device_id)
+            if not peer:
+                return False
+            # Constant-time: the length of the matching prefix is observable in
+            # the time a short-circuiting `==` takes, and both sides of this
+            # comparison are secrets the caller is checking, not labels being
+            # sorted.  Compared as bytes because `compare_digest` on two str
+            # raises on a non-ASCII character.
+            return hmac.compare_digest(
+                peer.fingerprint.replace(":", "").upper().encode("utf-8"),
+                str(fingerprint or "").replace(":", "").upper().encode("utf-8"),
+            )
+
+    # -- handshake proof of key possession -----------------------------
+    #
+    # Why this exists.  The accepting side built its TLS context with
+    # `CERT_NONE`, so it never asked for a client certificate and
+    # `getpeercert(binary_form=True)` was always None -- which made the
+    # "bind the TLS-presented certificate to the app-layer one" check a few
+    # lines later dead code.  Everything the accept path believed about a peer
+    # (its device id, whether its certificate matched the pin, whether it was
+    # paired) therefore came from a PEM the peer merely *claimed* in its identity
+    # frame.  That PEM is not a secret: the server sends its own to any client
+    # before reading anything, so one unauthenticated connection to a device is
+    # enough to obtain it.  Copying a paired device's PEM into an identity frame
+    # was consequently enough to be taken for that device.
+    #
+    # Measured, Python offers no way to request a certificate without also
+    # validating it: `CERT_OPTIONAL` aborts the handshake on a self-signed client
+    # certificate (`SSLCertVerificationError: self-signed certificate`), and
+    # every ClipSync device's certificate is self-signed.  So the proof is made
+    # at the application layer instead, over the Ed25519 key the certificate
+    # already carries: each side signs a nonce the other chose, and a signature
+    # that verifies against the certificate's public key can only have been made
+    # by whoever holds that certificate's private key.
+
+    NONCE_BYTES = 32
+
+    @staticmethod
+    def make_handshake_nonce() -> str:
+        """A fresh nonce for one handshake, as hex."""
+        return secrets.token_hex(PairingManager.NONCE_BYTES)
+
+    def sign_handshake_nonce(self, peer_nonce: str, own_nonce: str) -> str:
+        """Prove we hold the private key for our certificate.
+
+        The message covers *both* nonces, so a signature harvested from one
+        handshake cannot be replayed into another, and our own nonce cannot be
+        reflected back at us as the peer's answer.
+
+        The two are **sorted** before signing, which is what makes the two sides
+        agree: this side signs *(their nonce, ours)* and the verifier holds
+        *(peer nonce, own nonce)* from the opposite point of view, so a message
+        that depends on which end is talking would never verify.  Measured, it did
+        not -- the first version had each side sign its own nonce first, and every
+        signature failed to check out.
+        """
+        identity = self._identity
+        if identity is None or not peer_nonce or not own_nonce:
+            return ""
+        message = PairingManager.handshake_message(peer_nonce, own_nonce)
+        try:
+            return identity.private_key.sign(message).hex()
+        except Exception:
+            logger.debug("Could not sign the handshake nonce", exc_info=True)
+            return ""
+
+    @staticmethod
+    def handshake_message(first: str, second: str) -> bytes:
+        """The bytes both sides sign and check, independent of who is which.
+
+        Sorted, because the two ends hold the same pair with the arguments
+        swapped: whichever is talking calls them *(peer, own)*, and the other
+        calls the same two *(own, peer)*.  A canonical order is the only thing
+        that makes one signature verifiable from both ends -- and it keeps both
+        nonces in the message, so neither the replay nor the reflection the
+        docstring above rules out becomes possible.
+        """
+        low, high = sorted((str(first), str(second)))
+        return f"{low}{high}".encode()
+
+    def verify_handshake_nonce(
+        self, certificate_pem: str, peer_nonce: str, own_nonce: str, signature: str
+    ) -> bool:
+        """Whether *signature* proves the sender holds *certificate_pem*'s key.
+
+        Read as: the peer signed the nonce we sent, and mixed in the nonce it
+        sent, using the key belonging to the certificate it named.  Anything
+        else -- no signature, a malformed one, a signature by a different key --
+        is False, and the caller decides what that costs.
+        """
+        if not signature or not peer_nonce or not own_nonce or not certificate_pem:
+            return False
+        try:
+            certificate = x509.load_pem_x509_certificate(certificate_pem.encode())
+            public_key = certificate.public_key()
+            public_key.verify(
+                bytes.fromhex(signature),
+                PairingManager.handshake_message(peer_nonce, own_nonce),
+            )
+            return True
+        except Exception:
+            logger.debug("Handshake nonce signature did not verify", exc_info=True)
+            return False
+
+    # -- lifecycle status bookkeeping ----------------------------------
+    #
+    # Every write to the transient lifecycle goes through these two helpers so
+    # the terminal queue cannot be forgotten at one of the eight call sites.
+    # A terminal status is also queued for the owner: ``drain_terminal_statuses``
+    # is how the runtime learns a request ended (and how the row carrying
+    # ``cancelled``/``expired`` gets a chance to go away).
+
+    def _set_status_locked(self, peer_id: str, status: str) -> str:
+        """Record *status*; queue it when terminal.  Caller holds ``_lock``."""
+        self._pairing_status[peer_id] = status
+        if status in PAIRING_STATUS_DEAD:
+            # Last terminal status per peer wins: a row cannot be both
+            # cancelled and expired, and one resolution event is enough.
+            self._terminal_statuses[peer_id] = status
+        else:
+            self._terminal_statuses.pop(peer_id, None)
+        return status
+
+    def _clear_status_locked(self, peer_id: str) -> None:
+        """Forget a peer's lifecycle (and any queued terminal).  ``_lock`` held."""
+        self._pairing_status.pop(peer_id, None)
+        self._terminal_statuses.pop(peer_id, None)
+
+    def drain_terminal_statuses(self) -> list[tuple[str, str]]:
+        """Take the terminal pairing statuses since the last call, and clear them.
+
+        A terminal status (``cancelled`` / ``expired``) is a fact the user has to
+        be told about once: the request ended, and the prompt/row that carried it
+        must go.  The manager cannot publish events (it owns no event bus) and it
+        cannot keep the status forever (a row whose status is non-empty is a row
+        the device list keeps, even after the device leaves the network — the
+        ghost row).  So a terminal status is queued here, the owner drains it in
+        its maintenance tick, publishes one ``pairing.resolved`` per entry, and
+        the row disappears on the refresh that follows.
+
+        Draining is one-shot and idempotent per peer: the entry is removed only
+        if the status is still the drained one (a peer that started a new
+        request between the check and the drain keeps the new status).
+        """
+        with self._lock:
+            drained = list(self._terminal_statuses.items())
+            self._terminal_statuses.clear()
+            for peer_id, status in drained:
+                if self._pairing_status.get(peer_id) == status:
+                    self._pairing_status.pop(peer_id, None)
+            return drained
+
+    def generate_pairing_code(self, peer_id: str) -> str:
+        """Generate a pairing code for a peer. Returns the code to display."""
+        raw = secrets.token_bytes(PAIRING_CODE_BYTES)
+        code_int = int.from_bytes(raw, "big") % (10**PAIRING_CODE_LENGTH)
+        code = str(code_int).zfill(PAIRING_CODE_LENGTH)
+        with self._lock:
+            self._pending_pairings[peer_id] = (code, time.time())
+            self._pairing_attempts[peer_id] = []
+            self._set_status_locked(peer_id, PAIRING_STATUS_PENDING)
+        logger.info("Generated pairing code for %s", peer_id)
+        return code
+
+    def generate_shared_pairing_code(self, peer_id: str) -> str:
+        """Generate a pairing code derived from both devices' certificate fingerprints.
+
+        Both sides independently compute the same code after TLS cert exchange,
+        so users can visually verify the codes match — like Bluetooth Numeric Comparison.
+        """
+        identity = self._identity
+        if not identity:
+            raise RuntimeError("Identity not loaded")
+        # Look the peer up and record the pending entry under a SINGLE lock
+        # hold. Splitting it left a window in which remove_peer() could drop
+        # the peer between the two critical sections, and the second one would
+        # then resurrect a pending pairing for a device that is no longer
+        # known — get_pending_pairings() finds no peer for it and shows a card
+        # named after the raw id. The derivation in between is pure hashing,
+        # so it costs the lock nothing measurable.
+        with self._lock:
+            peer = self._peers.get(peer_id)
+            if not peer:
+                raise ValueError(f"Peer {peer_id} not known — cert exchange required first")
+            peer_name = peer.device_name
+
+            # Sort fingerprints so both sides derive the same code
+            fps = sorted([identity.fingerprint, peer.fingerprint])
+            shared = hashlib.sha256((fps[0] + fps[1]).encode()).hexdigest()
+            code_int = int(shared[:10], 16) % (10**PAIRING_CODE_LENGTH)
+            code = str(code_int).zfill(PAIRING_CODE_LENGTH)
+
+            # Start the 300s PAIRING_TIMEOUT clock only on a genuinely NEW
+            # pending request. Both connection paths call this on every
+            # reconnect from a not-yet-paired peer, and refreshing the
+            # timestamp on each call would keep the card from ever expiring
+            # (the timeout would never lapse). An already-pending peer keeps
+            # its original timestamp and status — the shared code is
+            # deterministic per peer, so the cached entry stays valid...
+            # *while the two certificates are the same*.  That is the exception
+            # this branch exists for: a peer that reissues its identity (reset,
+            # reinstall, lost key) while a request is open derives a different
+            # code from the new certificate, and the peer's screen then shows
+            # that new code while this one kept displaying the old one — two
+            # different 8-digit codes, a confirmation that can only mismatch,
+            # and five rate-limited attempts spent proving it.  When the derived
+            # code changes, the request is looking at a different pair of
+            # devices, so it restarts: new code, fresh clock, cleared attempts,
+            # and back to `pending` because any confirmation gathered for the
+            # old code was for a certificate that no longer exists.
+            cached = self._pending_pairings.get(peer_id)
+            if cached is None:
+                self._pending_pairings[peer_id] = (code, time.time())
+                self._set_status_locked(peer_id, PAIRING_STATUS_PENDING)
+            elif cached[0] != code:
+                self._pending_pairings[peer_id] = (code, time.time())
+                self._pairing_attempts.pop(peer_id, None)
+                self._set_status_locked(peer_id, PAIRING_STATUS_PENDING)
+                logger.info(
+                    "Peer %s changed its certificate while pairing — pairing code "
+                    "and its timeout restarted",
+                    peer_id,
+                )
+            # Do NOT reset _pairing_attempts here: a connecting peer could
+            # otherwise nullify the rate limit by reconnecting and re-generating
+            # the shared code. Attempts are cleared only on a successful
+            # confirm_pairing() below, on a deliberate local pairing attempt, or
+            # on the certificate-change restart above (a different peer identity
+            # is a different guess surface).
+        logger.info(
+            "Shared pairing code for %s: %s**** (derived from cert fingerprints)", peer_id, code[:4]
+        )
+        if self._on_new_pairing:
+            try:
+                self._on_new_pairing(peer_id, code, peer_name)
+            except Exception:
+                logger.debug("on_new_pairing callback failed", exc_info=True)
+        return code
+
+    def confirm_pairing(self, peer_id: str, code: str) -> bool:
+        """User confirms the pairing code. Rate-limited to prevent brute force."""
+        with self._lock:
+            pending = self._pending_pairings.get(peer_id)
+            if not pending:
+                return False
+
+            expected, _timestamp = pending
+            now = time.time()
+
+            # An expired request can still be showing in the UI, but its code
+            # must no longer be confirmable — mirror get_pending_pairings().
+            if now - _timestamp > PAIRING_TIMEOUT:
+                self._pending_pairings.pop(peer_id, None)
+                # Mark the lifecycle over too, so a stale "pending" does not
+                # linger in _pairing_status after the request is gone.  Expired
+                # rather than cancelled: this is the clock running out, not an
+                # answer.  Terminal statuses are queued for the owner to publish
+                # (see drain_terminal_statuses).
+                self._set_status_locked(peer_id, PAIRING_STATUS_EXPIRED)
+                logger.info("Pairing request for %s expired before confirmation", peer_id)
+                return False
+
+            # Sliding window rate limit: drop attempts older than the window
+            attempts = self._pairing_attempts.get(peer_id, [])
+            attempts = [t for t in attempts if now - t < PAIRING_ATTEMPT_WINDOW]
+            if len(attempts) >= MAX_PAIRING_ATTEMPTS:
+                logger.warning("Rate limit hit for pairing with %s", peer_id)
+                self._pairing_attempts[peer_id] = attempts
+                return False
+
+            attempts.append(now)
+            self._pairing_attempts[peer_id] = attempts
+
+            if hmac.compare_digest(
+                str(expected or "").encode("utf-8"), str(code or "").encode("utf-8")
+            ):
+                self._pairing_attempts.pop(peer_id, None)
+                # Two-sided confirmation: keep the pending entry so the UI can
+                # show "waiting for the other device".  Only mark the peer as
+                # paired once BOTH sides have confirmed — a single-sided
+                # confirm must not persist trust that a later reject/expiry
+                # would leave behind as a half-completed pairing.
+                if self._pairing_status.get(peer_id) == PAIRING_STATUS_PEER_CONFIRMED:
+                    self._set_status_locked(peer_id, PAIRING_STATUS_PAIRED)
+                    self._pending_pairings.pop(peer_id, None)
+                    if peer_id in self._peers:
+                        self._peers[peer_id].paired = True
+                else:
+                    self._set_status_locked(peer_id, PAIRING_STATUS_CONFIRMED_WAITING)
+                logger.info("Pairing confirmed for %s", peer_id)
+                return True
+            logger.debug("Pairing code mismatch for %s (attempt %d)", peer_id, len(attempts))
+            return False
+
+    def reject_pairing(self, peer_id: str):
+        with self._lock:
+            self._pending_pairings.pop(peer_id, None)
+            self._set_status_locked(peer_id, PAIRING_STATUS_CANCELLED)
+
+    def discard_pending_pairing(self, peer_id: str):
+        """Drop a pending pairing for *peer_id* entirely (no status change).
+
+        Used when a connection that auto-generated a shared code turned out to
+        be a consent-gated chat connection — chatting with an unpaired device
+        must not surface as a pairing request.  No-op when nothing is pending.
+
+        Nothing here is an *answer* to the request, so no lifecycle status is
+        recorded and no terminal is queued: a chat invite must not make the
+        other front end draw "cancelled" over a pairing nobody rejected.
+        """
+        with self._lock:
+            self._pending_pairings.pop(peer_id, None)
+            self._pairing_attempts.pop(peer_id, None)
+            self._clear_status_locked(peer_id)
+
+    def unpair_peer(self, peer_id: str):
+        """Mark a paired peer as unpaired without removing it."""
+        with self._lock:
+            peer = self._peers.get(peer_id)
+            if peer:
+                peer.paired = False
+                logger.info("Peer unpaired: %s (%s)", peer.device_name, peer_id)
+            self._set_status_locked(peer_id, PAIRING_STATUS_CANCELLED)
+
+    def remove_peer(self, peer_id: str):
+        """Remove a peer entirely from both known and pending lists."""
+        with self._lock:
+            self._peers.pop(peer_id, None)
+            self._pending_pairings.pop(peer_id, None)
+            self._pairing_attempts.pop(peer_id, None)
+            self._clear_status_locked(peer_id)
+
+    def restore_peer(self, peer_id: str, device_name: str, paired: bool = True):
+        """Re-add a peer restored from the removed-devices archive.
+
+        The archived config entry carries the pinned key and last address; the
+        identity's certificate/fingerprint are re-pinned on the next handshake,
+        so they start empty here.
+        """
+        with self._lock:
+            existing = self._peers.get(peer_id)
+            if existing is not None:
+                existing.device_name = device_name
+                existing.paired = paired
+                return
+            self._peers[peer_id] = PeerIdentity(
+                device_id=peer_id,
+                device_name=device_name,
+                certificate_pem="",
+                paired=paired,
+                fingerprint="",
+            )
+
+    def get_pairing_status(self, peer_id: str) -> str:
+        """Return the transient pairing lifecycle status for a peer.
+
+        A peer this manager has never run a pairing for has no lifecycle, and
+        that answers ``PAIRING_STATUS_NONE`` — not ``pending``.  The default used
+        to be ``pending``, which every reader took at face value: a device merely
+        discovered on the LAN was reported as mid-pairing, so the devices page
+        drew a confirm/reject card for it (with the confirm disabled, since no
+        request existed to carry a code) and the tray listed it under pairing.
+        Every status below is recorded by a real pairing and only cleared when one
+        ends, so reading one back means a real handshake is in flight.
+        """
+        with self._lock:
+            return self._pairing_status.get(peer_id, PAIRING_STATUS_NONE)
+
+    def mark_peer_confirmed(self, peer_id: str) -> str:
+        """Peer sent ``pairing_confirm``. Returns the new status.
+
+        If we already confirmed locally (``confirmed_waiting``) this completes
+        the two-sided handshake → ``paired``.  If we were still ``pending`` it
+        becomes ``peer_confirmed`` so the UI can prompt the user to confirm.
+
+        A confirmation with **no request behind it** is a frame that answers
+        nothing here.  The old code defaulted the status to ``pending`` and wrote
+        ``peer_confirmed`` anyway, which put a "the other device confirmed — now
+        confirm the code" row on screen for a peer with no code to confirm (the
+        row's confirm button is only usable when a pending entry carries a code).
+        The request may only be completed or answered where there is a request;
+        a late delivery of a confirmation for one that already ended is a no-op
+        and returns whatever status the peer has (usually the empty one).
+        """
+        with self._lock:
+            current = self._pairing_status.get(peer_id, PAIRING_STATUS_NONE)
+            if current == PAIRING_STATUS_PAIRED:
+                # Duplicate / late pairing_confirm (reconnect storms can
+                # re-deliver it): the handshake already completed — keep the
+                # paired state instead of regressing to peer_confirmed and
+                # making the UI prompt the user all over again.
+                return current
+            if current in PAIRING_STATUS_DEAD:
+                return current
+            if peer_id not in self._pending_pairings:
+                # Nothing this frame can be answering: do not invent a prompt.
+                return current
+            if current == PAIRING_STATUS_CONFIRMED_WAITING:
+                self._set_status_locked(peer_id, PAIRING_STATUS_PAIRED)
+                self._pending_pairings.pop(peer_id, None)
+                if peer_id in self._peers:
+                    self._peers[peer_id].paired = True
+                return PAIRING_STATUS_PAIRED
+            # peer confirmed first, while the request is still open
+            self._set_status_locked(peer_id, PAIRING_STATUS_PEER_CONFIRMED)
+            return PAIRING_STATUS_PEER_CONFIRMED
+
+    def mark_peer_rejected(self, peer_id: str) -> None:
+        """Peer sent ``pairing_reject`` — the pairing is cancelled."""
+        with self._lock:
+            self._pending_pairings.pop(peer_id, None)
+            self._set_status_locked(peer_id, PAIRING_STATUS_CANCELLED)
+            # Roll back a half-completed (single-sided) confirm so a rejected
+            # pairing never lingers as a trusted "paired" peer.
+            peer = self._peers.get(peer_id)
+            if peer is not None:
+                peer.paired = False
+
+    def mark_peer_unpaired(self, peer_id: str) -> None:
+        """Peer sent ``pairing_unpair`` (post-pairing) — we are no longer paired."""
+        with self._lock:
+            peer = self._peers.get(peer_id)
+            if peer:
+                peer.paired = False
+            self._pending_pairings.pop(peer_id, None)
+            self._set_status_locked(peer_id, PAIRING_STATUS_CANCELLED)
+
+    def get_pending_pairings(self) -> list[tuple[str, str, str, str]]:
+        """Returns list of (peer_id, code, peer_name, status) for unresolved pairings.
+
+        Entries older than ``PAIRING_TIMEOUT`` are dropped (expired).  A
+        locally-confirmed peer stays listed with status ``confirmed_waiting``
+        until the peer confirms or the request expires.
+        """
+        with self._lock:
+            now = time.time()
+            result = []
+            expired = []
+            for pid, (code, ts) in self._pending_pairings.items():
+                if now - ts > PAIRING_TIMEOUT:
+                    expired.append(pid)
+                    continue
+                peer = self._peers.get(pid)
+                name = peer.device_name if peer else pid[:12]
+                status = self._pairing_status.get(pid, PAIRING_STATUS_PENDING)
+                result.append((pid, code, name, status))
+            for pid in expired:
+                self._pending_pairings.pop(pid, None)
+                self._set_status_locked(pid, PAIRING_STATUS_EXPIRED)
+                # Roll back a half-completed single-sided confirm on expiry,
+                # matching mark_peer_rejected.
+                peer = self._peers.get(pid)
+                if peer is not None and peer.paired:
+                    peer.paired = False
+                    # In-memory only: this manager owns no config. Record it so
+                    # the owner can persist the rollback — otherwise a restart
+                    # resurrects the half-confirmed peer as fully paired.
+                    self._expiry_rollbacks.append(pid)
+            return result
+
+    def drain_expiry_rollbacks(self) -> list[str]:
+        """Peers un-paired by a pending-request expiry since the last call.
+
+        ``get_pending_pairings`` performs the rollback in memory; the owner
+        drains this list and mirrors it into persistent config.  Draining makes
+        the report one-shot, so a caller polling on every device refresh saves
+        only when something actually changed.
+        """
+        with self._lock:
+            drained = self._expiry_rollbacks
+            self._expiry_rollbacks = []
+            return drained
+
+    def get_paired_peers(self) -> list[PeerIdentity]:
+        with self._lock:
+            return [p for p in self._peers.values() if p.paired]
+
+    def get_known_peers(self) -> list[PeerIdentity]:
+        with self._lock:
+            return list(self._peers.values())
+
+    def _create_identity(self) -> DeviceIdentity:
+        logger.info("Generating new Ed25519 device identity")
+        private_key = ed25519.Ed25519PrivateKey.generate()
+
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COMMON_NAME, self._device_id),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ClipSync"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, self._device_name),
+            ]
+        )
+
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(secrets.randbits(64))
+            .not_valid_before(datetime.datetime.now(datetime.UTC))
+            .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=3650))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName(self._device_id)]),
+                critical=False,
+            )
+            .sign(private_key, None)  # Ed25519 uses its own hashing
+        )
+
+        cert_pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+
+        fp = fingerprint_pem(cert_pem)
+
+        self._identity = DeviceIdentity(
+            device_id=self._device_id,
+            device_name=self._device_name,
+            private_key=private_key,
+            certificate=certificate,
+            certificate_pem=cert_pem,
+            private_key_pem=key_pem,
+            fingerprint=fp,
+            fingerprint_short=fingerprint_short(cert_pem),
+        )
+        return self._identity
+
+
+class CertificateChangedError(Exception):
+    """Raised when a paired peer's certificate changes (potential MITM)."""
+
+    pass

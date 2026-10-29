@@ -1,0 +1,95 @@
+# Bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+
+# Frontend tooling (vitest/npm dev dependencies — not shipped)
+node_modules/
+
+# Logs
+*.log
+*.log.[123]
+
+# Config (contains private keys!)
+config.json
+*.pem
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Environment
+.env
+.claude/
+
+# Per-run /kai round handoff (context compression)
+.kai-round.md
+
+# Tauri generated/build files
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/binaries/*
+!desktop/src-tauri/binaries/.gitkeep
+# The macOS sidecar is a directory build staged here for the bundler; see
+# clipsync-sidecar.spec for why that platform stages a tree.
+desktop/src-tauri/sidecar/
+.tauri-dev-data/
+desktop/test-results/
+desktop/playwright-report/
+# Playwright's own bookkeeping, in whichever directory a run was started from.
+test-results/
+playwright-report/
+
+# Per-run migration probes, patch scripts and scratch CSS (not shipped)
+work/
+
+# Working notes: the migration record, the parity audits, the contract tables
+# and the redesign plan.  Kept on the maintainer's disk and deliberately not
+# published -- `docs/` is the GitHub Pages root, so anything under it is served,
+# and these belong to the process rather than to the product.
+notes/
+
+# The audit and performance reports.  Same reasoning as the notes above, and
+# more of it: they list the findings that are fixed *and* the ones that are still
+# open, with reachable paths written out.  This repository is public, so a
+# description of an unpatched defect in here is a description of an unpatched
+# defect to anyone reading.  They stay on the maintainer's disk.
+AUDIT-REPORT.md
+PERF-REPORT.md
+
+# The code-review rounds.  Same reasoning as the two above: each one lists the
+# findings that are fixed *and* the ones still open, with paths written out.
+CODE-REVIEW-*.md
+
+# A catch-all for the next one.  The four rules above name the files that
+# happen to exist today; a review saved under any other name would be
+# published before anyone looked.  `core.ignorecase` is true in this checkout,
+# so one casing is enough.  Deliberately no `*SECURITY*.md`: that would also
+# swallow a `SECURITY.md` vulnerability-disclosure policy, which is the one
+# file of this kind that *should* be public.
+*REVIEW*.md
+*AUDIT*.md
+
+# WorkBuddy's own project state (daily logs, memory).  Tool data, not source.
+.workbuddy/

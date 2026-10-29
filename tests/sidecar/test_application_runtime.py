@@ -1,0 +1,709 @@
+import logging
+import os
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from internal.adapters.sidecar.rpc import Dispatcher
+from internal.application.bootstrap import SidecarApplication
+from internal.application.errors import ApplicationError
+from internal.clipboard.format import ClipboardContent, ContentType
+from internal.config.config import Config, save
+from internal.infrastructure.security.device_identity import prepare_identity
+
+
+class Runtime:
+    def __init__(self, config, pairing, encryption, history, events, save_config):
+        self.config = config
+        self.pairing = pairing
+        self.encryption = encryption
+        self.history = history
+        self.events = events
+        self.save_config = save_config
+        self.sync = SimpleNamespace(reset_dedup_for_restore=Mock(), set_enabled=Mock())
+        self.sync_state = "not_started"
+        self.stop_result = True
+        self.applied_settings = []
+        self.applied_encryption = None
+        self.discovered = {}
+        self.device_actions = []
+        self.transfer_actions = []
+        self.transport = Mock()
+        self.transport.get_connected_peers.return_value = []
+        self.transport.get_resolved_hashes.return_value = {}
+        self.transport.get_reconnect_states.return_value = {}
+        self.chat = Mock()
+        self._chat_send_fn = Mock()
+        # The phone companion binds this one at construction rather than behind
+        # a lambda (see MobileCompanion.__init__), so a stub without it cannot
+        # be started at all — the companion is on by default now, which means
+        # every fixture that reaches lifecycle.start() constructs one.
+        self.chat_invite = Mock()
+
+    def start(self):
+        self.sync_state = "running" if self.config.sync_enabled else "paused"
+
+    def stop(self):
+        if self.stop_result:
+            self.sync_state = "stopped"
+        return self.stop_result
+
+    def devices(self):
+        return {"items": [{"id": "peer", "name": "Peer", "paired": False}]}
+
+    def apply_settings(self, updated, special=None):
+        """Mirror LanRuntime: the live engines read the already-mutated config."""
+        self.applied_settings.append(dict(updated))
+        if "sync_enabled" in updated:
+            self.sync.set_enabled(bool(self.config.sync_enabled))
+        if "device_name" in updated:
+            self.sync.device_name = self.config.device_name
+
+    def apply_encryption(self, encryption):
+        self.applied_encryption = encryption
+
+    def set_sync_enabled(self, enabled):
+        self.config.sync_enabled = enabled
+        self.sync_state = "running" if enabled else "paused"
+        self.save_config()
+        return {"enabled": enabled}
+
+    def send_url(self, device_id, url):
+        self.sent_url = (device_id, url)
+        return {"sent": True, "device_id": device_id}
+
+    def push_text(self, text):
+        self.pushed_text = text
+        return {"ok": True, "len": len(text), "sent": True}
+
+    def discovery_state(self):
+        return {"enabled": True, "visible": True}
+
+    def set_discovery_enabled(self, enabled):
+        return {"enabled": enabled, "visible": True}
+
+    def set_discovery_visible(self, enabled):
+        return {"enabled": True, "visible": enabled}
+
+    def set_update_sink(self, sink):
+        self.update_sink = sink
+
+    # ── web companion accessors (see MobileCompanion) ────────────────────
+    def discovered_peers(self):
+        return dict(self.discovered)
+
+    def resolved_hashes(self):
+        return {}
+
+    def reconnect_states(self):
+        return {}
+
+    def pending_pairings(self):
+        return []
+
+    def current_relay_broker(self):
+        return ""
+
+    def relay_state(self):
+        return "off"
+
+    def certs(self):
+        return {"devices": []}
+
+    def device_action(self, action, device_id, *args):
+        self.device_actions.append((action, device_id, args))
+        return True
+
+    def test_device(self, device_id):
+        return {"ok": True, "device_id": device_id}
+
+    def web_transfer_action(self, action, transfer_id):
+        self.transfer_actions.append((action, transfer_id))
+        return True
+
+    def transfer_lists(self):
+        return [], []
+
+    def speed_test_state(self):
+        return {}
+
+    def start_speed_test(self):
+        return True
+
+    def forward_file(self, path, device_id):
+        return True
+
+    def record_web_upload(self, file_name, file_size, saved_path):
+        return "web-upload"
+
+    def request_update_from_peers(self):
+        self.update_requests = getattr(self, "update_requests", 0) + 1
+
+
+@pytest.fixture
+def runtime_app(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    save(Config(encryption_enabled=False))
+    writer = SimpleNamespace(write=Mock(return_value=True))
+    app = SidecarApplication(clipboard_writer_factory=lambda: writer, runtime_factory=Runtime)
+    app.lifecycle.start()
+    yield app
+    if app.runtime is not None:
+        app.runtime.stop_result = True
+    assert app.lifecycle.stop()
+
+
+def test_runtime_exposes_live_status_and_receives_shared_services(runtime_app):
+    app = runtime_app
+    assert app.status()["sync_state"] == "running"
+    assert "sync.set_enabled" in app.status()["capabilities"]
+    assert "devices.forget" in app.status()["capabilities"]
+    assert "history.clear" in app.status()["capabilities"]
+    assert "history.text" in app.status()["capabilities"]
+    assert "history.open_link" in app.status()["capabilities"]
+    assert "favorites.batch_add" in app.status()["capabilities"]
+    assert "favorites.export" in app.status()["capabilities"]
+    assert "url.send" in app.status()["capabilities"]
+    assert "transfers.cancel_all" in app.status()["capabilities"]
+    assert "clipboard.push" in app.status()["capabilities"]
+    assert "discovery.status" in app.status()["capabilities"]
+    assert app.runtime.history is app._repository
+    assert app.runtime.pairing is app.identity.pairing
+    assert app.devices()["items"][0]["id"] == "peer"
+    assert Dispatcher(app).call("sync.set_enabled", {"enabled": False}) == {"enabled": False}
+    assert app.status()["sync_state"] == "paused"
+    assert Dispatcher(app).call(
+        "url.send", {"device_id": "peer", "url": "https://example.com"}
+    ) == {"sent": True, "device_id": "peer"}
+    assert app.runtime.sent_url == ("peer", "https://example.com")
+    assert Dispatcher(app).call("clipboard.push", {"text": "hello"}) == {
+        "ok": True,
+        "len": 5,
+        "sent": True,
+    }
+    assert app.runtime.pushed_text == "hello"
+    assert Dispatcher(app).call("discovery.status", {}) == {"enabled": True, "visible": True}
+    assert Dispatcher(app).call("discovery.set_enabled", {"enabled": False}) == {
+        "enabled": False,
+        "visible": True,
+    }
+    assert Dispatcher(app).call("discovery.set_visible", {"enabled": False}) == {
+        "enabled": True,
+        "visible": False,
+    }
+
+
+def test_logs_tail_reads_the_shared_log_and_redacts_local_secrets(
+    runtime_app, monkeypatch, tmp_path
+):
+    from internal.config import config as config_module
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(config_module, "_log_dir", lambda: log_dir)
+    home = os.path.expanduser("~")
+    runtime_app.config.web_token = "tok-secret"
+    # Held in a name of its own to keep the two secrets it carries on one line.
+    error_line = (
+        "2026-09-16 09:13:01.000 [ERROR   ] SyncThread   t:3  "
+        f"opened {home}/secret tok-secret"
+    )
+    (log_dir / "clipsync.log").write_text(
+        "\n".join(
+            [f"line {i}" for i in range(300)]
+            + [
+                "2026-09-16 09:13:00.000 [WARNING ] SyncThread   t:2  relay frame dropped",
+                error_line,
+                "Traceback (most recent call last):",
+                "  ValueError: no address",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert "logs.tail" in runtime_app.status()["capabilities"]
+    result = Dispatcher(runtime_app).call("logs.tail", {"lines": 4})
+    assert result["logs"] == [
+        "2026-09-16 09:13:00.000 [WARNING ] SyncThread   t:2  relay frame dropped",
+        "2026-09-16 09:13:01.000 [ERROR   ] SyncThread   t:3  "
+        "opened [redacted]/secret [redacted]",
+        "Traceback (most recent call last):",
+        "  ValueError: no address",
+    ]
+    # The WARNING and the ERROR, plus the traceback lines that belong to the
+    # latter: they carry no level of their own and are only readable with it.
+    # The 300 unformatted lines above are not evidence of a failure.
+    assert result["problems"] == result["logs"]
+    assert len(Dispatcher(runtime_app).call("logs.tail", {})["logs"]) == 200
+    # The same four out of a two-hundred-line tail: the unformatted bulk around
+    # them is the running account, not a problem to read.
+    assert Dispatcher(runtime_app).call("logs.tail", {})["problems"] == result["problems"]
+
+
+def test_logs_export_copies_the_raw_log_to_the_host_chosen_path(
+    runtime_app, monkeypatch, tmp_path
+):
+    from internal.config import config as config_module
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(config_module, "_log_dir", lambda: log_dir)
+    (log_dir / "clipsync.log").write_text("raw token line\n", encoding="utf-8")
+    dest = tmp_path / "picked by the save dialog.log"
+    assert "logs.export" in runtime_app.status()["capabilities"]
+    assert Dispatcher(runtime_app).call("logs.export", {"dest": str(dest)}) == {
+        "ok": True,
+        "path": str(dest),
+        "bytes": (log_dir / "clipsync.log").stat().st_size,
+    }
+    # The export is the raw file: redaction is only for the viewer.
+    assert dest.read_text(encoding="utf-8") == "raw token line\n"
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("logs.export", {"dest": 5})
+    assert error.value.code == "VALIDATION_ERROR"
+    (log_dir / "clipsync.log").unlink()
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("logs.export", {"dest": str(dest)})
+    assert error.value.code == "LOG_NOT_FOUND"
+
+
+def test_companion_qr_encodes_the_token_url_and_reports_missing_states(
+    runtime_app, monkeypatch
+):
+    assert "companion.qr" in runtime_app.status()["capabilities"]
+    monkeypatch.setattr(
+        runtime_app, "companion_status",
+        lambda: {
+            "running": True,
+            "url": "http://10.0.0.2:8080/mobile.html",
+            "access_url": "http://10.0.0.2:8080/mobile.html?token=t%2B1",
+        },
+    )
+    result = Dispatcher(runtime_app).call("companion.qr", {})
+    assert result["url"] == "http://10.0.0.2:8080/mobile.html?token=t%2B1"
+    assert result["qr"].startswith("data:image/png;base64,")
+    monkeypatch.setattr(
+        runtime_app, "companion_status",
+        lambda: {"running": False, "url": None, "access_url": None},
+    )
+    assert Dispatcher(runtime_app).call("companion.qr", {}) == {
+        "ok": False, "error": "COMPANION_NOT_RUNNING", "url": None, "qr": None,
+    }
+    monkeypatch.setattr(
+        runtime_app, "companion_status",
+        lambda: {"running": True, "url": "http://10.0.0.2:8080/mobile.html",
+                 "access_url": "http://10.0.0.2:8080/mobile.html"},
+    )
+    monkeypatch.setattr(
+        "internal.application.bootstrap.png_data_url",
+        lambda _url: (_ for _ in ()).throw(RuntimeError("no qrcode")),
+    )
+    assert Dispatcher(runtime_app).call("companion.qr", {}) == {
+        "ok": False, "error": "QR_UNAVAILABLE",
+        "url": "http://10.0.0.2:8080/mobile.html", "qr": None,
+    }
+
+
+def test_about_links_open_from_a_closed_target_table(runtime_app, monkeypatch):
+    from internal.system import about
+
+    opened = []
+    monkeypatch.setattr(about.webbrowser, "open", opened.append)
+    assert "app.open_link" in runtime_app.status()["capabilities"]
+    assert Dispatcher(runtime_app).call("app.open_link", {"target": "homepage"}) == {
+        "ok": True,
+        "url": about.HOMEPAGE_URL,
+    }
+    assert opened == [about.HOMEPAGE_URL]
+    # Only the closed table: a URL the caller made up is not a target.
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("app.open_link", {"target": "https://evil.example.com"})
+    assert error.value.code == "VALIDATION_ERROR"
+
+
+def test_diagnostics_report_comes_from_the_shared_builder(runtime_app):
+    app = runtime_app
+    assert "diagnostics.report" in app.status()["capabilities"]
+    assert "diagnostics.request" in app.status()["capabilities"]
+    report = Dispatcher(app).call("diagnostics.report", {})
+    assert report["v2"] is True
+    assert report["summary"] in ("ok", "warn", "fail")
+    assert [check["id"] for check in report["checks"]][:2] == ["server_port", "discovery"]
+    # Four groups, all answering "why can this machine not sync?".  The AI-config and chat
+    # groups were removed: they were counts of other features' internal state, not faults, and
+    # a reader who cannot sync was being asked to interpret them.
+    assert sorted(report["groups"]) == [
+        "filesystem", "internet", "network", "system",
+    ]
+    assert report["version"]
+    assert report["web_port"] == app.config.web_port
+    # The report's keys live in the web panel's catalog, so the sidecar resolves
+    # them for this client.
+    system = report["groups"]["system"]
+    assert system["label_text"] and system["items"][0]["label_text"]
+    assert system["items"][0]["detail_text"]
+
+
+def test_diagnostics_request_rejects_invalid_actions(runtime_app):
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("diagnostics.request", {"action": "unknown"})
+    assert error.value.code == "VALIDATION_ERROR"
+
+
+def test_update_download_still_starts_when_the_peer_request_fails(runtime_app, monkeypatch):
+    app = runtime_app
+    monkeypatch.setattr(
+        app.updates, "start_download",
+        lambda: {"ok": True, "started": True, "error": None},
+    )
+
+    def boom():
+        raise RuntimeError("transport is down")
+
+    monkeypatch.setattr(app.runtime, "request_update_from_peers", boom)
+    assert Dispatcher(app).call("update.download", {}) == {
+        "ok": True, "started": True, "error": None,
+    }
+
+
+def test_open_data_folder_reveals_the_app_folder(runtime_app, monkeypatch, tmp_path):
+    from internal.config import config as config_module
+    from internal.system import file_manager
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(config_module, "_config_dir", lambda: data_dir)
+    calls = []
+    monkeypatch.setattr(
+        file_manager, "reveal_folder", lambda path: (calls.append(path), (True, path))[1]
+    )
+    assert "data.open_folder" in runtime_app.status()["capabilities"]
+    assert Dispatcher(runtime_app).call("data.open_folder", {"which": "backups"}) == {
+        "ok": True,
+        "folder": str(data_dir / "backups"),
+    }
+    assert calls == [str(data_dir / "backups")]
+    assert (data_dir / "backups").is_dir()
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("data.open_folder", {"which": "elsewhere"})
+    assert error.value.code == "VALIDATION_ERROR"
+
+
+def test_share_file_to_phone_stages_a_copy_the_phone_can_download(runtime_app, tmp_path):
+    """The legacy 发送文件到手机 button, behind an RPC the window can reach.
+
+    The phone's Files tab lists the share directory and downloads from it, so
+    the file has to actually land there: copied rather than moved (the user's
+    original stays put), and named the way an upload's is, so a name that would
+    be illegal on the phone's filesystem cannot arrive through this route.
+    """
+    from internal.web.server import _get_upload_dir
+
+    share = tmp_path / "share"
+    runtime_app.config.file_receive_dir = str(share)
+    # Guard the test's own premise: this is the directory the companion lists.
+    assert _get_upload_dir(runtime_app.config) == str(share)
+
+    source = tmp_path / "notes.txt"
+    source.write_text("hello", encoding="utf-8")
+    assert "companion.share_file" in runtime_app.status()["capabilities"]
+    assert Dispatcher(runtime_app).call("companion.share_file", {"path": str(source)}) == {
+        "ok": True,
+        "name": "notes.txt",
+        "path": str(share / "notes.txt"),
+        "size": 5,
+    }
+    assert source.read_text(encoding="utf-8") == "hello", "the source is copied, not moved"
+    assert (share / "notes.txt").read_text(encoding="utf-8") == "hello"
+
+    # A second share of the same name is suffixed the way the legacy loop
+    # suffixed it rather than replacing the file already staged.
+    assert Dispatcher(runtime_app).call("companion.share_file", {"path": str(source)})["name"] == (
+        "notes (1).txt"
+    )
+    assert (share / "notes.txt").is_file() and (share / "notes (1).txt").is_file()
+
+    # Only a regular file.  A directory would make the copy fail after the name
+    # had been claimed, which is why it is refused before anything is touched.
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("companion.share_file", {"path": str(tmp_path)})
+    assert error.value.code == "NOT_FOUND"
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call("companion.share_file", {"path": str(tmp_path / "gone.txt")})
+    assert error.value.code == "NOT_FOUND"
+    assert sorted(item.name for item in share.iterdir()) == ["notes (1).txt", "notes.txt"]
+
+
+def test_sidecar_never_registers_python_as_desktop_autostart(runtime_app, monkeypatch):
+    from internal.platform import autostart
+
+    enable = Mock()
+    disable = Mock()
+    monkeypatch.setattr(autostart, "enable_autostart", enable)
+    monkeypatch.setattr(autostart, "disable_autostart", disable)
+    runtime_app.runtime.apply_settings = Mock()
+    for enabled in (True, False):
+        runtime_app._on_settings_change({"auto_start": enabled}, {})
+    enable.assert_not_called()
+    disable.assert_not_called()
+
+
+def test_a_stop_that_misses_its_budget_is_retried_before_giving_up(tmp_path, monkeypatch):
+    """`stop() is False` means "retain and retry", so something has to retry.
+
+    A drain that misses its budget is usually a straggler landing a moment
+    later rather than a subsystem that is wedged: the second attempt starts on
+    a cleanup that has had a whole budget more time to finish.  Giving up on
+    the first miss is how a clean exit became "the sidecar did not release its
+    runtime ownership".
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    attempts = []
+
+    class SlowDrain:
+        def stop(self):
+            attempts.append(True)
+            return len(attempts) > 1
+
+    app = SidecarApplication()
+    app.runtime = SlowDrain()
+    app.internet_pairing = object()
+    assert app._stop_runtime() is True
+    assert len(attempts) == 2
+    assert app.runtime is None
+    assert app.internet_pairing is None
+
+
+def test_a_runtime_that_never_releases_ownership_still_reports_it(
+    tmp_path, monkeypatch, caplog
+):
+    """The retry is bounded, and the refusal names itself in the log.
+
+    Ownership is what the caller keeps on False -- history, identity and the
+    data lock all stay unreleased -- so a wedged runtime must still refuse
+    rather than let the process exit as if it had cleaned up.
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    attempts = []
+
+    class Wedged:
+        def stop(self):
+            attempts.append(True)
+            return False
+
+    app = SidecarApplication()
+    app.runtime = Wedged()
+    # The retry is recorded at DEBUG and the failure is what the caller acts on.  It used to be
+    # a WARNING per attempt, which put a healthy teardown -- two misses rescued by the second
+    # attempt, measured on macOS with two live peers -- in the same channel as the one line that
+    # means the runtime really did not let go.
+    with caplog.at_level(logging.DEBUG, logger="internal.application.bootstrap"):
+        assert app._stop_runtime() is False
+    assert len(attempts) == SidecarApplication.RUNTIME_STOP_ATTEMPTS
+    assert app.runtime is not None
+    assert "did not release ownership" in caplog.text
+    # And nothing at WARNING, so a genuine failure is the only thing that shows up as one.
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+def test_failed_runtime_stop_keeps_history_identity_and_data_lock(runtime_app):
+    app = runtime_app
+    app.runtime.stop_result = False
+    assert not app.lifecycle.stop()
+    assert app.history is not None
+    assert app.identity is not None
+    assert app.history.list()["total"] == 0
+    other = SidecarApplication()
+    with pytest.raises(ApplicationError) as error:
+        other.lifecycle.start()
+    assert error.value.code == "DATA_IN_USE"
+    app.runtime.stop_result = True
+    assert app.lifecycle.stop()
+    reopened = SidecarApplication()
+    reopened.lifecycle.start()
+    assert reopened.lifecycle.stop()
+
+
+def test_opening_a_link_goes_through_the_apps_own_opener(runtime_app, monkeypatch):
+    # The use case is handed an opener rather than importing one, so this is the
+    # wiring that decides whether "open in browser" works in a real process —
+    # and the app's opener is the one with the scheme rules in it.
+    app = runtime_app
+    app._repository.add(ClipboardContent(types={ContentType.TEXT: b"https://example.com"}))
+    opened = []
+    monkeypatch.setattr("internal.system.about.webbrowser.open", opened.append)
+    item = app.history.list()["items"][0]
+    assert Dispatcher(app).call("history.open_link", {"entry_id": item["id"]}) == {
+        "opened": True,
+        "url": "https://example.com",
+    }
+    assert opened == ["https://example.com"]
+
+
+@pytest.mark.parametrize(
+    "method,params,member",
+    [
+        ("pairing.start", {"device_id": "peer"}, "start_pairing"),
+        ("pairing.confirm", {"device_id": "peer", "code": "12345678"}, "confirm_pairing"),
+        ("pairing.reject", {"device_id": "peer"}, "reject_pairing"),
+        ("pairing.unpair", {"device_id": "peer"}, "unpair_device"),
+    ],
+)
+def test_pairing_commands_call_only_the_closed_runtime_surface(runtime_app, method, params, member):
+    method_mock = Mock(return_value={"accepted": True})
+    setattr(runtime_app.runtime, member, method_mock)
+    assert Dispatcher(runtime_app).call(method, params) == {"accepted": True}
+    method_mock.assert_called_once_with(**params)
+
+
+@pytest.mark.parametrize(
+    "method,member",
+    [
+        ("devices.connect", "connect_device"),
+        ("devices.disconnect", "disconnect_device"),
+        ("devices.forget", "forget_device"),
+        ("devices.restore", "restore_device"),
+        ("devices.purge", "purge_device"),
+        ("devices.test", "test_device"),
+        ("devices.retrust", "retrust_device"),
+        ("devices.offer_update", "offer_device_update"),
+        ("devices.fetch_update", "fetch_device_update"),
+    ],
+)
+def test_device_commands_call_only_the_closed_runtime_surface(runtime_app, method, member):
+    method_mock = Mock(return_value={"ok": True})
+    setattr(runtime_app.runtime, member, method_mock)
+    assert Dispatcher(runtime_app).call(method, {"device_id": "peer"}) == {"ok": True}
+    method_mock.assert_called_once_with("peer")
+
+
+def test_pairing_rejects_non_ascii_or_invalid_codes(runtime_app):
+    # Arabic-Indic digits satisfy str.isdigit() but are not the ASCII code the
+    # two devices compare, so they must be refused rather than accepted as
+    # "eight digits".
+    with pytest.raises(ApplicationError) as error:
+        Dispatcher(runtime_app).call(
+            "pairing.confirm", {"device_id": "peer", "code": "\u0661" * 8}
+        )
+    assert error.value.code == "VALIDATION_ERROR"
+
+
+def test_a_lowered_history_limit_is_applied_when_it_is_saved(runtime_app):
+    # The limit is otherwise enforced as a side effect of the next capture, so
+    # a reader who lowered it in the settings was told 已保存 and then left
+    # looking at the list the old number produced.
+    app = runtime_app
+    for index in range(20):
+        app._repository.add(
+            ClipboardContent(types={ContentType.TEXT: f"note {index}".encode()})
+        )
+    assert len(app._repository.get_all()) == 20
+    Dispatcher(app).call("settings.update", {"history_max_entries": 10})
+    assert len(app._repository.get_all()) == 10
+    assert Dispatcher(app).call("settings.get", {})["settings"]["history_max_entries"] == 10
+
+
+def test_password_verification_precedes_runtime_creation(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    identity = prepare_identity(Config(), password="unlock-test")
+    save(identity.config, identity.encryption)
+    factory = Mock(side_effect=Runtime)
+    app = SidecarApplication(runtime_factory=factory)
+    app.lifecycle.start()
+    try:
+        factory.assert_not_called()
+        with pytest.raises(ApplicationError):
+            app.unlock("wrong-password")
+        factory.assert_not_called()
+        assert app.unlock("unlock-test") == {"unlocked": True}
+        factory.assert_called_once()
+        assert app.runtime.encryption is app.identity.encryption
+        assert app.status()["sync_state"] == "running"
+    finally:
+        assert app.lifecycle.stop()
+
+
+def test_partial_runtime_start_is_cleaned_before_identity_is_released(tmp_path, monkeypatch):
+    """A runtime that fails to start is still stopped before its data is released.
+
+    The lifecycle registers this resource before calling its start (a resource
+    that raises may already hold a handle) and stop() walks what it owns
+    backwards, so the runtime is released ahead of the history and the lock
+    file.  The start's exception still reaches the caller — that is how a
+    launch that cannot bring the LAN up says so.
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    created = []
+
+    class FailingRuntime(Runtime):
+        def start(self):
+            created.append(self)
+            self.sync_state = "running"
+            raise ApplicationError("LAN_START_FAILED", "Could not start LAN services")
+
+    app = SidecarApplication(runtime_factory=FailingRuntime)
+    with pytest.raises(ApplicationError):
+        app.lifecycle.start()
+    assert created[0].sync_state == "stopped"
+    assert app.runtime is None
+    assert app.identity is None
+    assert app.history is None
+    assert not (tmp_path / ".lock").exists()
+
+
+def test_ai_profile_save_failure_restores_values_without_broadcast(runtime_app, monkeypatch):
+    manager = Mock()
+    runtime_app.runtime.ai_config = manager
+    previous = (list(runtime_app.config.ai_config_tools),
+                list(runtime_app.config.ai_config_custom_paths))
+    monkeypatch.setattr("internal.application.bootstrap.save",
+                        Mock(side_effect=OSError("disk full")))
+    with pytest.raises(ApplicationError) as caught:
+        runtime_app.update_ai_profiles(["codex"], ["~/fixture"])
+    assert caught.value.code == "SAVE_FAILED"
+    assert (runtime_app.config.ai_config_tools,
+            runtime_app.config.ai_config_custom_paths) == previous
+    manager.on_watch_list_changed.assert_not_called()
+
+
+def test_the_no_password_warning_is_said_once_per_process(caplog):
+    """One line, where the user's log had 57.
+
+    `EncryptionManager.__init__` emitted it whenever the password was empty, and a start builds
+    several managers -- bootstrap and device identity, twice -- so one fact about the machine was
+    written once per object.  75 identical lines across two runs is a warning nobody reads, which
+    is worse than no warning: it also buries the lines that differ.
+    """
+    import logging
+
+    from internal.security import encryption as encryption_module
+
+    fingerprint = "56:71:1a:12:d4:f0:00:11:22:33:44:55:66:77:88:99"
+    # The flag is module state, so this test owns putting it back.
+    original = encryption_module._no_password_warned
+    encryption_module._no_password_warned = False
+    try:
+        # INFO, so the per-construction lines are captured as well -- the assertion below is
+        # that silencing the repeated warning did not silence the record of the objects.
+        with caplog.at_level(logging.INFO, logger="internal.security.encryption"):
+            for _ in range(5):
+                encryption_module.EncryptionManager(fingerprint, "")
+        said = [r for r in caplog.records if "obfuscation only" in r.getMessage()]
+        assert len(said) == 1, f"said {len(said)} times for five managers"
+        # Each construction still records itself, so nothing about the objects is lost.
+        initialized = [r for r in caplog.records if "initialized" in r.getMessage()]
+        assert len(initialized) == 5, f"expected one initialized line each, got {len(initialized)}"
+    finally:
+        encryption_module._no_password_warned = original
+
+
+def test_a_password_set_says_nothing(caplog):
+    """The warning is about the no-password state, and only that state."""
+    import logging
+
+    from internal.security import encryption as encryption_module
+
+    fingerprint = "56:71:1a:12:d4:f0:00:11:22:33:44:55:66:77:88:99"
+    with caplog.at_level(logging.WARNING, logger="internal.security.encryption"):
+        encryption_module.EncryptionManager(fingerprint, "hunter2")
+    assert [r for r in caplog.records if "obfuscation only" in r.getMessage()] == []
