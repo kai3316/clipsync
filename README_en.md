@@ -69,13 +69,15 @@ If the computers are on different networks, turn on internet sync on both and fo
 
 Copy text, pictures, links or files and paste them on another computer. Search and filter the history, pin it, save it as a favourite or delete it. Copying back and forth between two machines does not create duplicates.
 
-Press `Ctrl+Shift+V` for the **quick-paste window**: type to search, pick with ↑/↓, press Enter to paste straight into the current app, `Shift+Enter` pastes plain text, `Esc` closes. `Ctrl+1`…`Ctrl+9` paste the 1st–9th recent clip directly; turn off auto-paste in Settings → Paste & Recording if you only want the clipboard filled.
+Press `Ctrl+Shift+V` for the **paste panel**: type to search, pick with ↑/↓, press Enter to paste straight into the current app, `Shift+Enter` pastes plain text, `Esc` closes. Global hotkeys are on by default; to paste the Nth recent clip with one key, bind `paste_1…9` in Settings → Global hotkeys (they are unbound by default so Ctrl+1…9 keep switching tabs in your browser and editor). Turn off auto-paste in Settings → Paste & Recording if you only want the clipboard filled.
 
 Settings → Paste & Recording also lets you: skip clips marked "do not record" by password managers (1Password, Bitwarden, …); exclude source applications by substring; skip whatever was already on the clipboard at launch; and cap a single non-file clip (8 MB by default). History can be imported and exported as JSON/CSV/Markdown.
 
+Settings → Sync → Content types turns the sending of Text / Links / HTML / Rich text / Images / Files on or off individually: a disabled type stays in the local history untouched, it is just not sent to other devices, and receiving is unaffected.
+
 ### Keyboard shortcuts
 
-`Ctrl+Shift+V` quick-paste window; `Ctrl+1`…`Ctrl+9` paste the Nth recent clip; `Ctrl+Alt+V` copy the latest clip as plain text; `Ctrl+Shift+Space` show the main window; `Ctrl+Shift+M` pause/resume sync. All of them can be rebound in Settings → General → Global hotkeys.
+Defaults: `Ctrl+Shift+V` paste panel, `Ctrl+Alt+V` copy the latest clip as plain text, `Ctrl+Shift+Space` show the main window, `Ctrl+Shift+M` pause/resume sync; `Ctrl+1`…`Ctrl+9` are unbound by default and can be bound in Settings → Global hotkeys. macOS uses `Cmd` where Windows/Linux use `Ctrl`, and every chord is rebindable.
 
 ### Library
 
@@ -85,7 +87,7 @@ Keep the things you reuse in one place: groups, editing, ordering and Markdown e
 
 Drop files or folders on the window, choose a computer and send. No cloud drive, and computers on the same network do not need to be connected first.
 
-Copying a file on another computer in the same network does not download it up front: the file is fetched on demand only when you paste it — from the quick-paste window or the history — with a progress panel you can cancel. The single-file limit is adjustable in Settings → Files (2 GB by default, protocol ceiling about 5.4 GB), a confirmation appears above the threshold (512 MB by default), and relay fetches over the internet are capped at 50 MB by default. When the fetch completes the file lands in the receive folder and is copied to the clipboard.
+Copying a file on another computer in the same network does not download it up front: the file is fetched on demand only when you paste it — from the paste panel or the history — with a progress panel you can cancel. The single-file limit is adjustable in Settings → Files (2 GB by default, protocol ceiling about 5.4 GB), a confirmation appears above the threshold (512 MB by default), and relay fetches over the internet are capped at 50 MB by default. When the fetch completes the file lands in the receive folder and is copied to the clipboard.
 
 ### Nearby chat
 
@@ -128,12 +130,12 @@ ClipSync checks for a new version in Settings → Software update and asks befor
 </details>
 
 <details>
-<summary>Why does Ctrl+1 paste immediately?</summary>
-<p>Since 1.3 auto-paste is on by default: a shortcut puts the clip on the clipboard and pastes it into the current app. Turn off "Paste into the current app" in Settings → Paste & Recording if you only want the copy.</p>
+<summary>Why does Ctrl+1 do nothing?</summary>
+<p>Since 1.3 the paste panel is on Ctrl+Shift+V (Cmd+Shift+V on macOS), but `Ctrl+1`…`Ctrl+9` are deliberately unbound: those chords switch tabs in browsers, editors and terminals. To paste the Nth recent clip with one key, bind it in Settings → Global hotkeys; whether it also pastes into the focused app is decided by "Paste into the current app" in Settings → Paste & Recording.</p>
 </details>
 
 <details>
-<summary>How do I use the quick-paste window?</summary>
+<summary>How do I use the paste panel?</summary>
 <p>Press Ctrl+Shift+V (rebindable in Settings → Global hotkeys), type to search, pick with ↑/↓ and press Enter to paste; Shift+Enter pastes plain text, Esc or a click elsewhere closes it.</p>
 </details>
 

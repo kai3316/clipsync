@@ -794,9 +794,10 @@ defineExpose({ focusSearch, search, releasePinned, clearSearchIfFocused, pinKbdR
     <!-- The overlay's door from the page that holds the rows.  Labelled rather
          than a bare glyph, because it opens a window rather than acting on this
          list, and there is no icon in the window that already means "paste
-         elsewhere". -->
-    <button class="icon-button icon-button--labelled" :aria-label="t('快速粘贴')" :title="t('快速粘贴')"
-      :disabled="!ready || quickPasteBusy" @click="openQuickPasteWindow"><ClipboardPaste :size="17" /><span class="icon-button-label">{{ t("快速粘贴") }}</span></button>
+         elsewhere".  The chord is in the tooltip, not on the button: this bar is
+         already dense, and the overview carries the visible hint. -->
+    <button class="icon-button icon-button--labelled" :aria-label="t('粘贴面板')" :title="t('粘贴面板（Ctrl+Shift+V）')"
+      :disabled="!ready || quickPasteBusy" @click="openQuickPasteWindow"><ClipboardPaste :size="17" /><span class="icon-button-label">{{ t("粘贴面板") }}</span></button>
   </div>
   <div v-if="state.hasHistory" class="history-filters" role="group" :aria-label="t('按类型筛选历史记录')">
     <!-- The same line as the search box above: a filter is a read, and

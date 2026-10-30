@@ -14,6 +14,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
+from dataclasses import replace
 
 from internal.clipboard.format import HISTORY_ONLY_TYPES, ContentType, SyncMessage
 from internal.clipboard.history_db import ClipboardHistoryDB
@@ -45,6 +46,21 @@ REMOTE_RATE_MAX = 5
 # The sender's delivery budget republishes an unacked frame well inside this,
 # so the redelivery applies the clipboard without stacking a second row.
 HISTORY_ONLY_TTL = 300.0
+
+# Which per-type sync switch governs which content type.  Two facts are in this
+# table rather than in the filter: an image is one switch whether it is a bitmap
+# or a vector (IMAGE_PNG / IMAGE_EMF), and a file list is one switch for every
+# platform's payload.  FILE_REMOTE is deliberately absent — it is a pointer that
+# never leaves the machine it was captured on (see HISTORY_ONLY_TYPES).
+_SYNC_TYPE_SWITCHES: tuple[tuple[ContentType, str], ...] = (
+    (ContentType.TEXT, "sync_text"),
+    (ContentType.URL, "sync_url"),
+    (ContentType.HTML, "sync_html"),
+    (ContentType.RTF, "sync_rtf"),
+    (ContentType.IMAGE_PNG, "sync_image"),
+    (ContentType.IMAGE_EMF, "sync_image"),
+    (ContentType.FILE, "sync_file"),
+)
 
 
 class SyncManager:
@@ -257,6 +273,32 @@ class SyncManager:
             len(data)
             for fmt, data in content.types.items()
             if fmt not in (ContentType.FILE, ContentType.FILE_REMOTE)
+        )
+
+    def _content_for_sync(self, content):
+        """*content* reduced to the types the user allows to leave this machine.
+
+        The history row is written from the whole capture before this runs, so
+        switching a type off never costs the local record of it; only the
+        outbound message is filtered, and receiving is untouched.  Each switch
+        is read live, like the recording rules above.
+
+        With every switch on — the default — nothing is disabled and the object
+        comes back unchanged, so the wire and every existing behaviour are
+        exactly what they were before the switches existed.  A ``FILE`` that is
+        dropped leaves no offer either: the encoder builds offers out of that
+        payload and cannot see it any more.
+        """
+        disabled = {
+            fmt
+            for fmt, setting in _SYNC_TYPE_SWITCHES
+            if not self._recording_setting(setting, True)
+        }
+        if not disabled.intersection(content.types):
+            return content
+        return replace(
+            content,
+            types={fmt: data for fmt, data in content.types.items() if fmt not in disabled},
         )
 
     def set_on_write_error(self, callback: Callable[[], None] | None):
@@ -937,8 +979,25 @@ class SyncManager:
 
         self._notify_history_change()
 
+        # Per-type sync switches: the row above keeps the whole capture, and only
+        # what the user allows leaves the machine.  Read live, and a no-op when
+        # every switch is on (the default).
+        outgoing = self._content_for_sync(content)
+        if outgoing.is_empty():
+            logger.debug(
+                "Clipboard capture holds only content types switched off for sync "
+                "— recorded in history, not broadcast"
+            )
+            return
+        if len(outgoing.types) != len(content.types):
+            logger.debug(
+                "Sync type switches dropped %d of %d format(s) from the outgoing clip",
+                len(content.types) - len(outgoing.types),
+                len(content.types),
+            )
+
         msg = SyncMessage(
-            content=content,
+            content=outgoing,
             msg_id=uuid.uuid4().hex,
             source_device=self._device_id,
         )
@@ -952,7 +1011,7 @@ class SyncManager:
         # clip carrying nothing the encoder has a name for.
         from internal.protocol.codec import has_syncable_types
 
-        if not has_syncable_types(content):
+        if not has_syncable_types(outgoing):
             logger.debug("Clipboard content has no syncable formats — not broadcasting")
             return
 

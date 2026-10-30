@@ -8,6 +8,8 @@
     "core:event:allow-unlisten",
     "allow-quick-paste-list",
     "allow-quick-paste-choose",
+    "allow-quick-paste-favorites",
+    "allow-quick-paste-choose-favorite",
     "allow-quick-paste-close",
     "allow-quick-paste-settings",
     "allow-prepare-paste-entry",

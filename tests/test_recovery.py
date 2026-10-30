@@ -65,7 +65,7 @@ def reasons(findings):
         "[]",
         # One past the version this build writes — a version it knows about is
         # a config it must load, not quarantine.
-        {"config_version": 5},
+        {"config_version": 6},
     ],
     ids=["not-json", "not-an-object", "unknown-version"],
 )
@@ -85,7 +85,7 @@ def test_an_unusable_configuration_is_moved_aside(data_dir, config):
 def test_encrypted_history_leaves_with_a_configuration_that_has_to_go(data_dir):
     # The at-rest key is derived from the fingerprint of the identity that the
     # broken config carries, so the history cannot be read once it is gone.
-    write_config(data_dir, {"config_version": 5, "encryption_enabled": True})
+    write_config(data_dir, {"config_version": 6, "encryption_enabled": True})
     write_history(data_dir, rows=2)
     assert reasons(recovery.inspect()) == [
         ("config", "unreadable"),

@@ -32,6 +32,8 @@ export const EN: Record<string, string> = {
   "已删除这条记录": "Record deleted",
   "已删除这条收藏": "Favourite deleted",
   "主导航": "Main navigation",
+  "收起侧边栏": "Collapse sidebar",
+  "展开侧边栏": "Expand sidebar",
   "剪贴板历史": "Clipboard History",
   "历史记录": "History",
   "文件传输": "File Transfer",
@@ -106,7 +108,6 @@ export const EN: Record<string, string> = {
   // The shortcut sheet, folded under 关于: every one of these already worked,
   // and none of them was written down anywhere a reader would look.
   "快捷键": "Keyboard shortcuts",
-  "切换左侧页面": "Switch the page in the sidebar",
   "在当前页搜索": "Search the page in front of you",
   "打开设置": "Open settings",
   "保存在设置页或 AI 配置页上改过的东西": "Save what was changed on the settings or AI configuration page",
@@ -383,11 +384,14 @@ export const EN: Record<string, string> = {
   "刷新服务状态": "Refresh status",
   "正在读取手机服务状态…": "Reading the phone service status…",
   "手机 Companion 二维码": "Phone Companion QR code",
+  "手机扫码访问": "Scan to open on your phone",
   "网页二维码": "Web QR code",
-  "显示二维码": "Show QR code",
   "放大二维码": "Enlarge QR code",
   "启动服务后显示二维码": "The QR code appears after the service starts",
+  "手机网页访问开启后显示二维码": "The QR code appears after phone web access is turned on",
   "开启远程访问后显示二维码": "The QR code appears after remote access is turned on",
+  "开": "On",
+  "关": "Off",
   "正在生成二维码…": "Generating QR code…",
   "二维码不可用": "QR code unavailable",
   "发送文件到手机": "Send a file to the phone",
@@ -1118,6 +1122,11 @@ export const EN: Record<string, string> = {
   "导出 CSV": "Export CSV",
   "导出 JSON": "Export JSON",
   "导出 Markdown": "Export Markdown",
+  "选择格式": "Choose a format",
+  "JSON（完整数据）": "JSON (complete data)",
+  "CSV（表格）": "CSV (spreadsheet)",
+  "Markdown（可读文本）": "Markdown (readable text)",
+  "选择保存位置并导出": "Choose where to save and export",
   "先把上面的开关打开，这些组合键才会生效；这里填过的内容会保留。":
     "Turn the switch above on and these keys take effect; anything typed here is kept.",
   "16–19 位银联/银行卡号，如 6222 0212 3456 7890":
@@ -1955,33 +1964,45 @@ export const EN: Record<string, string> = {
   "将补齐本机缺少的 {count} 个配置项|one": "Will fill in the {count} config entry this machine is missing",
   "将补齐本机缺少的 {count} 个配置项|other": "Will fill in the {count} config entries this machine is missing",
 
-  // ── Quick paste and the recording rules (1.3.0) ───────────────────────
+  // ── The paste panel and the recording rules (1.3.0) ───────────────────
   // Two surfaces: the overlay window (`quick-paste.html`, a document of its own
   // with no `App.vue` around it) and the settings card that decides what the
-  // recorder keeps and what a shortcut does once it has copied.
-  "快速粘贴窗口": "Quick Paste window",
-  "快速粘贴": "Quick Paste",
+  // recorder keeps and what a shortcut does once it has copied.  The window is
+  // the 粘贴面板 ("paste panel"): the old 快速粘贴 name described the shortcut,
+  // not the surface, and the panel is also opened by tray and button.
+  "粘贴面板": "Paste panel",
+  "粘贴面板（Ctrl+Shift+V）": "Paste panel (Ctrl+Shift+V)",
   "搜索剪贴板历史": "Search clipboard history",
   "搜索剪贴板历史…": "Search clipboard history…",
   "按类型筛选": "Filter by type",
+  "排序": "Sort",
+  "按时间筛选": "Filter by time",
+  "按来源设备筛选": "Filter by source device",
+  "最近 1 小时": "Last hour",
+  "最近 7 天": "Last 7 days",
+  "全部设备": "All devices",
+  "本机": "This machine",
   "读取剪贴板历史失败": "Could not read the clipboard history",
   "正在粘贴…": "Pasting…",
   "粘贴失败，请重试": "Paste failed. Try again.",
   "已复制，但没能粘贴到当前应用":
     "Copied, but it could not be pasted into the active application",
   "还没有可粘贴的记录": "Nothing to paste yet",
-  "换个关键词或类型试试。": "Try another keyword, or another type.",
+  "收藏里还没有内容": "The favourites library is empty",
+  "在收藏库中添加内容后，它会出现在这里。": "Save something to the favourites library and it will show up here.",
+  "没有符合当前筛选条件的记录": "No records match the current filters",
+  "换个关键词或筛选条件试试。": "Try another keyword or filter.",
   "复制内容后，它会出现在这里。": "Copy something and it will show up here.",
   "↑↓ 选择": "↑↓ Select",
   "Enter 粘贴": "Enter: paste",
   "Shift+Enter 纯文本粘贴": "Shift+Enter: paste as plain text",
   "Esc 关闭": "Esc: close",
-  "双击粘贴": "Double-click: paste",
+  "单击粘贴": "Click to paste",
   "粘贴与录制": "Paste & Recording",
   "粘贴": "Paste",
   "自动粘贴到当前应用": "Paste into the active application automatically",
-  "打开后，按快捷键取回历史会直接粘贴到当前应用；关掉则只复制到剪贴板。快速粘贴窗口不受这个开关影响。":
-    "When on, taking a clip back with a hotkey pastes it straight into the active application; when off, it is only copied. The Quick Paste window is not affected by this switch.",
+  "打开后，按快捷键取回历史会直接粘贴到当前应用；关掉则只复制到剪贴板。粘贴面板不受这个开关影响。":
+    "When on, taking a clip back with a hotkey pastes it straight into the active application; when off, it is only copied. The paste panel is not affected by this switch.",
   "录制规则": "Recording rules",
   "密码管理器内容不记录": "Don't record password-manager content",
   "密码管理器会给不想被记录的内容打上标记；打开后这类内容不进历史、也不同步。":
@@ -2053,11 +2074,11 @@ export const EN: Record<string, string> = {
     "This file is large and has to be transferred from another device before pasting. Continue?",
   "文件约 {size}，粘贴前需先从另一台设备传输。继续？":
     "About {size} of files have to be transferred from another device before pasting. Continue?",
-  "文件较大，请在快速粘贴窗口中确认后取回":
-    "This file is large — confirm it in the Quick Paste window before fetching",
+  "文件较大，请在粘贴面板中确认后取回":
+    "This file is large — confirm it in the paste panel before fetching",
   "继续": "Continue",
   "继续取回": "Fetch it",
-  "Enter 继续 · Esc 取消": "Enter: continue · Esc: cancel",
+  "Enter 继续 · Esc 关闭": "Enter: continue · Esc: close",
   "取回文件并粘贴？": "Fetch the files and paste?",
   "这些文件在另一台设备上，粘贴前需要先传输过来。文件较大时可能要等上一会儿。":
     "These files are on another device, so they have to be transferred before they can be pasted. A large file can take a while.",
@@ -2086,8 +2107,8 @@ export const EN: Record<string, string> = {
   "已取回 {count} 个文件，已复制到剪贴板|other": "Fetched {count} files and copied them to the clipboard",
   "已取回 {count} 个文件，已复制到剪贴板": "Fetched {count} files and copied them to the clipboard",
   "等待传输超时，请重试": "Timed out waiting for the transfer. Try again.",
-  "取回文件超时，请到快速粘贴窗口重试":
-    "Fetching the file timed out. Retry it from the Quick Paste window.",
+  "取回文件超时，请到粘贴面板重试":
+    "Fetching the file timed out. Retry it from the paste panel.",
   "文件超过当前大小上限，可在设置里调大":
     "The file is over the current size limit; raise it in Settings",
   "经互联网中继取回的文件超过上限":
@@ -2123,4 +2144,9 @@ export const EN: Record<string, string> = {
   "选择接收目录": "Choose the receive folder",
   "收到的文件保存在这里；留空使用默认的下载目录。":
     "Received files are saved here; leave it empty to use the default Downloads folder.",
+
+  // ── Which kinds of clip leave this machine (1.3.0 next iteration) ─────
+  "同步内容类型": "Synced content types",
+  "关闭的类型只保留在本机历史，不再发送给其他设备；接收对方内容不受影响。":
+    "A type switched off stays in this machine's history and is no longer sent to other devices; receiving from them is not affected.",
 };

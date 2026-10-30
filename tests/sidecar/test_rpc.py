@@ -369,6 +369,9 @@ def test_every_field_the_window_settings_form_sends_is_accepted(app):
         # 1.3.1 file transfer limits: same whole-form rule, and each 0 is a real
         # value (protocol ceiling / never ask / no extra relay cap).
         "max_file_mb", "confirm_large_file_mb", "relay_paste_max_mb",
+        # Per-type sync switches: six real booleans the settings form submits
+        # with everything else.
+        "sync_text", "sync_url", "sync_html", "sync_rtf", "sync_image", "sync_file",
     }
     # Sent conditionally, when the control was touched rather than on every
     # submit, and each one goes on its own for a reason: the password is not
@@ -400,6 +403,8 @@ def test_every_field_the_window_settings_form_sends_is_accepted(app):
         "skip_prelaunch_clipboard": False, "max_non_file_paste_mb": 4,
         "source_exclusion_patterns": ["keepass"],
         "max_file_mb": 100, "confirm_large_file_mb": 0, "relay_paste_max_mb": 25,
+        "sync_text": True, "sync_url": False, "sync_html": True,
+        "sync_rtf": True, "sync_image": False, "sync_file": True,
     }
     assert set(payload) == form_fields
     assert not conditional_fields & set(payload)
@@ -420,6 +425,9 @@ def test_every_field_the_window_settings_form_sends_is_accepted(app):
     assert saved["max_file_mb"] == 100
     assert saved["confirm_large_file_mb"] == 0
     assert saved["relay_paste_max_mb"] == 25
+    assert saved["sync_text"] is True
+    assert saved["sync_url"] is False
+    assert saved["sync_image"] is False
     # The conditional three, on their own as the window sends them.
     assert Dispatcher(app).call(
         "settings.update", {"encryption_enabled": False}
@@ -442,6 +450,10 @@ def test_every_field_the_window_settings_form_sends_is_accepted(app):
         ("source_exclusion_patterns", [1]),
         ("source_exclusion_patterns", [" padded"]),
         ("source_exclusion_patterns", ["multi\nline"]),
+        # Per-type sync switches are strict booleans, like every other switch.
+        ("sync_text", "false"),
+        ("sync_image", 1),
+        ("sync_file", None),
     ],
 )
 def test_recording_rule_settings_are_refused_when_they_do_not_fit_the_schema(app, field, value):
@@ -1658,10 +1670,13 @@ def test_hotkey_bindings_are_stored_beside_the_switch_that_uses_them(app):
     """
     dispatcher = Dispatcher(app)
     settings = dispatcher.call("settings.get", {})["settings"]
-    # Off by default: a first run should not take Ctrl+1 and Ctrl+Shift+V away
-    # from whatever the user was already using them for.
-    assert settings["hotkeys_enabled"] is False
-    assert settings["hotkeys"]["paste_1"] == "Ctrl+1"
+    # On by default since v5: the paste panel is the app's main gesture, and a
+    # shortcut nobody enables is a shortcut nobody finds.  The paste slots
+    # themselves ship unbound, so a first run takes no Ctrl+1…9 away from the
+    # applications that switch tabs with them.
+    assert settings["hotkeys_enabled"] is True
+    assert settings["hotkeys"]["paste_1"] == ""
+    assert settings["hotkeys"]["show_quick_paste"].endswith("+Shift+V")
 
     updated = dispatcher.call(
         "settings.update",
@@ -1691,7 +1706,7 @@ def test_a_malformed_hotkey_map_is_refused_rather_than_stored(app, broken):
     with pytest.raises(ApplicationError) as refused:
         Dispatcher(app).call("settings.update", {"hotkeys": broken})
     assert refused.value.code == "VALIDATION_ERROR"
-    assert Dispatcher(app).call("settings.get", {})["settings"]["hotkeys"]["paste_1"] == "Ctrl+1"
+    assert Dispatcher(app).call("settings.get", {})["settings"]["hotkeys"]["paste_1"] == ""
 
 
 def test_history_copy_honours_the_plain_text_flag_the_hotkeys_send(app):

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { RefreshCw, Search, X } from "@lucide/vue";
+import { ArrowDownUp, RefreshCw, Search, Star, X } from "@lucide/vue";
 import { bridge } from "../api/bridge";
-import type { HistoryItem, QuickPasteChooseResult } from "../api/types";
+import type { FavoriteSummary, HistoryItem, HistoryPreview, QuickPasteChooseResult } from "../api/types";
 import { setLocale, t } from "../i18n";
 import { shortTime, size } from "../i18n/format";
 import { previewLabel, typeLabel } from "../lib/history-label";
@@ -10,6 +10,10 @@ import {
   errorCode, errorMessage, followPasteFetch, isPasteConfirmRequired, isRemoteFileRow,
   pasteFailureText, pastePrepareErrorText, type PasteFetchProgress, type PasteFetchRun,
 } from "../lib/paste-transfer";
+import {
+  filterPasteRows, pasteDeviceChoices, type PasteDeviceChoice, type PasteDeviceFilter,
+  type PasteSort, type PasteTimeFilter,
+} from "../lib/quick-paste-filters";
 import { applyAppearanceTheme } from "../lib/theme";
 
 /**
@@ -44,6 +48,10 @@ import { applyAppearanceTheme } from "../lib/theme";
  *  rows already read rather than start a read per scroll; fewer than the
  *  history page's page size, because this is a palette and not a browse. */
 const LIMIT = 20;
+/** What it asks for while a time or device filter is on.  The host sends one
+ *  page and the panel narrows it here, so the page has to be wide enough that
+ *  "today" is more than the first few rows of it.  100 is the host's own cap. */
+const FILTER_LIMIT = 100;
 
 /** How long the box waits after a keystroke.  The shell's search boxes wait
  *  180 ms (`SEARCH_DEBOUNCE_MS`); the overlay waits 120 ms because it is the
@@ -82,10 +90,95 @@ const searchInput = ref<HTMLInputElement | null>(null);
 const listEl = ref<HTMLElement | null>(null);
 const query = ref("");
 const kind = ref("all");
+/** The host's order.  It is passed to `quick_paste_list` because the list is one
+ *  page: sorting a page that was already cut cannot show older rows. */
+const sort = ref<PasteSort>("newest");
+/** The two client-side filters: "today" is a calendar question and a device is
+ *  a property of the rows, neither of which the history query takes. */
+const timeFilter = ref<PasteTimeFilter>("all");
+const deviceFilter = ref<PasteDeviceFilter>("all");
 const rows = ref<HistoryItem[]>([]);
 const loading = ref(false);
 /** Why the list could not be read, in the host's words when it has any. */
 const failed = ref("");
+/** Image rows carry the same downscaled picture the history page shows: in the
+ *  list as a thumbnail, and on the pointer as a larger hover card.  Keyed by
+ *  entry id and fetched only for the visible page; a failed read leaves the kind
+ *  glyph in place. */
+const rowPreviews = ref<Record<string, HistoryPreview>>({});
+const thumbPending = new Set<string>();
+const thumbFailed = new Set<string>();
+function isImageItem(item: HistoryItem) {
+  const kind = (item.content_type || "").toUpperCase();
+  return kind === "IMAGE_PNG" || kind === "IMAGE" || kind === "IMAGE_EMF";
+}
+function thumbFor(item: HistoryItem): string {
+  return rowPreviews.value[item.id]?.image || "";
+}
+async function loadRowThumb(item: HistoryItem) {
+  if (rowPreviews.value[item.id] || thumbPending.has(item.id) || thumbFailed.has(item.id)) return;
+  thumbPending.add(item.id);
+  try {
+    const card = await bridge.previewHistoryEntry(item.id);
+    if (card.kind === "image" && card.image) {
+      rowPreviews.value = { ...rowPreviews.value, [item.id]: card };
+    } else {
+      thumbFailed.add(item.id);
+    }
+  } catch {
+    thumbFailed.add(item.id);
+  } finally {
+    thumbPending.delete(item.id);
+  }
+}
+function loadRowThumbs(items: HistoryItem[]) {
+  for (const item of items) {
+    if (isImageItem(item)) void loadRowThumb(item);
+  }
+}
+/** The enlarged picture the pointer is resting on.
+ *
+ *  The history page opens a card under the row for the same reason: a 40px
+ *  thumbnail says "there is a picture" and nothing more, while the card says
+ *  what it is before the reader pastes it.  The list is short and the pointer
+ *  is already on the row, so the card follows the pointer instead of taking a
+ *  column away from the list.  A short delay keeps a sweep down the list from
+ *  flashing a card on every image it crosses. */
+const HOVER_PREVIEW_DELAY_MS = 160;
+const hoverItem = ref<HistoryItem | null>(null);
+const hoverPoint = ref({ x: 0, y: 0 });
+let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+const hoverCard = computed<HistoryPreview | null>(() => {
+  const item = hoverItem.value;
+  if (!item) return null;
+  const card = rowPreviews.value[item.id];
+  return card && card.kind === "image" && card.image ? card : null;
+});
+const hoverStyle = computed(() => {
+  const card = hoverCard.value;
+  if (!card) return {};
+  const boxWidth = Math.min(card.width || 320, 340) + 24;
+  const boxHeight = Math.min(card.height || 240, 240) + 42;
+  const left = Math.min(hoverPoint.value.x + 16, window.innerWidth - boxWidth - 8);
+  const top = Math.min(hoverPoint.value.y + 16, window.innerHeight - boxHeight - 8);
+  return { left: `${Math.max(8, left)}px`, top: `${Math.max(8, top)}px` };
+});
+function cancelHover() {
+  clearTimeout(hoverTimer);
+  hoverItem.value = null;
+}
+function onRowEnter(item: HistoryItem, event: MouseEvent) {
+  cancelHover();
+  if (!isImageItem(item) || !thumbFor(item)) return;
+  hoverPoint.value = { x: event.clientX, y: event.clientY };
+  hoverTimer = setTimeout(() => {
+    hoverItem.value = item;
+  }, HOVER_PREVIEW_DELAY_MS);
+}
+function onRowMove(event: MouseEvent) {
+  if (!hoverItem.value) return;
+  hoverPoint.value = { x: event.clientX, y: event.clientY };
+}
 /** Why the last pick did not land: the clipboard holds the clip, the paste into
  *  the focused application did not.  The overlay stays up to say so. */
 const pasteError = ref("");
@@ -115,6 +208,8 @@ let pasteFailedAt = 0;
  *  counter drops the answer a reset invalidated. */
 let generation = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
+/** The delayed action of a row click, cleared by a keyboard choice or a close. */
+let rowClickTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** The five kinds, in the history page's chip order and with its ids: the host
  *  filters `quick_paste_list` by the same words `list_history` takes, and a
@@ -128,6 +223,96 @@ const kindChips = computed<Array<{ id: string; label: string }>>(() => [
 ]);
 
 const term = computed(() => query.value.trim());
+
+/** 收藏 mode: the saved library instead of the newest clips.  The rows are
+ *  mapped onto the same shape the list already draws — a favourite has a title
+ *  where a history row has its preview, and an image favourite carries the
+ *  picture the library already downscaled — so the cursor, Enter, the hover card
+ *  and the empty state all keep working without a second list. */
+const favoritesMode = ref(false);
+const favoriteIds = new Map<string, string>();
+function favoriteToRow(favorite: FavoriteSummary): HistoryItem {
+  const id = `fav:${favorite.id}`;
+  favoriteIds.set(id, favorite.id);
+  if (favorite.image) {
+    rowPreviews.value = {
+      ...rowPreviews.value,
+      [id]: { kind: "image", image: favorite.image, width: 0, height: 0, files: [], total: 0 },
+    };
+  }
+  return {
+    id,
+    timestamp: Math.round((favorite.updated || favorite.created || 0) * 1000),
+    preview: favorite.title || favorite.preview,
+    content_type: favorite.image ? "IMAGE_PNG" : "TEXT",
+    pinned: false,
+    source_name: favorite.group || "",
+    source_app: "",
+    source_title: "",
+    paste_count: 0,
+  };
+}
+
+function toggleFavorites() {
+  if (busy.value || job.value) return;
+  favoritesMode.value = !favoritesMode.value;
+  if (favoritesMode.value) {
+    // The history filters mean nothing to a library that has its own groups.
+    kind.value = "all";
+    timeFilter.value = "all";
+    deviceFilter.value = "all";
+    sort.value = "newest";
+  }
+  cancelHover();
+  focusSearch();
+  void searchNow();
+}
+
+/** The rows on screen: the host's page, narrowed by the two client filters.
+ *  Everything below (cursor, Enter, double click, empty state) reads this and
+ *  not `rows`, so the row under the cursor is always the row that is drawn. */
+const visibleRows = computed(() => (
+  favoritesMode.value ? rows.value : filterPasteRows(rows.value, {
+    time: timeFilter.value,
+    device: deviceFilter.value,
+  })
+));
+
+/** The host page the search asks for.  A filter gets a wider page because it is
+ *  narrowing that page here; no filter gets the palette's usual twenty. */
+const fetchLimit = computed(() => (
+  timeFilter.value !== "all" || deviceFilter.value !== "all" ? FILTER_LIMIT : LIMIT
+));
+
+/** The four time windows, in widening order.  Ids and labels only; the clock
+ *  comparison lives in `lib/quick-paste-filters.ts` so it can be tested. */
+const timeChips = computed<Array<{ id: PasteTimeFilter; label: string }>>(() => [
+  { id: "all", label: t("全部") },
+  { id: "hour", label: t("最近 1 小时") },
+  { id: "today", label: t("今天") },
+  { id: "week", label: t("最近 7 天") },
+]);
+
+/** The device options the current result set can offer.  Rebuilt from the host's
+ *  page rather than the filtered one, so narrowing the time window does not drop
+ *  the device a row came from out of the list. */
+const deviceChoices = computed<PasteDeviceChoice[]>(() => pasteDeviceChoices(rows.value));
+
+/** The device filter's one-word form for its option. */
+function deviceChoiceLabel(choice: PasteDeviceChoice): string {
+  if (choice.id === "all") return t("全部设备");
+  if (choice.local) return t("本机");
+  return choice.name;
+}
+
+/** Flip newest/oldest.  A re-read rather than a reversal of the rows already
+ *  here: the oldest rows of the whole history are the point of the choice. */
+function toggleSort() {
+  if (busy.value || job.value) return;
+  sort.value = sort.value === "newest" ? "oldest" : "newest";
+  focusSearch();
+  void searchNow();
+}
 
 /** The row's kind as a glyph: the history page's chip glyphs, because they are
  *  the same five words and the eye has already learned them there. */
@@ -146,18 +331,26 @@ function rowMeta(row: HistoryItem): string {
 }
 
 /** Nothing to show, said in the reader's own terms: a query that missed is not
- *  an empty history, and a type filter that emptied the list is neither. */
+ *  an empty history, and a type, time or device filter that emptied the list is
+ *  neither — the sentence names which of them did it. */
+const filtersActive = computed(() => timeFilter.value !== "all" || deviceFilter.value !== "all");
 const emptyTitle = computed(() => {
   if (term.value) return t("没有找到“{query}”", { query: term.value });
+  if (favoritesMode.value) return t("收藏里还没有内容");
+  if (filtersActive.value) return t("没有符合当前筛选条件的记录");
   if (kind.value !== "all") {
     const label = kindChips.value.find((chip) => chip.id === kind.value)?.label || kind.value;
     return t("还没有{type}", { type: label });
   }
   return t("还没有可粘贴的记录");
 });
-const emptyHint = computed(() => (term.value || kind.value !== "all")
-  ? t("换个关键词或类型试试。")
-  : t("复制内容后，它会出现在这里。"));
+const emptyHint = computed(() => (
+  favoritesMode.value
+    ? t("在收藏库中添加内容后，它会出现在这里。")
+    : (term.value || kind.value !== "all" || filtersActive.value)
+      ? t("换个关键词或筛选条件试试。")
+      : t("复制内容后，它会出现在这里。")
+));
 
 /* ── The transfer panel ───────────────────────────────────────────────── */
 
@@ -198,9 +391,19 @@ async function searchNow() {
   failed.value = "";
   pasteError.value = "";
   try {
-    const page = await bridge.quickPasteList(term.value, kind.value, LIMIT);
-    if (mine !== generation) return;
-    rows.value = page.items;
+    let items: HistoryItem[];
+    if (favoritesMode.value) {
+      const page = await bridge.quickPasteFavorites(term.value, fetchLimit.value);
+      if (mine !== generation) return;
+      favoriteIds.clear();
+      items = page.items.map(favoriteToRow);
+    } else {
+      const page = await bridge.quickPasteList(term.value, kind.value, fetchLimit.value, sort.value);
+      if (mine !== generation) return;
+      items = page.items;
+      loadRowThumbs(items);
+    }
+    rows.value = items;
     selected.value = 0;
   } catch (error) {
     if (mine !== generation) return;
@@ -222,7 +425,22 @@ function scheduleSearch() {
 function pickKind(id: string) {
   if (kind.value === id || busy.value || job.value) return;
   kind.value = id;
+  focusSearch();
   void searchNow();
+}
+
+/** The time chip a pointer picked.  Client-side, but the page under it may have
+ *  to be re-read wider (see `fetchLimit`), and the caret belongs back in the
+ *  box either way. */
+function pickTime(id: PasteTimeFilter) {
+  if (busy.value || job.value) return;
+  timeFilter.value = id;
+  focusSearch();
+}
+
+/** The device picker changed.  Same caret rule as the chips. */
+function pickDevice() {
+  focusSearch();
 }
 
 function clearQuery() {
@@ -230,22 +448,46 @@ function clearQuery() {
   void nextTick(() => searchInput.value?.focus());
 }
 
+/** Keep the search box the window's keyboard focus while the pointer and the
+ *  controls move under the reader.  The box is focused when the overlay opens
+ *  and the gesture is "type a word, press Enter"; a filter chip that took the
+ *  focus would end the word at the first click.  The chip still takes its click
+ *  — this only puts the caret back where the next keystroke belongs. */
+function focusSearch() {
+  void nextTick(() => searchInput.value?.focus());
+}
+
 /** Move the keyboard cursor, wrapping at both ends.  A palette with twenty rows
  *  is a list you cycle rather than a form you tab through. */
 function move(delta: number) {
-  const count = rows.value.length;
+  const count = visibleRows.value.length;
   if (!count) return;
   selected.value = (selected.value + delta + count) % count;
 }
 
 /* ── Choosing a row ───────────────────────────────────────────────────── */
 
+/** A click is a choice, not only a cursor move.
+ *
+ *  The action waits one double-click interval: a reader whose hand still
+ *  double-clicks would otherwise paste on the first click and land the second
+ *  one in whatever application the closed overlay revealed.  A single click
+ *  pays the same short pause, and both gestures end as exactly one paste.
+ */
+function pickOnClick(index: number) {
+  if (busy.value || job.value || confirmRow.value) return;
+  selected.value = index;
+  cancelHover();
+  clearTimeout(rowClickTimer);
+  rowClickTimer = setTimeout(() => { void pick(index, false); }, 180);
+}
+
 /** Take the row at `index`.  A local clip is one host call — copy, hide, paste.
  *  A remote file is a fetch first: its bytes are still on the other machine, so
  *  the list becomes that fetch's progress panel. */
 function pick(index: number, plain: boolean) {
   if (busy.value || job.value || confirmRow.value) return;
-  const item = rows.value[index];
+  const item = visibleRows.value[index];
   if (!item) return;
   if (plain || !isRemoteFileRow(item)) {
     void choose(item, plain);
@@ -273,7 +515,10 @@ async function choose(item: HistoryItem, plain: boolean) {
 /** Ask the host to copy one entry and paste it; report what it said. */
 async function pasteChosen(entryId: string, plain: boolean) {
   try {
-    const result: QuickPasteChooseResult = await bridge.quickPasteChoose(entryId, plain);
+    const favoriteId = favoritesMode.value ? favoriteIds.get(entryId) : undefined;
+    const result: QuickPasteChooseResult = favoriteId
+      ? await bridge.quickPasteChooseFavorite(favoriteId)
+      : await bridge.quickPasteChoose(entryId, plain);
     if (result && result.ok === false) {
       pasteError.value = result.message || t("已复制，但没能粘贴到当前应用");
       // The host re-shows this window to say that, and the focus it gives back
@@ -413,19 +658,25 @@ function cancelConfirm() {
   confirmRow.value = null;
 }
 
-/** Close the overlay.  The host answers with the hidden window; a host that has
- *  already hidden it (a second Esc, a blur after a successful pick) is not an
- *  error to report anywhere.  A fetch still running is abandoned first — the
- *  window going away is the reader cancelling it. */
-async function close() {
+/** Hide the overlay, and abandon any fetch it was following.
+ *
+ * The host answers with the hidden window; a host that has already hidden it (a
+ * second Esc, the blur of a successful pick) is not an error to report.  The
+ * cancel is awaited before the close: the sidecar deletes the files a
+ * half-finished paste already landed, and doing that after the window is gone
+ * would leave a fetch nobody is watching.  A close during a fetch is therefore
+ * both a dismissal and a cancel — the reader looking at a progress panel and
+ * pressing Esc is saying "stop this", not "hide it and keep downloading". */
+async function close(restoreMain = false) {
   clearTimeout(timer);
-  const current = job.value;
+  clearTimeout(rowClickTimer);
+  cancelHover();
   const running = fetchRun;
   job.value = null;
   confirmRow.value = null;
   fetchRun = undefined;
-  if (current && running) void running.cancel();
-  try { await bridge.quickPasteClose(); } catch { /* the window is already gone */ }
+  if (running) { try { await running.cancel(); } catch { /* already stopped */ } }
+  try { await bridge.quickPasteClose(restoreMain); } catch { /* the window is already gone */ }
 }
 
 /** Esc, ↑ ↓ and Enter, listened for on the window rather than on the box: the
@@ -435,46 +686,35 @@ function onKeydown(event: KeyboardEvent) {
   // An IME's Enter confirms a candidate and its arrows walk that candidate
   // list; none of those presses is meant for the overlay.
   if (event.isComposing) return;
+  // Esc hides the window in every state.  A close button that works but an Esc
+  // that only half-works is the stuck-window report the overlay opened with.
   if (event.key === "Escape") {
     event.preventDefault();
-    void escape();
+    void close(true);
     return;
   }
   if (confirmRow.value) {
     if (event.key === "Enter") { event.preventDefault(); void confirmLarge(); }
     return;
   }
-  // A fetch owns the keyboard: its only key is Esc (cancel, then close), and
-  // holding Enter must not start a second paste over the panel.
+  // A fetch owns the keyboard: every key but Esc is ignored, and holding Enter
+  // must not start a second paste over the panel.
   if (job.value || busy.value) return;
-  if (event.key === "ArrowDown") { event.preventDefault(); move(1); return; }
-  if (event.key === "ArrowUp") { event.preventDefault(); move(-1); return; }
+  if (event.key === "ArrowDown") { clearTimeout(rowClickTimer); event.preventDefault(); move(1); return; }
+  if (event.key === "ArrowUp") { clearTimeout(rowClickTimer); event.preventDefault(); move(-1); return; }
   if (event.key === "Enter") {
+    clearTimeout(rowClickTimer);
     event.preventDefault();
     pick(selected.value, event.shiftKey);
   }
 }
 
-/** The one way out, whatever is on screen: the confirmation steps back, a fetch
- *  is cancelled and the window closed, and the list closes. */
-async function escape() {
-  if (confirmRow.value) { cancelConfirm(); return; }
-  if (job.value) {
-    if (job.value.phase === "progress") await cancelJob();
-    else job.value = null;
-    await close();
-    return;
-  }
-  await close();
-}
-
 /** Losing the focus is the other way out — the reader clicked back into the
- *  application behind the overlay.  A pick already in flight is the exception:
- *  its whole job is to hand the focus back, and closing on the blur it causes
- *  would race the answer.  A fetch is a deliberate act with a panel to watch, so
- *  it also keeps the window even though the reader looked away for a moment. */
+ *  application behind the overlay — and it hides the window from every state,
+ *  the progress panel included: a panel that refuses to go away is the bug, and
+ *  a fetch the reader turned away from is cancelled on the way out (see
+ *  `close`). */
 function onWindowBlur() {
-  if (busy.value || job.value || confirmRow.value) return;
   void close();
 }
 
@@ -487,8 +727,15 @@ function onWindowBlur() {
  * before the new clip could be found.
  */
 async function resetForOpen() {
+  clearTimeout(rowClickTimer);
+  cancelHover();
+  favoritesMode.value = false;
+  favoriteIds.clear();
   query.value = "";
   kind.value = "all";
+  sort.value = "newest";
+  timeFilter.value = "all";
+  deviceFilter.value = "all";
   pasteError.value = "";
   job.value = null;
   confirmRow.value = null;
@@ -545,6 +792,19 @@ async function initialise() {
 }
 
 watch(query, scheduleSearch);
+// A filter change re-arms the cursor at the top; crossing into/out of the
+// filtered mode also re-reads, because the page it narrows grows from 20 to 100
+// rows (see `fetchLimit`).  Between two filtered devices there is nothing to
+// re-read: the page is already the wider one.
+watch([timeFilter, deviceFilter], () => { selected.value = 0; });
+watch(fetchLimit, () => { if (!busy.value && !job.value) void searchNow(); });
+// The rows decide which devices the filter can offer; a selected device that the
+// new page does not contain (it was cleared from history, or the query now
+// matches nothing from it) falls back to 全部设备 rather than showing an empty
+// list with no way back.
+watch(deviceChoices, (choices) => {
+  if (!choices.some((choice) => choice.id === deviceFilter.value)) deviceFilter.value = "all";
+});
 watch(selected, () => {
   void nextTick(() => {
     const row = listEl.value?.children?.[selected.value] as HTMLElement | undefined;
@@ -561,6 +821,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
   clearTimeout(timer);
+  clearTimeout(rowClickTimer);
   fetchRun?.stop();
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("blur", onWindowBlur);
@@ -570,7 +831,7 @@ onUnmounted(() => {
 
 <template>
   <div class="quick-paste" :class="{ 'quick-paste--busy': busy, 'quick-paste--transfer': !!job }"
-    role="dialog" :aria-label="t('快速粘贴')" :aria-busy="busy || !!job">
+    role="dialog" :aria-label="t('粘贴面板')" :aria-busy="busy || !!job">
     <!-- A remote file's paste is a fetch: the list becomes the panel that shows
          it, and the only ways out are cancel and, once it has failed, retry or
          close. -->
@@ -591,7 +852,7 @@ onUnmounted(() => {
       <div class="quick-paste-transfer-actions">
         <template v-if="transferFailed">
           <button class="primary" type="button" @click="retryJob">{{ t("重试") }}</button>
-          <button type="button" @click="close">{{ t("关闭") }}</button>
+          <button type="button" @click="close(false)">{{ t("关闭") }}</button>
         </template>
         <button v-else type="button" :disabled="busy" @click="cancelJob">{{ t("取消取回") }}</button>
       </div>
@@ -613,7 +874,7 @@ onUnmounted(() => {
         <button class="primary" type="button" @click="confirmLarge">{{ t("继续取回") }}</button>
         <button type="button" @click="cancelConfirm">{{ t("取消") }}</button>
       </div>
-      <p class="quick-paste-transfer-hint note">{{ t("Enter 继续 · Esc 取消") }}</p>
+      <p class="quick-paste-transfer-hint note">{{ t("Enter 继续 · Esc 关闭") }}</p>
     </div>
 
     <template v-else>
@@ -625,26 +886,79 @@ onUnmounted(() => {
         <button v-if="query" type="button" class="search-clear" :aria-label="t('清除搜索')"
           :title="t('清除搜索')" @click.prevent="clearQuery"><X :size="14" /></button>
       </label>
-      <div class="quick-paste-kinds" role="group" :aria-label="t('按类型筛选')">
-        <button v-for="chip in kindChips" :key="chip.id" type="button" class="chip quick-paste-chip"
-          :class="{ 'chip--active': kind === chip.id }" :aria-pressed="kind === chip.id"
-          :disabled="busy" @click="pickKind(chip.id)">{{ chip.label }}</button>
+      <!-- The chips keep the pointer from taking the caret out of the search
+           box: the gesture this window serves is one word and Return, and a chip
+           that stole the focus ended the word at the first click.
+           `mousedown.prevent` is what stops the focus moving (the click still
+           fires); `focusSearch` puts it back for the keyboard path. -->
+      <div class="quick-paste-kinds" role="group" :aria-label="t('按类型筛选')" @mousedown.prevent>
+        <template v-if="!favoritesMode">
+          <button v-for="chip in kindChips" :key="chip.id" type="button" class="chip quick-paste-chip"
+            :class="{ 'chip--active': kind === chip.id }" :aria-pressed="kind === chip.id"
+            :disabled="busy" @click="pickKind(chip.id)">{{ chip.label }}</button>
+        </template>
+        <!-- 收藏 switches the list to the saved library, the same rows and the
+             same Enter.  It is a mode chip rather than a history filter: a
+             favourite lives in its own store, and the type/time/device controls
+             below have nothing to narrow there. -->
+        <button type="button" class="chip quick-paste-chip quick-paste-favorites"
+          :class="{ 'chip--active': favoritesMode }" :aria-pressed="favoritesMode"
+          :disabled="busy" @click="toggleFavorites">
+          <Star :size="13" aria-hidden="true" />{{ t("收藏") }}
+        </button>
+      </div>
+      <!-- The second row of controls: order, then how far back, then which
+           machine.  Sort is the host's (see `quickPasteList`); the other two
+           narrow this page here, so their labels stay one word each and the
+           device list is a select rather than a row of chips that would grow
+           with every paired machine. -->
+      <div v-if="!favoritesMode" class="quick-paste-filters">
+        <button type="button" class="chip quick-paste-chip quick-paste-sort"
+          :class="{ 'chip--active': sort === 'oldest' }" :aria-label="t('排序')"
+          :aria-pressed="sort === 'oldest'" :disabled="busy" @mousedown.prevent @click="toggleSort">
+          <ArrowDownUp :size="13" aria-hidden="true" />
+          {{ sort === "newest" ? t("最新优先") : t("最旧优先") }}
+        </button>
+        <div class="quick-paste-times" role="group" :aria-label="t('按时间筛选')">
+          <button v-for="chip in timeChips" :key="chip.id" type="button"
+            class="chip quick-paste-chip quick-paste-time" :class="{ 'chip--active': timeFilter === chip.id }"
+            :aria-pressed="timeFilter === chip.id" :disabled="busy"
+            @mousedown.prevent @click="pickTime(chip.id)">{{ chip.label }}</button>
+        </div>
+        <!-- The select is not `mousedown.prevent`ed: opening a native picker is
+             the pointer's job.  The caret comes back with `pickDevice` once the
+             choice is made, which is the moment the reader wants to type again. -->
+        <select v-model="deviceFilter" class="quick-paste-device" :aria-label="t('按来源设备筛选')"
+          :disabled="busy" @change="pickDevice">
+          <option v-for="choice in deviceChoices" :key="choice.id" :value="choice.id">
+            {{ deviceChoiceLabel(choice) }}
+          </option>
+        </select>
       </div>
       <!-- A read failure replaces the list (there is nothing to show); a pick
            failure sits above it, because the clipboard already holds the clip and
-           the row the reader chose is still there to try again. -->
-      <p v-if="failed" class="quick-paste-note quick-paste-error" role="alert">{{ failed }}</p>
+           the row the reader chose is still there to try again.  The retry is a
+           new read, which is the only thing that can fix the first kind. -->
+      <template v-if="failed">
+        <p class="quick-paste-note quick-paste-error" role="alert">{{ failed }}</p>
+        <div class="quick-paste-transfer-actions">
+          <button type="button" @click="searchNow">{{ t("重试") }}</button>
+        </div>
+      </template>
       <p v-else-if="pasteError" class="quick-paste-note quick-paste-error" role="alert">{{ pasteError }}</p>
       <p v-if="busy" class="quick-paste-note" role="status">{{ t("正在粘贴…") }}</p>
       <p v-else-if="loading" class="quick-paste-note" role="status">{{ t("正在搜索…") }}</p>
-      <ul v-if="!failed && rows.length" id="quick-paste-list" ref="listEl" class="quick-paste-list"
+      <ul v-if="!failed && visibleRows.length" id="quick-paste-list" ref="listEl" class="quick-paste-list"
         role="listbox" :aria-label="t('剪贴板历史')">
-        <li v-for="(row, index) in rows" :id="`quick-paste-row-${index}`" :key="row.id"
+        <li v-for="(row, index) in visibleRows" :id="`quick-paste-row-${index}`" :key="row.id"
           class="quick-paste-row" :class="{ 'quick-paste-row--selected': index === selected }"
           role="option" :aria-selected="index === selected"
-          @mouseenter="selected = index" @click="selected = index"
-          @dblclick="pick(index, false)">
-          <span class="quick-paste-glyph" aria-hidden="true">{{ kindGlyph(row) }}</span>
+          @mouseenter="selected = index; onRowEnter(row, $event)" @mousemove="onRowMove"
+          @mouseleave="cancelHover" @click="pickOnClick(index)">
+          <span v-if="thumbFor(row)" class="quick-paste-glyph quick-paste-glyph--image">
+            <img :src="thumbFor(row)" alt="" draggable="false" loading="lazy" />
+          </span>
+          <span v-else class="quick-paste-glyph" aria-hidden="true">{{ kindGlyph(row) }}</span>
           <span class="quick-paste-body">
             <span class="quick-paste-text">{{ oneLine(previewLabel(row)) }}</span>
             <span class="quick-paste-meta">{{ rowMeta(row) }}</span>
@@ -656,7 +970,7 @@ onUnmounted(() => {
           </span>
         </li>
       </ul>
-      <div v-if="!failed && !loading && !rows.length" class="quick-paste-empty" role="status">
+      <div v-if="!failed && !loading && !visibleRows.length" class="quick-paste-empty" role="status">
         <p class="quick-paste-empty-title">{{ emptyTitle }}</p>
         <p class="quick-paste-note">{{ emptyHint }}</p>
       </div>
@@ -665,8 +979,17 @@ onUnmounted(() => {
         <span>{{ t("Enter 粘贴") }}</span>
         <span>{{ t("Shift+Enter 纯文本粘贴") }}</span>
         <span>{{ t("Esc 关闭") }}</span>
-        <span>{{ t("双击粘贴") }}</span>
+        <span>{{ t("单击粘贴") }}</span>
       </footer>
+      <!-- The pointer's own card: follows it over an image row, so the row can
+           be recognised without leaving the keyboard's list.  Pointer-events
+           none because the card is a glance, not a target. -->
+      <div v-if="hoverCard" class="quick-paste-preview" :style="hoverStyle" aria-hidden="true">
+        <img :src="hoverCard.image" alt="" />
+        <p v-if="hoverCard.width && hoverCard.height" class="quick-paste-preview__size">
+          {{ hoverCard.width }} × {{ hoverCard.height }}
+        </p>
+      </div>
     </template>
   </div>
 </template>

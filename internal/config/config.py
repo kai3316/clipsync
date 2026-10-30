@@ -47,44 +47,65 @@ class PeerInfo:
     removed_at: float = 0  # wall-clock forget time when archived in removed_peers; 0 = active
 
 
+def default_hotkeys(system: str | None = None) -> dict[str, str]:
+    """The default global chords for *system*, or for this machine.
+
+    The same actions everywhere, but the modifier follows the platform's own
+    convention: macOS wants Command where Windows and Linux have Ctrl.  The
+    spelling is `global-hotkey`'s — it parses `Cmd` and `Super` to the Command
+    key on macOS — so a Mac default reads as the chord a Mac user would press.
+
+    ``paste_1``…``paste_9`` ship **unbound**.  They are system-wide chords if
+    bound, and Ctrl+1…9 / Cmd+1…9 are how every browser, editor and terminal
+    switches tabs; taking them away by default would break a reflex the reader
+    has everywhere else.  The paste panel (``show_quick_paste``) covers the
+    "paste one of my recent clips" gesture without occupying those keys; the
+    slots stay listed in settings for whoever wants them back.
+    """
+    mac = (system or platform.system()).lower() in {"darwin", "mac", "macos"}
+    modifier = "Cmd" if mac else "Ctrl"
+    hotkeys: dict[str, str] = {f"paste_{index}": "" for index in range(1, 10)}
+    hotkeys.update(
+        {
+            # Plain-text paste: the overlay owns the old Ctrl+Shift+V default
+            # since 1.3.0, so this action moved one combination beside it.
+            "paste_plain": f"{modifier}+Alt+V",
+            "toggle_monitor": f"{modifier}+Shift+M",
+            "show_window": f"{modifier}+Shift+Space",
+            # Open the paste panel — the global search window that pastes the
+            # chosen history entry into the application in front.
+            "show_quick_paste": f"{modifier}+Shift+V",
+            # Paste the newest clip that arrived from another device.
+            #
+            # Deliberately unbound (""): which clip is "newest remote" depends
+            # on what has arrived, so a default would be a key pressed for a
+            # row that may not exist yet.  The empty string is a real value in
+            # this map — "this action is not bound" — and the settings form
+            # filters it out before saving.
+            "paste_remote_last": "",
+        }
+    )
+    return hotkeys
+
+
 # Default global-hotkey bindings — single source of truth.  The Config
 # dataclass defaults from this, and the desktop host reads them from here
 # (through `settings.get`) before registering them with the OS: the process
 # that owns the registration is the one that can see a keystroke while another
-# application has focus, and that is the Rust host, not this sidecar.  The
-# spelling is `global-hotkey`'s, so `Ctrl+1` and `Ctrl+Shift+V` are registered
-# as written.
-DEFAULT_HOTKEYS: dict[str, str] = {
-    "paste_1": "Ctrl+1",
-    "paste_2": "Ctrl+2",
-    "paste_3": "Ctrl+3",
-    "paste_4": "Ctrl+4",
-    "paste_5": "Ctrl+5",
-    "paste_6": "Ctrl+6",
-    "paste_7": "Ctrl+7",
-    "paste_8": "Ctrl+8",
-    "paste_9": "Ctrl+9",
-    # Plain-text paste.  Ctrl+Shift+V is the quick-paste overlay's binding as
-    # of 1.3.0 (`show_quick_paste` below), so this action moved to the
-    # combination beside it; the v4 migration in `load` rewrites a config that
-    # still carries the old default.
+# application has focus, and that is the Rust host, not this sidecar.
+DEFAULT_HOTKEYS: dict[str, str] = default_hotkeys()
+
+
+# The v4 defaults, kept only for the one-way v5 migration: a binding still
+# spelled like one of these was never touched by the user, so v5 may move it to
+# the platform's own default (or clear a paste slot).  Any other value is a
+# choice and is left alone.
+_V4_DEFAULT_HOTKEYS: dict[str, str] = {
+    **{f"paste_{index}": f"Ctrl+{index}" for index in range(1, 10)},
     "paste_plain": "Ctrl+Alt+V",
     "toggle_monitor": "Ctrl+Shift+M",
     "show_window": "Ctrl+Shift+Space",
-    # Open the quick-paste overlay — the global search window that pastes the
-    # chosen history entry into the application in front.  This is the
-    # combination the plain-text paste used before 1.3.0; giving it to the
-    # overlay instead makes the action users reach for most the one they can
-    # reach with the shortcut that is already in their fingers.
     "show_quick_paste": "Ctrl+Shift+V",
-    # Paste the newest clip that arrived from another device.
-    #
-    # Deliberately unbound (""): a default would take a system-wide combination
-    # away from whatever the user was already using it for, and this action is
-    # an extra on top of paste_1..9 rather than a primary one.  The empty string
-    # is a real value in this map — "this action is not bound" — and the
-    # settings form filters it out before saving, so an unbound action is
-    # simply absent from the host's registration list.
     "paste_remote_last": "",
 }
 
@@ -108,8 +129,11 @@ class Config:
     # filter_enabled_categories=[] to mean "all enabled"; v2 uses None=all;
     # v3 turns the phone companion (远程访问) on by default; v4 adds the paste
     # behaviour / recording rules below and moves the default paste_plain
-    # binding off Ctrl+Shift+V, which the quick-paste overlay owns now.
-    config_version: int = 4
+    # binding off Ctrl+Shift+V, which the paste panel owns now; v5 makes the
+    # global hotkeys on by default, follows the platform's modifier (Cmd on
+    # macOS) and leaves the paste_1..9 slots unbound so they cannot take
+    # Ctrl+1…9 away from every other application.
+    config_version: int = 5
     device_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     device_name: str = field(default_factory=platform.node)
     port: int = 19990
@@ -237,6 +261,25 @@ class Config:
     # ``max_file_mb``.
     relay_paste_max_mb: int = 50
 
+    # ---- per-type sync switches (next 1.3.0 iteration) ----
+    #
+    # Which kinds of clipboard content leave this machine.  ON for all of them
+    # by default, which is exactly the behaviour before these switches existed;
+    # turning one off stops that kind from being sent to peers while the local
+    # history keeps capturing it whole.  They filter the *outgoing* message only
+    # — nothing about receiving changes — and the capture path reads them live on
+    # every copy (see ``SyncManager._do_read_and_send_locked``).
+    #
+    # The mapping is by content type, not by history label: an image is one
+    # switch for both the bitmap and the EMF vector, and a file list is one
+    # switch for every file platform's payload.
+    sync_text: bool = True
+    sync_url: bool = True
+    sync_html: bool = True
+    sync_rtf: bool = True
+    sync_image: bool = True  # IMAGE_PNG and IMAGE_EMF
+    sync_file: bool = True  # FILE (off = no file offer is built either)
+
     # Periodic silent update check against GitHub releases (~every 6h).  OFF
     # means the background loop never contacts the network for update checks;
     # manual "check for updates" stays available either way.
@@ -327,8 +370,11 @@ class Config:
     # Hotkeys
     hotkeys: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HOTKEYS))
 
-    # Global hotkeys are off by default; the user can enable them in settings.
-    hotkeys_enabled: bool = False
+    # Global hotkeys are on by default since v5: the paste panel is the
+    # application's main gesture and a shortcut that only starts working after
+    # a visit to the settings page is a shortcut nobody finds.  The defaults on
+    # the map are only the safe ones — the paste slots stay unbound.
+    hotkeys_enabled: bool = True
 
     # Paired devices this machine does *not* send clipboard content to.
     #
@@ -809,6 +855,15 @@ FIELD_RULES: dict[str, tuple] = {
     "confirm_large_file_mb": ("int", 0, 65536),
     # A relay-specific ceiling, 0 = no extra cap.
     "relay_paste_max_mb": ("int", 0, 65536),
+    # -- per-type sync switches (next 1.3.0 iteration) --
+    # Which content types are sent to peers; local history is unaffected.  All
+    # default ON, matching the behaviour before the switches existed.
+    "sync_text": ("bool",),
+    "sync_url": ("bool",),
+    "sync_html": ("bool",),
+    "sync_rtf": ("bool",),
+    "sync_image": ("bool",),
+    "sync_file": ("bool",),
 }
 
 # The numeric subset, for the callers that only need the bounds (the settings
@@ -1106,6 +1161,13 @@ def load() -> Config:
                 "max_file_mb",
                 "confirm_large_file_mb",
                 "relay_paste_max_mb",
+                # Per-type sync switches (next 1.3.0 iteration).
+                "sync_text",
+                "sync_url",
+                "sync_html",
+                "sync_rtf",
+                "sync_image",
+                "sync_file",
                 "auto_update_check",
                 "app_filter_enabled",
                 "app_filter_mode",
@@ -1222,6 +1284,23 @@ def load() -> Config:
                     "show_quick_paste", DEFAULT_HOTKEYS["show_quick_paste"]
                 )
                 cfg.config_version = 4
+            # v5 (1.3.0): the global hotkeys are on by default now that the
+            # paste panel is the gesture the app is built around, and the
+            # defaults follow the platform's own modifier (Cmd on macOS).
+            # The paste slots ship unbound: Ctrl+1…9 / Cmd+1…9 is how every
+            # browser, editor and terminal switches tabs, and a default that
+            # takes those chords system-wide breaks a reflex everywhere else.
+            # Only bindings still spelled like the v4 defaults are rewritten —
+            # a chord the user chose is kept.
+            if data.get("config_version", 1) < 5:
+                if not cfg.hotkeys_enabled:
+                    cfg.hotkeys_enabled = True
+                platform_defaults = default_hotkeys()
+                for action, old_default in _V4_DEFAULT_HOTKEYS.items():
+                    if cfg.hotkeys.get(action) != old_default:
+                        continue
+                    cfg.hotkeys[action] = platform_defaults[action]
+                cfg.config_version = 5
             # Migrate from legacy dict-format peers (pre-list) to list format:
             #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
             cfg.peers = _parse_peer_list(data, "peers")
@@ -1240,7 +1319,7 @@ def load() -> Config:
 
 def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
     with config_lock:
-        cfg.config_version = 4
+        cfg.config_version = 5
         config_dir = _config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = _config_path()
@@ -1322,6 +1401,12 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "max_file_mb": cfg.max_file_mb,
             "confirm_large_file_mb": cfg.confirm_large_file_mb,
             "relay_paste_max_mb": cfg.relay_paste_max_mb,
+            "sync_text": cfg.sync_text,
+            "sync_url": cfg.sync_url,
+            "sync_html": cfg.sync_html,
+            "sync_rtf": cfg.sync_rtf,
+            "sync_image": cfg.sync_image,
+            "sync_file": cfg.sync_file,
             "auto_update_check": cfg.auto_update_check,
             "app_filter_enabled": cfg.app_filter_enabled,
             "app_filter_mode": cfg.app_filter_mode,

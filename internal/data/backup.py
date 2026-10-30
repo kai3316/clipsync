@@ -314,6 +314,15 @@ def backup_config_dict(cfg: Config) -> dict:
         "max_file_mb": cfg.max_file_mb,
         "confirm_large_file_mb": cfg.confirm_large_file_mb,
         "relay_paste_max_mb": cfg.relay_paste_max_mb,
+        # ---- per-type sync switches (next 1.3.0 iteration) ----
+        # A restore that dropped these would silently send a type its owner had
+        # switched off; the switches are preferences like every other one.
+        "sync_text": cfg.sync_text,
+        "sync_url": cfg.sync_url,
+        "sync_html": cfg.sync_html,
+        "sync_rtf": cfg.sync_rtf,
+        "sync_image": cfg.sync_image,
+        "sync_file": cfg.sync_file,
         "app_filter_enabled": cfg.app_filter_enabled,
         "app_filter_mode": cfg.app_filter_mode,
         "app_filter_list": cfg.app_filter_list,

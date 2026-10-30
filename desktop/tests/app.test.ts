@@ -160,6 +160,7 @@ vi.mock("../src/api/bridge", () => ({
     restoreBackup: vi.fn(),
     createBackup: vi.fn().mockResolvedValue({ backup_path: "C:/b/new.zip" }),
     exportHistory: vi.fn().mockResolvedValue({ filename: "history.json", filepath: "C:/b/history.json" }),
+  chooseSaveFile: vi.fn(),
     importHistory: vi.fn().mockResolvedValue({ ok: true, imported: 0 }),
     confirmPairing: vi.fn().mockResolvedValue({ paired: false, status: "confirmed_waiting" }),
     unpairDevice: vi.fn().mockResolvedValue({ accepted: true }),
@@ -256,16 +257,23 @@ vi.mock("../src/api/bridge", () => ({
  * other way round, keeping its cards as hidden nodes because its search has to
  * count them.
  */
-/** The chord that opens each page, in the order the sidebar draws them.
+/** The sidebar row that opens each page, which is now the only way to open one.
  *
  * The window opens on the overview — the legacy dashboard did, and the phone's
  * Companion panel still does — so a case that reaches into another page's rows
- * has to go there first.  The digits count the sidebar's rows, which is the
- * same table the window writes into its tooltips and its `aria-keyshortcuts`.
+ * has to click its row.  The rows are found by their position rather than their
+ * label: a case that sets the locale to English must still find them, and the
+ * digits that used to open pages were removed in 1.2.4.
  */
-const PAGE_CHORDS = {
-  overview: "1", history: "2", devices: "3", favorites: "4",
-  transfers: "5", chat: "6", ai: "7", settings: "8",
+const PAGE_LABELS = {
+  overview: "概览", history: "剪贴板历史", devices: "设备", favorites: "收藏库",
+  transfers: "文件传输", chat: "附近聊天", ai: "AI 配置", settings: "设置",
+} as const;
+
+/** The row each page occupies, in the order the sidebar draws them. */
+const PAGE_ROW = {
+  overview: 0, history: 1, devices: 2, favorites: 3, chat: 4, transfers: 5,
+  companion: 6, internet: 7, ai: 8, settings: 9,
 } as const;
 
 /** Let the search box's debounce run out.
@@ -278,14 +286,15 @@ const searchSettles = () => new Promise((done) => { setTimeout(done, 260); });
 /** Mount the window on the page the case is about.  `attachTo` is passed
  * through for the cases that are about where the keyboard goes.
  *
- * The chord is dispatched rather than the sidebar row clicked so that the page
- * is where it is because the window says so, and the caller's own
- * `flushPromises` is what paints it — the same one the mount line used to be
- * followed by. */
-function mountOn(page: keyof typeof PAGE_CHORDS, attachTo?: HTMLElement) {
+ * The sidebar row is clicked rather than a chord dispatched: clicking is the
+ * only way in now, and `openPage`'s hydration runs for a click the same way it
+ * ran for the chord.  The caller's own `flushPromises` is what paints it. */
+function mountOn(page: keyof typeof PAGE_LABELS, attachTo?: HTMLElement) {
   const app = attachTo ? mount(App, { attachTo }) : mount(App);
   if (page !== "overview") {
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: PAGE_CHORDS[page], ctrlKey: true }));
+    const row = app.findAll("nav button")[PAGE_ROW[page]];
+    if (!row) throw new Error(`no sidebar row for ${page}`);
+    void row.trigger("click");
   }
   return app;
 }
@@ -573,8 +582,7 @@ describe("history rendering", () => {
     // 概览 / 剪贴板历史 / 设备 are the pages a reader lives in, so they sit at
     // the top; everything else is a collection kept by the history page or a
     // tool that configures the window.  The grouping is a word above a row, not
-    // a different row, and the digit chords did not move with the order: the
-    // sidebar advertises `PAGES`' own numbering, so old habits keep working.
+    // a different row; each row carries its own name and nothing else.
     const app = mount(App);
     try {
       await flushPromises();
@@ -594,16 +602,13 @@ describe("history rendering", () => {
       expect(groups[1].findAll("button").map(node => node.attributes("aria-label")))
         .toEqual(["手机伴侣", "互联网同步", "AI 配置"]);
       expect(nav.get(".sidebar-settings button").attributes("aria-label")).toBe("设置");
-      // Moving rows on screen did not move the chords they answer to.
-      const chordOf = (label: string) =>
-        nav.findAll("button").find(button => button.attributes("aria-label") === label)!
-          .attributes("aria-keyshortcuts");
-      expect(chordOf("概览")).toBe("Control+1");
-      expect(chordOf("剪贴板历史")).toBe("Control+2");
-      expect(chordOf("设备")).toBe("Control+3");
-      expect(chordOf("收藏库")).toBe("Control+4");
-      expect(chordOf("AI 配置")).toBe("Control+7");
-      expect(chordOf("设置")).toBe("Control+8");
+      // The rows no longer advertise a digit chord: opening a page is a click,
+      // and a tooltip claiming a binding the window does not answer would be
+      // the same "关不掉" class of lie the hotfix removed.
+      const rows = nav.findAll("button");
+      expect(rows.every(row => row.attributes("aria-keyshortcuts") === undefined)).toBe(true);
+      expect(rows.map(row => row.attributes("title")))
+        .toEqual(expect.arrayContaining(["概览", "剪贴板历史", "设备", "设置"]));
     } finally {
       app.unmount();
     }
@@ -620,38 +625,23 @@ describe("history rendering", () => {
     };
     try {
       await flushPromises();
-      // The numbers count the sidebar rows, in the order they are drawn, and
-      // the row says which number it is — the chord is only discoverable if the
-      // sidebar advertises it.  Settings is drawn after the seven content
-      // pages, so the pages count 1–7 and settings is 8.
-      const transfers = app.findAll("button").find(button => button.attributes("aria-label") === "文件传输")!;
-      expect(transfers.attributes("aria-keyshortcuts")).toBe("Control+5");
-      expect(transfers.attributes("title")).toContain("Ctrl+5");
-      const aiRow = app.findAll("button").find(button => button.attributes("aria-label") === "AI 配置")!;
-      expect(aiRow.attributes("aria-keyshortcuts")).toBe("Control+7");
-      // The first row is the page the window opens on, so its chord is the way
-      // back to where a reader who has wandered off started.
-      const dashboard = app.findAll("button").find(button => button.attributes("aria-label") === "概览")!;
-      expect(dashboard.attributes("aria-keyshortcuts")).toBe("Control+1");
+      // Pages are opened by their row now (1.2.4), so a digit is not a page
+      // chord: the window stays where it is, and the global paste_1…9 bindings
+      // live in the host, not here.
       await press("5");
-      expect(app.find(".transfers-view").exists()).toBe(true);
-      await press("4");
-      expect(app.find(".favorites-view").exists()).toBe(true);
+      expect(app.find(".overview-view").exists()).toBe(true);
       await press("1");
       expect(app.find(".overview-view").exists()).toBe(true);
-      // Ctrl+F goes to the search box, from wherever it is pressed: the
-      // dashboard in front of us has none of its own, so the history page's is
-      // the one it reaches.
+      const transfers = app.findAll("button").find(button => button.attributes("aria-label") === "文件传输")!;
+      await transfers.trigger("click");
+      await flushPromises();
+      expect(app.find(".transfers-view").exists()).toBe(true);
+      // Ctrl+F goes to the search box, from wherever it is pressed: the page in
+      // front of us has none of its own, so the history page's is the one it
+      // reaches.
       await press("f");
       expect(app.find(".history-list").exists()).toBe(true);
       expect(document.activeElement).toBe(app.get('[aria-label="搜索历史记录"]').element);
-      // The AI page is a page of content, and the settings page is not: the
-      // chord reaches each of them and leaves the other alone.
-      await press("7");
-      expect(app.find(".ai-page").exists()).toBe(true);
-      expect(app.find(".settings-panel").exists()).toBe(false);
-      await press("8");
-      expect(app.find(".settings-panel").exists()).toBe(true);
       // Preferences has the chord everyone tries first.
       await press(",");
       expect(app.find(".settings-panel").exists()).toBe(true);
@@ -660,14 +650,15 @@ describe("history rendering", () => {
       await press("f");
       expect(app.find(".settings-panel").exists()).toBe(true);
       expect(document.activeElement).toBe(app.get('[aria-label="搜索设置…"]').element);
-      // An open dialog owns the keyboard: nothing behind it may move.
+      // An open dialog owns the keyboard: nothing behind it may move.  A
+      // settings search chord must not steal the focus from the dialog.
       const dialog = document.createElement("dialog");
       dialog.setAttribute("open", "");
       document.body.append(dialog);
-      await press("1");
+      await press("f");
       expect(app.find(".settings-panel").exists()).toBe(true);
       dialog.remove();
-      // And a bare key is not a chord.
+      // And a bare key is not a chord of any kind.
       await press("2", {});
       expect(app.find(".settings-panel").exists()).toBe(true);
     } finally {
@@ -4301,7 +4292,9 @@ describe("files dropped on the window", () => {
 
   /** Open the chat page after the drop listener has been captured. */
   async function openChat(app: VueWrapper) {
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "6", ctrlKey: true }));
+    // The sidebar row, not a chord: 1.2.4 removed the digit bindings, and the
+    // drop listener is what the case needs installed before the navigation.
+    await app.findAll("nav button")[PAGE_ROW.chat].trigger("click");
     await flushPromises();
   }
 
@@ -4563,7 +4556,7 @@ describe("the window's right-click menus", () => {
 });
 
 
-describe("the history toolbar's quick-paste entry", () => {
+describe("the history toolbar's paste-panel entry", () => {
   it("opens the overlay from the page that holds the rows", async () => {
     setLocale("zh-CN");
     vi.mocked(bridge.openQuickPaste).mockClear();
@@ -4571,8 +4564,11 @@ describe("the history toolbar's quick-paste entry", () => {
     try {
       await flushPromises();
       const entry = app.findAll("button")
-        .find(node => node.attributes("aria-label") === t("快速粘贴"))!;
-      expect(entry.exists(), "no quick-paste entry on the history toolbar").toBe(true);
+        .find(node => node.attributes("aria-label") === t("粘贴面板"))!;
+      expect(entry.exists(), "no paste-panel entry on the history toolbar").toBe(true);
+      // The chord is in the tooltip: the bar button carries the name, the
+      // overview button carries the visible key hint.
+      expect(entry.attributes("title")).toBe(t("粘贴面板（Ctrl+Shift+V）"));
       await entry.trigger("click");
       await flushPromises();
       // One command: the window, the focus bookkeeping and the paste into the
@@ -5778,6 +5774,29 @@ describe("backup and restore", () => {
     }
   });
 
+  it("asks where to save before writing the export file", async () => {
+    // The path is the reader's, not a folder the window picked for them: the
+    // settings card's format buttons still ask through the native save picker.
+    setLocale("zh-CN");
+    vi.clearAllMocks();
+    vi.mocked(bridge.chooseSaveFile).mockResolvedValue("C:/Users/x/history.json");
+    vi.mocked(bridge.exportHistory).mockResolvedValue({
+      filename: "history.json", filepath: "C:/Users/x/history.json",
+    });
+    const app = mountOn("settings");
+    try {
+      await flushPromises();
+      await app.findAll("button").find(button => button.text() === "导出 JSON")!.trigger("click");
+      await flushPromises();
+      expect(bridge.chooseSaveFile).toHaveBeenCalledWith("json");
+      expect(bridge.exportHistory).toHaveBeenCalledWith("json", "C:/Users/x/history.json");
+    } finally {
+      vi.mocked(bridge.chooseSaveFile).mockReset();
+      app.unmount();
+      setLocale("zh-CN");
+    }
+  });
+
   it("says how much of the history an import brought back", async () => {
     setLocale("zh-CN");
     vi.clearAllMocks();
@@ -6099,6 +6118,104 @@ describe("the file card", () => {
   });
 });
 
+describe("the sync content-type switches", () => {
+  /** The six boxes, in the order the fieldset draws them. */
+  const boxes = (app: VueWrapper) => app.get("#settings-sync .sync-types").findAll('input[type="checkbox"]');
+  const checked = (app: VueWrapper) => boxes(app).map(box => (box.element as HTMLInputElement).checked);
+
+  it("draws six type switches, all on, for a config that never stored them", async () => {
+    // The six ship on, and an absent key reads as on: a config that predates
+    // them must not start withholding types nobody switched off.
+    setLocale("zh-CN");
+    vi.clearAllMocks();
+    vi.mocked(bridge.settings).mockResolvedValue({ settings: { device_name: "Local" } } as any);
+    vi.mocked(bridge.updateSettings).mockResolvedValue({} as any);
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设置"]').trigger("click");
+      await flushPromises();
+      expect(boxes(app)).toHaveLength(6);
+      expect(checked(app)).toEqual([true, true, true, true, true, true]);
+      // The block says what off means for the two sides that differ: recorded
+      // and received as before, only the outgoing half stands down.
+      expect(app.text()).toContain(t("关闭的类型只保留在本机历史，不再发送给其他设备；接收对方内容不受影响。"));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} } as any);
+      setLocale("zh-CN");
+    }
+  });
+
+  it("saves the types that were switched off as false, and the rest as true", async () => {
+    setLocale("zh-CN");
+    vi.clearAllMocks();
+    vi.mocked(bridge.settings).mockResolvedValue({ settings: { device_name: "Local" } } as any);
+    vi.mocked(bridge.updateSettings).mockResolvedValue({} as any);
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设置"]').trigger("click");
+      await flushPromises();
+      // 文本 and 图片 off; the other four keep their default.
+      await boxes(app)[0].setValue(false);
+      await boxes(app)[4].setValue(false);
+      await flushPromises();
+      expect(app.text()).toContain(t("有未保存的更改"));
+      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
+      await flushPromises();
+      expect(bridge.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+        sync_text: false,
+        sync_url: true,
+        sync_html: true,
+        sync_rtf: true,
+        sync_image: false,
+        sync_file: true,
+      }));
+      expect(app.text()).toContain(t("所有更改都已保存"));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} } as any);
+      setLocale("zh-CN");
+    }
+  });
+
+  it("fills the boxes back from settings.get when the page is opened again", async () => {
+    // The page's own rule: re-opening a clean form re-reads it, because another
+    // surface may have changed what is stored since it was drawn.
+    setLocale("zh-CN");
+    vi.clearAllMocks();
+    vi.mocked(bridge.settings).mockResolvedValue({ settings: {
+      device_name: "Local", sync_text: false, sync_url: true, sync_html: false,
+      sync_rtf: true, sync_image: false, sync_file: true,
+    } } as any);
+    vi.mocked(bridge.updateSettings).mockResolvedValue({} as any);
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设置"]').trigger("click");
+      await flushPromises();
+      expect(checked(app)).toEqual([false, true, false, true, false, true]);
+
+      // A change made elsewhere while the page was away — the phone's panel, a
+      // restore — is what the second visit has to show.
+      await app.get('[aria-label="概览"]').trigger("click");
+      await flushPromises();
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: {
+        device_name: "Local", sync_text: true, sync_url: false, sync_html: true,
+        sync_rtf: false, sync_image: true, sync_file: false,
+      } } as any);
+      await app.get('[aria-label="设置"]').trigger("click");
+      await flushPromises();
+      expect(checked(app)).toEqual([true, false, true, false, true, false]);
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} } as any);
+      setLocale("zh-CN");
+    }
+  });
+});
+
 describe("dialog chrome", () => {
   // jsdom has `HTMLDialogElement` but not its two methods, and this case is the
   // only one in this file that asks whether the element is really open: the
@@ -6356,6 +6473,118 @@ describe("the quick search chord", () => {
       expect(vi.mocked(bridge.favorites).mock.calls).toContainEqual(["周报", "", 0, 30]);
     } finally {
       app.unmount();
+      vi.mocked(bridge.status).mockResolvedValue({
+        version: "test", health: "ready", device_name: "Local",
+        session_id: "s", seq: 0, sync_state: "not_started",
+      } as any);
+    }
+  });
+});
+
+describe("the sidebar rail", () => {
+  it("folds to icons and remembers the choice", async () => {
+    localStorage.removeItem("clipsync.sidebar.collapsed");
+    const app = mountOn("overview");
+    try {
+      await flushPromises();
+      expect(app.get(".application").classes()).not.toContain("application--collapsed");
+      expect(app.get(".sidebar-toggle").attributes("aria-expanded")).toBe("true");
+
+      await app.get(".sidebar-toggle").trigger("click");
+      expect(app.get(".application").classes()).toContain("application--collapsed");
+      expect(app.get(".sidebar-toggle").attributes("aria-expanded")).toBe("false");
+      expect(localStorage.getItem("clipsync.sidebar.collapsed")).toBe("1");
+
+      await app.get(".sidebar-toggle").trigger("click");
+      expect(app.get(".application").classes()).not.toContain("application--collapsed");
+      expect(localStorage.getItem("clipsync.sidebar.collapsed")).toBe("0");
+    } finally {
+      app.unmount();
+      localStorage.removeItem("clipsync.sidebar.collapsed");
+    }
+  });
+});
+
+describe("the boot frame", () => {
+  /** Put the static splash in the document the way index.html has it: outside
+   *  `#app`, so it covers the shell until the window removes it. */
+  function addBoot(): HTMLElement {
+    const boot = document.createElement("div");
+    boot.id = "boot";
+    document.body.append(boot);
+    return boot;
+  }
+
+  it("stays until the overview's first frame, not merely until the status", async () => {
+    let release: ((value: ReturnType<typeof overview>) => void) | undefined;
+    vi.mocked(bridge.status).mockResolvedValue({
+      version: "test", health: "ready", device_name: "Local",
+      session_id: "s", seq: 0, sync_state: "not_started",
+      // The overview is a host-gated read: a status without the capability
+      // draws no page for the splash to wait for.
+      capabilities: ["overview.get"],
+    } as any);
+    vi.mocked(bridge.overview).mockReturnValue(new Promise((resolve) => { release = resolve; }) as any);
+    addBoot();
+    const app = mount(App);
+    try {
+      await flushPromises();
+      // The sidecar said ready, and the shell under the splash is already the
+      // real window — but the page in it is still a skeleton, which is exactly
+      // the second loading step the splash exists to hide.
+      expect(document.getElementById("boot"), "splash left before the page had a frame").not.toBeNull();
+      release?.(overview({}));
+      await flushPromises();
+      await flushPromises();
+      expect(document.getElementById("boot")).toBeNull();
+    } finally {
+      app.unmount();
+      document.getElementById("boot")?.remove();
+      vi.mocked(bridge.overview).mockResolvedValue(overview({}));
+    }
+  });
+
+  it("lets the splash go after the fallback even when the page never answers", async () => {
+    vi.useFakeTimers();
+    // A read that never lands: the splash is not a reason to keep a window
+    // covered forever, so the 1.5 s fallback is the second half of the rule.
+    vi.mocked(bridge.status).mockResolvedValue({
+      version: "test", health: "ready", device_name: "Local",
+      session_id: "s", seq: 0, sync_state: "not_started",
+      capabilities: ["overview.get"],
+    } as any);
+    vi.mocked(bridge.overview).mockReturnValue(new Promise(() => {}) as any);
+    addBoot();
+    const app = mount(App);
+    try {
+      await flushPromises();
+      expect(document.getElementById("boot")).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(1500);
+      await flushPromises();
+      expect(document.getElementById("boot")).toBeNull();
+    } finally {
+      app.unmount();
+      document.getElementById("boot")?.remove();
+      vi.useRealTimers();
+      vi.mocked(bridge.overview).mockResolvedValue(overview({}));
+    }
+  });
+
+  it("drops the splash at once for a locked runtime, which has no overview", async () => {
+    vi.mocked(bridge.status).mockResolvedValue({
+      version: "test", health: "locked", device_name: "Local",
+      session_id: "s", seq: 0, sync_state: "not_started",
+    } as any);
+    addBoot();
+    const app = mount(App);
+    try {
+      await flushPromises();
+      // The unlock form is a page in its own right: waiting for an overview the
+      // locked shell cannot load would be a splash over a form that is ready.
+      expect(document.getElementById("boot")).toBeNull();
+    } finally {
+      app.unmount();
+      document.getElementById("boot")?.remove();
       vi.mocked(bridge.status).mockResolvedValue({
         version: "test", health: "ready", device_name: "Local",
         session_id: "s", seq: 0, sync_state: "not_started",

@@ -13,6 +13,8 @@ vi.mock("../src/api/bridge", () => ({
     quickPasteList: vi.fn(),
     quickPasteChoose: vi.fn(),
     quickPasteClose: vi.fn(),
+    quickPasteChooseFavorite: vi.fn(),
+    quickPasteFavorites: vi.fn(),
     preparePasteEntry: vi.fn(),
     cancelPasteEntry: vi.fn(),
     transfers: vi.fn(),
@@ -137,7 +139,7 @@ describe("quick paste overlay", () => {
       hit({ id: "b", preview: "第二条" }),
     ]);
     try {
-      expect(bridge.quickPasteList).toHaveBeenCalledWith("", "all", 20);
+      expect(bridge.quickPasteList).toHaveBeenCalledWith("", "all", 20, "newest");
       expect(wrapper.findAll(".quick-paste-row")).toHaveLength(2);
       // The cursor starts on the first row and the list says so: Enter with
       // nothing pressed else is "take the newest clip".
@@ -148,6 +150,102 @@ describe("quick paste overlay", () => {
       // tells two clips with the same words apart.
       expect(wrapper.get(".quick-paste-meta").text()).toContain("文本");
       expect(wrapper.get(".quick-paste-meta").text()).toContain("Notes");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("shows a picture on an image row, and asks only for image rows", async () => {
+    // The sidecar downscales the picture for the history card already; the
+    // palette asks for the same card, so a glance at the list is enough to
+    // recognise a screenshot without pasting it first.
+    const image = hit({ id: "img-1", content_type: "IMAGE_PNG", preview: "[Image]" });
+    const text = hit({ id: "text-1", content_type: "TEXT", preview: "会议纪要" });
+    vi.mocked(bridge.previewHistoryEntry).mockResolvedValue({
+      kind: "image", image: "data:image/png;base64,AAAA", width: 800, height: 600,
+      files: [], total: 0,
+    });
+    const wrapper = await mountOverlay([image, text]);
+    try {
+      await flushPromises();
+      expect(bridge.previewHistoryEntry).toHaveBeenCalledWith("img-1");
+      expect(bridge.previewHistoryEntry).not.toHaveBeenCalledWith("text-1");
+      const thumb = wrapper.get(".quick-paste-glyph--image img");
+      expect(thumb.attributes("src")).toBe("data:image/png;base64,AAAA");
+      // The text row keeps the kind glyph: one preview read is one image, not
+      // one per row.
+      expect(wrapper.findAll(".quick-paste-glyph--image")).toHaveLength(1);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("opens the enlarged picture when the pointer rests on an image row", async () => {
+    // The history list has done this since the preview card existed; the
+    // palette now says the same thing without giving up a list column.
+    vi.mocked(bridge.previewHistoryEntry).mockResolvedValue({
+      kind: "image", image: "data:image/png;base64,AAAA", width: 800, height: 600,
+      files: [], total: 0,
+    });
+    const wrapper = await mountOverlay([
+      hit({ id: "img-3", content_type: "IMAGE_PNG", preview: "[Image]" }),
+      hit({ id: "text-3", content_type: "TEXT", preview: "会议纪要" }),
+    ]);
+    try {
+      await flushPromises();
+      const rows = wrapper.findAll(".quick-paste-row");
+      await rows[0].trigger("mouseenter", { clientX: 120, clientY: 160 });
+      vi.advanceTimersByTime(200);
+      await flushPromises();
+      const card = wrapper.get(".quick-paste-preview");
+      expect(card.get("img").attributes("src")).toBe("data:image/png;base64,AAAA");
+      expect(card.text()).toContain("800 × 600");
+
+      await rows[0].trigger("mouseleave");
+      expect(wrapper.find(".quick-paste-preview").exists()).toBe(false);
+
+      // A text row is not a picture; resting on it must not open the card.
+      await rows[1].trigger("mouseenter", { clientX: 120, clientY: 200 });
+      vi.advanceTimersByTime(200);
+      await flushPromises();
+      expect(wrapper.find(".quick-paste-preview").exists()).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("keeps the kind glyph when an image preview cannot be read", async () => {    vi.mocked(bridge.previewHistoryEntry).mockRejectedValue(new Error("no preview"));
+    const wrapper = await mountOverlay([hit({ id: "img-2", content_type: "IMAGE_PNG", preview: "[Image]" })]);
+    try {
+      await flushPromises();
+      expect(wrapper.find(".quick-paste-glyph--image").exists()).toBe(false);
+      expect(wrapper.findAll(".quick-paste-row")).toHaveLength(1);
+      expect(bridge.previewHistoryEntry).toHaveBeenCalledTimes(1);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("switches to the 收藏 library and pastes a favourite from it", async () => {
+    vi.mocked(bridge.quickPasteFavorites).mockResolvedValue({
+      items: [{
+        id: "f1", title: "常用地址", preview: "北京市朝阳区…", group: "工作",
+        position: 0, created: 1, updated: 2,
+      }],
+      total: 1, offset: 0, groups: ["工作"], session_id: "s", seq: 0,
+    } as any);
+    const wrapper = await mountOverlay([hit()]);
+    try {
+      const favoriteChip = wrapper.findAll("button")
+        .find(node => (node.text() || "").includes("收藏"))!;
+      await favoriteChip.trigger("click");
+      await flushPromises();
+      expect(bridge.quickPasteFavorites).toHaveBeenCalledWith("", 20);
+      expect(wrapper.get(".quick-paste-text").text()).toBe("常用地址");
+
+      await press("Enter");
+      expect(bridge.quickPasteChooseFavorite).toHaveBeenCalledWith("f1");
+      expect(bridge.quickPasteChoose).not.toHaveBeenCalled();
     } finally {
       wrapper.unmount();
     }
@@ -165,7 +263,7 @@ describe("quick paste overlay", () => {
       expect(bridge.quickPasteList).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(30);
       await flushPromises();
-      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("会议", "all", 20);
+      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("会议", "all", 20, "newest");
     } finally {
       wrapper.unmount();
     }
@@ -178,20 +276,29 @@ describe("quick paste overlay", () => {
       await flushPromises();
       // A chip is a decision rather than typing, so it has no pause to wait
       // out — and the id is the history page's own vocabulary.
-      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("", "image", 20);
+      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("", "image", 20, "newest");
       expect(wrapper.findAll(".quick-paste-chip")[2].attributes("aria-pressed")).toBe("true");
     } finally {
       wrapper.unmount();
     }
   });
 
-  it("moves the cursor with the arrow keys, wrapping at both ends", async () => {
+  it("moves the cursor with the arrow keys, wrapping at both ends, and scrolls it into view", async () => {
+    // jsdom has no layout, so `scrollIntoView` does not exist on its elements:
+    // the stub is what a case can observe, and the browser the window really
+    // runs in is what the call is for.
+    const scrollIntoView = vi.fn();
+    (HTMLElement.prototype as any).scrollIntoView = scrollIntoView;
     const wrapper = await mountOverlay([
       hit({ id: "a" }), hit({ id: "b" }), hit({ id: "c" }),
     ]);
     try {
       await press("ArrowDown");
       expect(selectedIndex(wrapper)).toBe(1);
+      // The row the cursor moved to is brought into the visible part of the
+      // list — a keyboard that moves a selection nobody can see is not a key
+      // that works.
+      expect(scrollIntoView).toHaveBeenCalled();
       await press("ArrowDown");
       await press("ArrowDown");
       // Past the last row is the first one, like every other list in the window.
@@ -200,6 +307,7 @@ describe("quick paste overlay", () => {
       expect(selectedIndex(wrapper)).toBe(2);
     } finally {
       wrapper.unmount();
+      delete (HTMLElement.prototype as any).scrollIntoView;
     }
   });
 
@@ -221,11 +329,17 @@ describe("quick paste overlay", () => {
     }
   });
 
-  it("pastes the row a double click lands on, in its formatted form", async () => {
+  it("pastes the row a click lands on, after one double-click interval", async () => {
     const wrapper = await mountOverlay([hit({ id: "a" }), hit({ id: "b" })]);
     try {
-      await wrapper.findAll(".quick-paste-row")[1].trigger("dblclick");
+      // A click is a choice; the short delay is what keeps a reader's habitual
+      // double click from pasting twice (or clicking the app behind once the
+      // overlay closes).  Both gestures end as one paste.
+      await wrapper.findAll(".quick-paste-row")[1].trigger("click");
+      await wrapper.findAll(".quick-paste-row")[1].trigger("click");
+      vi.advanceTimersByTime(200);
       await flushPromises();
+      expect(bridge.quickPasteChoose).toHaveBeenCalledTimes(1);
       expect(bridge.quickPasteChoose).toHaveBeenLastCalledWith("b", false);
     } finally {
       wrapper.unmount();
@@ -246,7 +360,7 @@ describe("quick paste overlay", () => {
     }
   });
 
-  it("takes one pick at a time, and stays open while the paste is in flight", async () => {
+  it("takes one pick at a time, and hides when the focus leaves even mid-pick", async () => {
     const wrapper = await mountOverlay();
     try {
       let settle: (result: { ok: boolean }) => void = () => {};
@@ -256,17 +370,14 @@ describe("quick paste overlay", () => {
       await press("Enter");
       await press("Enter", { shiftKey: true });
       expect(bridge.quickPasteChoose).toHaveBeenCalledTimes(1);
-      // The pick is about to move the focus to the application behind the
-      // window, and the blur that causes is not the reader closing it.
-      window.dispatchEvent(new Event("blur"));
-      await flushPromises();
-      expect(bridge.quickPasteClose).not.toHaveBeenCalled();
-      // Once the host has answered, losing the focus closes as usual.
-      settle({ ok: true });
-      await flushPromises();
+      // The overlay hides on every blur now, the pick in flight included: the
+      // reader looking away is the reader dismissing it, and a window that
+      // "关不掉" while it waits for the host was the reported bug.
       window.dispatchEvent(new Event("blur"));
       await flushPromises();
       expect(bridge.quickPasteClose).toHaveBeenCalledOnce();
+      settle({ ok: true });
+      await flushPromises();
     } finally {
       wrapper.unmount();
     }
@@ -310,7 +421,7 @@ describe("quick paste overlay", () => {
       await flushPromises();
       await flushPromises();
       expect((wrapper.get('[aria-label="搜索剪贴板历史"]').element as HTMLInputElement).value).toBe("");
-      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("", "all", 20);
+      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("", "all", 20, "newest");
       expect(wrapper.findAll(".quick-paste-chip")[0].attributes("aria-pressed")).toBe("true");
     } finally {
       wrapper.unmount();
@@ -367,6 +478,12 @@ describe("quick paste overlay", () => {
       await flushPromises();
       expect(wrapper.get('[role="alert"]').text()).toBe("连接已断开");
       expect(wrapper.findAll(".quick-paste-row")).toHaveLength(0);
+      // The failure keeps a retry: the list is the whole window, and the only
+      // thing that can fix a failed read is another read.
+      vi.mocked(bridge.quickPasteList).mockResolvedValue(listPage([hit()]));
+      await wrapper.findAll("button").find(node => node.text() === t("重试"))!.trigger("click");
+      await flushPromises();
+      expect(wrapper.findAll(".quick-paste-row")).toHaveLength(1);
     } finally {
       wrapper.unmount();
     }
@@ -387,6 +504,87 @@ describe("quick paste overlay", () => {
       await wrapper.findAll(".quick-paste-chip")[2].trigger("click");
       await flushPromises();
       expect(wrapper.get(".quick-paste-empty-title").text()).toBe(t("还没有{type}", { type: t("图片") }));
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  /* ── Order and the two client-side filters (1.2.4) ───────────────────── */
+
+  it("asks the host for the order it shows, instead of reversing the page", async () => {
+    const wrapper = await mountOverlay();
+    try {
+      const sortChip = wrapper.get(".quick-paste-sort");
+      expect(sortChip.text()).toContain(t("最新优先"));
+      await sortChip.trigger("click");
+      await flushPromises();
+      // "oldest" is a different read: the oldest rows of the history are what
+      // the choice is for, and they are not the tail of a 20-row page.
+      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("", "all", 20, "oldest");
+      expect(wrapper.get(".quick-paste-sort").text()).toContain(t("最旧优先"));
+      await wrapper.get(".quick-paste-sort").trigger("click");
+      await flushPromises();
+      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("", "all", 20, "newest");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("narrows the panel by time on this side, asking for a wider page first", async () => {
+    const now = Date.now();
+    const wrapper = await mountOverlay([
+      hit({ id: "today", preview: "今天复制的", timestamp: now / 1000 - 60 }),
+      hit({ id: "old", preview: "很久以前", timestamp: now / 1000 - 3 * 24 * 3600 }),
+    ]);
+    try {
+      expect(wrapper.findAll(".quick-paste-row")).toHaveLength(2);
+      // 今天 is a calendar question, and the host's page is twenty rows: the
+      // filter is client-side, so the page it filters has to be wide enough to
+      // contain the answer.  100 is the host's own cap.
+      await wrapper.findAll(".quick-paste-time").find(node => node.text() === t("今天"))!.trigger("click");
+      await flushPromises();
+      await flushPromises();
+      expect(bridge.quickPasteList).toHaveBeenLastCalledWith("", "all", 100, "newest");
+      expect(wrapper.findAll(".quick-paste-row")).toHaveLength(1);
+      expect(wrapper.get(".quick-paste-row").text()).toContain("今天复制的");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("narrows by source device, offering the devices the page contains", async () => {
+    const wrapper = await mountOverlay([
+      hit({ id: "local", preview: "本机的", source_device: "", source_name: "" }),
+      hit({ id: "laptop", preview: "笔记本的", source_device: "peer-1", source_name: "Laptop" }),
+      hit({ id: "studio", preview: "工作站的", source_device: "peer-2", source_name: "Studio" }),
+    ]);
+    try {
+      const options = wrapper.findAll(".quick-paste-device option").map(node => node.text());
+      // The local option exists because a local row does; each device is named
+      // by its source_name rather than by its id.
+      expect(options).toEqual([t("全部设备"), t("本机"), "Laptop", "Studio"]);
+      await wrapper.get(".quick-paste-device").setValue("peer-1");
+      await flushPromises();
+      await flushPromises();
+      expect(wrapper.findAll(".quick-paste-row")).toHaveLength(1);
+      expect(wrapper.get(".quick-paste-row").text()).toContain("笔记本的");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("says the filters are what emptied the list", async () => {
+    const wrapper = await mountOverlay([
+      hit({ id: "old", preview: "上个月的", timestamp: Date.now() / 1000 - 30 * 24 * 3600 }),
+    ]);
+    try {
+      await wrapper.findAll(".quick-paste-time").find(node => node.text() === t("今天"))!.trigger("click");
+      await flushPromises();
+      await flushPromises();
+      // "还没有可粘贴的记录" would be false — there is one, it is just older —
+      // and a hint that only named the keyword would leave the time chip unseen.
+      expect(wrapper.get(".quick-paste-empty-title").text()).toBe(t("没有符合当前筛选条件的记录"));
+      expect(wrapper.get(".quick-paste-empty").text()).toContain(t("换个关键词或筛选条件试试。"));
     } finally {
       wrapper.unmount();
     }
@@ -550,6 +748,48 @@ describe("on-demand paste of a remote file", () => {
     } finally { wrapper.unmount(); }
   });
 
+  it("continues the large-file question with Enter", async () => {
+    // The confirmation panel advertises Enter 继续 in its hint, so Enter has to
+    // do it: the panel is a question, and the window's one key answers it.
+    vi.mocked(bridge.preparePasteEntry)
+      .mockRejectedValueOnce({ code: "PASTE_CONFIRM_REQUIRED", message: "large", retryable: false })
+      .mockResolvedValueOnce({ requested: true });
+    const wrapper = await mountOverlay([remoteFile()]);
+    try {
+      await press("Enter");
+      expect(wrapper.find(".quick-paste-confirm").exists()).toBe(true);
+      await press("Enter");
+      expect(bridge.preparePasteEntry).toHaveBeenLastCalledWith("file-1", true);
+      expect(wrapper.find(".quick-paste-transfer").exists()).toBe(true);
+    } finally { wrapper.unmount(); }
+  });
+
+  it("keeps the caret in the search box while the filters are used", async () => {
+    // The overlay's gesture is one word and Return: a chip that took the focus
+    // ended the word at the first click, and the reader had to click back into
+    // the box before typing the next one.
+    vi.mocked(bridge.quickPasteSettings).mockResolvedValue({ language: "zh-CN", auto_paste_enabled: true });
+    vi.mocked(bridge.quickPasteList).mockResolvedValue(listPage([hit()]));
+    const wrapper = mount(QuickPaste, { attachTo: document.body });
+    try {
+      await flushPromises();
+      await flushPromises();
+      const search = wrapper.get('input[type="search"]').element as HTMLInputElement;
+      search.focus();
+      await wrapper.findAll(".quick-paste-time").find(node => node.text() === t("今天"))!.trigger("click");
+      await flushPromises();
+      expect(document.activeElement).toBe(search);
+      await wrapper.get(".quick-paste-sort").trigger("click");
+      await flushPromises();
+      expect(document.activeElement).toBe(search);
+      await wrapper.get(".quick-paste-device").setValue("all");
+      await flushPromises();
+      expect(document.activeElement).toBe(search);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it("pastes the row once the files are here", async () => {
     const wrapper = await mountOverlay([remoteFile()]);
     try {
@@ -595,18 +835,21 @@ describe("on-demand paste of a remote file", () => {
     } finally { wrapper.unmount(); }
   });
 
-  it("takes one fetch at a time, and keeps the window while it runs", async () => {
+  it("takes one fetch at a time, and cancels it when the window is dismissed", async () => {
     const wrapper = await mountOverlay([remoteFile()]);
     try {
       await press("Enter");
       await press("Enter");
       await press("Enter", { shiftKey: true });
       expect(bridge.preparePasteEntry).toHaveBeenCalledTimes(1);
-      // A fetch is a deliberate act with a panel to watch: the focus wandering
-      // off does not dismiss it.
+      expect(wrapper.find(".quick-paste-transfer").exists()).toBe(true);
+      // Blur now hides from every state, progress panel included (1.2.4): the
+      // reader turning away from a fetch is the reader cancelling it, and the
+      // cancel goes to the runtime before the window goes away.
       window.dispatchEvent(new Event("blur"));
       await flushPromises();
-      expect(bridge.quickPasteClose).not.toHaveBeenCalled();
+      expect(bridge.cancelPasteEntry).toHaveBeenCalledWith("file-1");
+      expect(bridge.quickPasteClose).toHaveBeenCalledOnce();
     } finally { wrapper.unmount(); }
   });
 

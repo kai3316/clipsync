@@ -51,6 +51,15 @@ _SAFE_FIELDS = {
     "max_file_mb",
     "confirm_large_file_mb",
     "relay_paste_max_mb",
+    # Per-type sync switches (next 1.3.0 iteration): which kinds of content are
+    # sent to peers.  Local history is unaffected, so this is only about what
+    # leaves the machine — and it is a preference the capture path reads live.
+    "sync_text",
+    "sync_url",
+    "sync_html",
+    "sync_rtf",
+    "sync_image",
+    "sync_file",
     "encryption_enabled",
     "notifications_enabled",
     "notify_device_connect",
@@ -214,6 +223,15 @@ _MUTABLE_FIELDS = {
     "max_file_mb",
     "confirm_large_file_mb",
     "relay_paste_max_mb",
+    # Per-type sync switches (next 1.3.0 iteration): writable here for the same
+    # reason — the settings page submits its whole form in one call, and the
+    # capture path reads these Config fields on every copy.
+    "sync_text",
+    "sync_url",
+    "sync_html",
+    "sync_rtf",
+    "sync_image",
+    "sync_file",
     "encryption_enabled",
     "notifications_enabled",
     "notify_device_connect",
@@ -667,10 +685,12 @@ def update_settings(body, cfg, on_settings_change=None, enc_mgr=None):
 def export_data(body, cfg, history):
     """Export clipboard history to a persistent file (JSON, CSV, or Markdown).
 
-    Request body: {"format": "json" | "csv" | "markdown"}
-    Writes a uniquely-named file to the user's Downloads folder (falling back
-    to the app data directory) and leaves it in place so the user can open or
-    move it.  Returns the durable path and filename.
+    Request body: {"format": "json" | "csv" | "markdown", "path"?: string}
+    With no ``path`` a uniquely-named file lands in the user's Downloads folder
+    (falling back to the app data directory) — the web companion's only option.
+    The desktop window sends the destination the reader picked in a native save
+    dialog, which is what makes the export go where they expect instead of into
+    a folder they then have to find.  Returns the durable path and filename.
     """
     try:
         data = json.loads(body.decode("utf-8"))
@@ -688,21 +708,42 @@ def export_data(body, cfg, history):
 
     from internal.config.config import _config_dir
 
-    # Downloads is where users expect exported files; if it can't be
-    # determined, fall back to the app data dir (always present).
-    downloads = Path.home() / "Downloads"
-    dest_dir = downloads if downloads.is_dir() else Path(_config_dir())
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        dest_dir = Path(_config_dir())
-    # A unique, exclusively-created name: same-second exports used to share a
-    # timestamp and open(..., "w") truncated the earlier file.
-    from internal.fsutil import unique_export_path
+    requested = data.get("path")
+    if requested is not None:
+        # The desktop window's native save picker supplies this.  It is a path
+        # the user just chose, so it is written as given (with the format's
+        # suffix added when they typed none); a directory is refused here
+        # rather than letting the file write fail with a confusing OSError.
+        if not isinstance(requested, str) or not requested.strip():
+            return {"ok": False, "error": "invalid path"}, 400
+        requested = requested.strip()
+        if len(requested) > 4096:
+            return {"ok": False, "error": "path too long"}, 400
+        dest = Path(requested).expanduser()
+        if dest.is_dir():
+            return {"ok": False, "error": "path is a directory"}, 400
+        if not dest.suffix:
+            dest = dest.with_suffix(suffix)
+        if not dest.parent.is_dir():
+            return {"ok": False, "error": "destination folder does not exist"}, 400
+        filename = dest.name
+        dest_path = str(dest)
+    else:
+        # Downloads is where users expect exported files; if it can't be
+        # determined, fall back to the app data dir (always present).
+        downloads = Path.home() / "Downloads"
+        dest_dir = downloads if downloads.is_dir() else Path(_config_dir())
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            dest_dir = Path(_config_dir())
+        # A unique, exclusively-created name: same-second exports used to share a
+        # timestamp and open(..., "w") truncated the earlier file.
+        from internal.fsutil import unique_export_path
 
-    dest = unique_export_path(dest_dir, "clipsync-history", suffix, sep="-")
-    filename = dest.name
-    dest_path = str(dest)
+        dest = unique_export_path(dest_dir, "clipsync-history", suffix, sep="-")
+        filename = dest.name
+        dest_path = str(dest)
 
     try:
         from internal.data.export import (

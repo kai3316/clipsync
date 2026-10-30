@@ -2100,7 +2100,6 @@ html.light .upload-btn {
         </div>
         <div class="chip-rail" id="favChips" role="group" aria-label=""></div>
       </div>
-      <button class="fav-export" id="favExportBtn" style="display:none"></button>
       <div id="favoritesList"></div>
     </section>
 
@@ -2896,12 +2895,10 @@ html.light .upload-btn {
   var chatView = document.getElementById('chatView');
   var transfersView = document.getElementById('transfersView');
   var favoritesList = document.getElementById('favoritesList');
-  var favExportBtn = document.getElementById('favExportBtn');
   var favTools = document.getElementById('favTools');
   var favSearch = document.getElementById('favSearch');
   var favSearchClear = document.getElementById('favSearchClear');
   var favChips = document.getElementById('favChips');
-  var favExportBusy = false;
   var settingsView = document.getElementById('settingsView');
   var toastEl = document.getElementById('toast');
   var modalEl = document.getElementById('modal');
@@ -3226,14 +3223,18 @@ html.light .upload-btn {
   /* A failed answer as one sentence.  `data` is the parsed body and may be
      missing (a request that never got an answer); `fallback` is the caller's
      own sentence about what it was trying to do. */
-  function apiError(data, fallback) {
+    function apiError(data, fallback) {
     var body = data || {};
     var code = body.code;
     if (code && Object.prototype.hasOwnProperty.call(ERR_CODE_TEXT, code)) {
-      return ERR_CODE_TEXT[code];
+    return ERR_CODE_TEXT[code];
     }
+    // The relay's policy refusal has an English code of its own; raw it read as
+    // "Remote unsupported", which is not something a reader can act on.  It is
+    // the readonly mode's sentence, not a new failure kind.
+    if (body.error === 'remote_unsupported') return T.failReadonly;
     return body.error || fallback;
-  }
+    }
 
   function showToast(msg, isError) {
     if (toastTimer) clearTimeout(toastTimer);
@@ -6583,8 +6584,6 @@ html.light .upload-btn {
   }
 
   function renderFavorites() {
-    // The one-click export only makes sense with something to export.
-    favExportBtn.style.display = favoritesItems.length === 0 ? 'none' : 'flex';
     if (favoritesItems.length === 0) {
       if (favoritesFilterActive() && favoritesLibraryTotal > 0) {
         favoritesList.innerHTML = '<div class="empty"><div class="empty__icon">🔍</div><div class="empty__text">' +
@@ -6685,28 +6684,42 @@ html.light .upload-btn {
       });
   }
 
-  // A favorite is plain text (title + content) — push it to the desktop
-  // clipboard via /api/push. paste-rich would need a history entry_id, which
-  // a favorite doesn't carry.
+  /* Put text on the phone's own clipboard, with the hidden-textarea fallback
+     plain-HTTP LAN needs.  Shared by the favourite rows: tapping one is the
+     phone taking the saved text with it, not asking the computer to paste. */
+  function copyPhoneText(text, okMessage, failMessage) {
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (ok) { showToast(okMessage); return; }
+      } catch (e) { /* fall through */ }
+      showToast(failMessage, true);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        showToast(okMessage);
+      }).catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  // A favourite is plain text (title + content), copied to the phone's own
+  // clipboard.  It used to be pushed to the desktop via /api/push, which the
+  // relay's readonly mode refuses — so tapping one in remote mode answered
+  // "Remote unsupported" instead of copying anything.
   function favCopy(f) {
     var text = ((f.title || '') + '\n' + (f.content || '')).trim();
     if (!text) { showToast(T.favEmpty, true); return; }
-    apiFetch('/api/push', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text }),
-    })
-      .then(function (res) {
-        if (res.status === 403) { notifyTokenExpired(); return; }
-        if (res.data && res.data.ok) {
-          showToast(T.favCopied);
-        } else {
-          showToast(apiError(res.data, T.favCopyFail), true);
-        }
-      })
-      .catch(function () {
-        showToast(T.favCopyFail + ' · ' + failHint(), true);
-      });
+    copyPhoneText(text, T.favCopied, T.favCopyFail);
   }
 
   /* ── Editing a favorite's title and group ──────────────────────
@@ -6837,37 +6850,6 @@ html.light .upload-btn {
         showToast(T.favDeleteFail + ' · ' + failHint(), true);
       });
   }
-
-  // One-click export: ask the desktop to write ALL favorites to a Markdown
-  // file (same Downloads location the history export uses) and toast where
-  // it landed — handy for moving saved clips off the phone for good.
-  favExportBtn.textContent = T.favExport;
-  favExportBtn.addEventListener('click', function () {
-    if (favExportBusy) return;
-    favExportBusy = true;
-    favExportBtn.textContent = '...';
-    apiFetch('/api/favorites/export', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ format: 'markdown' }),
-    })
-      .then(function (res) {
-        if (res.status === 403) { notifyTokenExpired(); return; }
-        if (res.data && res.data.ok) {
-          showToast(T.favExportDone.replace('{n}', String((res.data && res.data.count) || 0)));
-        } else {
-          showToast(apiError(res.data, T.favExportFail), true);
-        }
-      })
-      .catch(function () {
-        showToast(T.favExportFail + ' · ' + failHint(), true);
-      })
-      .then(function () {
-        // Manual reset instead of .finally (older-webview friendly).
-        favExportBusy = false;
-        favExportBtn.textContent = T.favExport;
-      });
-  });
 
   /* ── Settings ───────────────────────────────────────────────── */
 

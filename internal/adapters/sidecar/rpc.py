@@ -771,6 +771,16 @@ class Dispatcher:
                 "max_file_mb": (int, lambda _: True),
                 "confirm_large_file_mb": (int, lambda _: True),
                 "relay_paste_max_mb": (int, lambda _: True),
+                # Per-type sync switches (next 1.3.0 iteration).  Six real
+                # booleans, default true; the settings page sends them with the
+                # rest of its form, so a missing entry here refuses the whole
+                # save.
+                "sync_text": (bool, lambda _: True),
+                "sync_url": (bool, lambda _: True),
+                "sync_html": (bool, lambda _: True),
+                "sync_rtf": (bool, lambda _: True),
+                "sync_image": (bool, lambda _: True),
+                "sync_file": (bool, lambda _: True),
                 "filter_enabled_categories": (list, lambda v: len(v) <= 7 and all(
                     isinstance(item, str) and item in {
                         "credit_card", "ssn", "phone", "api_key",

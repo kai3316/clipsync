@@ -705,6 +705,39 @@ def test_export_markdown_names_the_route_a_clip_came_in_on(isolated_downloads, t
     assert not any(word in lines["typed here"] for word in routes)
 
 
+def test_export_writes_to_the_path_the_reader_picked(tmp_path):
+    db = _make_db(tmp_path, text="chosen destination")
+    target = tmp_path / "chosen" / "history-export.md"
+    target.parent.mkdir(parents=True)
+    data, status = export_data(_body({"format": "markdown", "path": str(target)}), object(), db)
+    assert status == 200
+    assert data["ok"] is True
+    assert data["filepath"] == str(target)
+    assert data["filename"] == "history-export.md"
+    assert "chosen destination" in target.read_text(encoding="utf-8")
+
+
+def test_export_gives_a_suffixless_chosen_path_the_format_suffix(tmp_path):
+    db = _make_db(tmp_path, text="no suffix")
+    target = tmp_path / "history-export"
+    data, status = export_data(_body({"format": "json", "path": str(target)}), object(), db)
+    assert status == 200
+    assert data["filepath"] == str(target.with_suffix(".json"))
+
+
+def test_export_refuses_a_directory_or_a_missing_folder_as_the_chosen_path(tmp_path):
+    db = _make_db(tmp_path)
+    folder = tmp_path / "exported"
+    folder.mkdir()
+    data, status = export_data(_body({"format": "json", "path": str(folder)}), object(), db)
+    assert status == 400
+    assert "directory" in data["error"]
+    missing = tmp_path / "not-there" / "history.json"
+    data, status = export_data(_body({"format": "json", "path": str(missing)}), object(), db)
+    assert status == 400
+    assert "does not exist" in data["error"]
+
+
 def test_export_markdown_unsupported_format_is_400(tmp_path):
     db = _make_db(tmp_path)
     for bad in ("yaml", 5, None, ["json"]):

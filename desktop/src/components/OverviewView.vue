@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
-  Activity, AlertCircle, ArrowRight, ClipboardPaste, Copy, Download, Keyboard, Monitor,
-  Pencil, QrCode, RefreshCw, SendHorizontal, Settings as SettingsIcon, Upload,
+  Activity, AlertCircle, ArrowRight, ClipboardPaste, Copy, Download, Globe, Keyboard, Monitor,
+  Pencil, RefreshCw, SendHorizontal, Settings as SettingsIcon, Smartphone, Upload,
 } from "@lucide/vue";
 import { bridge } from "../api/bridge";
 import type { DiagnosticStatus, Overview } from "../api/types";
@@ -68,8 +68,16 @@ const emit = defineEmits<{
   (event: "settings-update"): void;
   /** The companion (phone page) page, for the switch's 去开启. */
   (event: "companion-page"): void;
+  /** The internet-sync page: the two ways to reach this machine from outside it
+   *  are one card's links rather than two more settings cards on this page. */
+  (event: "internet-page"): void;
   /** 更多设置: the window's whole configuration page. */
   (event: "settings"): void;
+  /** The first read has finished, successfully or not.  The window holds its
+   * boot frame until this arrives so the reader sees the splash, then the page
+   * — not the splash, an empty page, and then the page again.  A failure still
+   * counts: waiting for data that cannot arrive would just hold the splash. */
+  (event: "ready"): void;
 }>();
 
 const state = props.store.state;
@@ -83,6 +91,15 @@ const overview = ref<Overview | null>(null);
 const failed = ref("");
 const loading = ref(false);
 let disposed = false;
+/** Whether the boot frame has been released.  Once only: the page re-reads
+ *  every five seconds, and a `ready` per read would be a boot signal the window
+ *  does not need after the first. */
+let firstFrameSent = false;
+function announceReady() {
+  if (firstFrameSent) return;
+  firstFrameSent = true;
+  emit("ready");
+}
 
 async function load() {
   if (!props.enabled || disposed) return;
@@ -96,6 +113,9 @@ async function load() {
     if (!disposed) failed.value = error?.message || t("读取概览失败");
   } finally {
     if (!disposed) loading.value = false;
+    // Success or failure, the first frame is what the boot frame was waiting
+    // for; a page that reports a failed read is still a page.
+    if (!disposed) announceReady();
   }
 }
 
@@ -130,6 +150,47 @@ const HEALTH_POLL_MS = 120_000;
 let overviewTimer: ReturnType<typeof setInterval> | undefined;
 let healthTimer: ReturnType<typeof setInterval> | undefined;
 
+/* ── The phone QR ─────────────────────────────────────────────────────── */
+
+/** The same picture the companion page shows, drawn in the machine card instead
+ *  of behind a dialog: the card's right half used to be empty, and the QR is
+ *  the one thing a reader would otherwise open the companion page for.  The
+ *  sidecar builds the address and the token; this page only paints what it is
+ *  handed. */
+const qrImage = ref("");
+const qrBusy = ref(false);
+const qrMessage = ref("");
+let qrGeneration = 0;
+async function loadQr() {
+  if (!props.enabled || disposed) return;
+  if (!props.companionOn) {
+    qrGeneration += 1;
+    qrImage.value = "";
+    qrMessage.value = "";
+    qrBusy.value = false;
+    return;
+  }
+  const mine = ++qrGeneration;
+  qrBusy.value = true;
+  try {
+    const answer = await bridge.companionQr();
+    if (disposed || mine !== qrGeneration) return;
+    if (answer.ok && answer.qr) {
+      qrImage.value = answer.qr;
+      qrMessage.value = "";
+    } else {
+      qrImage.value = "";
+      qrMessage.value = answer.error || t("二维码不可用");
+    }
+  } catch (error: any) {
+    if (disposed || mine !== qrGeneration) return;
+    qrImage.value = "";
+    qrMessage.value = error?.message || t("二维码不可用");
+  } finally {
+    if (!disposed && mine === qrGeneration) qrBusy.value = false;
+  }
+}
+
 /** Whether this page is on screen to be read at all: a window that is minimized
  * or occluded runs no probes for a verdict nobody would see. */
 function awake() {
@@ -138,6 +199,7 @@ function awake() {
 onMounted(() => {
   void load();
   void loadHealth();
+  void loadQr();
   overviewTimer = setInterval(() => { if (awake()) void load(); }, 5000);
   healthTimer = setInterval(() => { if (awake()) void loadHealth(); }, HEALTH_POLL_MS);
 });
@@ -148,6 +210,20 @@ watch(() => props.enabled, (on) => {
   if (!on) return;
   void load();
   void loadHealth();
+  void loadQr();
+});
+/** The phone service is switched from this page and from the companion page;
+ *  turning it on is what makes a QR possible, and turning it off is what makes
+ *  the old one stale.  The card follows that fact rather than polling for it. */
+watch(() => props.companionOn, (on) => {
+  if (on) {
+    void loadQr();
+  } else {
+    qrGeneration += 1;
+    qrImage.value = "";
+    qrMessage.value = "";
+    qrBusy.value = false;
+  }
 });
 /** Whether the runtime is still coming up, rather than not being there at all.
  * The window mounts this page with no status at all, and the shell calls that
@@ -163,30 +239,23 @@ onUnmounted(() => {
 
 /* ── The switches ─────────────────────────────────────────────────────── */
 
-/** A switch goes back to the truth it was drawn from before its write is sent:
- * the browser has already flipped the box under the reader's finger, and a
- * refused write would otherwise leave it flipped.  The read that follows puts
- * it where the runtime says it is. */
-/** Say a refused switch out loud.  The store's failure band is at the top of the
- * window and can be scrolled out of sight from here, so the refusal also goes
- * to the status bar — the same place every other click's answer lands. */
+/** The four switches are two-state buttons rather than checkboxes: a pill of
+ *  开/关 says what the two states are in words, takes the same click anywhere on
+ *  it, and matches the button language of the rest of the page.  The write path
+ *  is unchanged — the store still owns the calls, and a refusal still goes to
+ *  the status bar.
+ */
 function reportSwitchFailure() {
   announce(state.error?.message || t("操作没有生效，请稍后重试"));
 }
-async function toggleSync(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const desired = input.checked;
-  input.checked = props.syncRunning;
-  if (busy.value) return;
+async function setSync(desired: boolean) {
+  if (busy.value || desired === props.syncRunning) return;
   await props.store.setSyncEnabled(desired);
   if (state.error) reportSwitchFailure();
   await load();
 }
-async function toggleDiscovery(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const desired = input.checked;
-  input.checked = !!overview.value?.discovering;
-  if (busy.value) return;
+async function setDiscovery(desired: boolean) {
+  if (busy.value || desired === !!overview.value?.discovering) return;
   const before = state.error;
   const result = await props.store.setDiscoveryEnabled(desired);
   // A null answer is either a refusal the store reported (a new error) or a
@@ -195,21 +264,16 @@ async function toggleDiscovery(event: Event) {
     ? state.error.message : t("操作没有生效，请稍后重试"));
   await load();
 }
-async function toggleVisibility(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const desired = input.checked;
-  input.checked = !!overview.value?.visible;
-  if (busy.value) return;
+async function setVisibility(desired: boolean) {
+  if (busy.value || desired === !!overview.value?.visible) return;
   const before = state.error;
   const result = await props.store.setDiscoveryVisible(desired);
   if (!result) announce(state.error && state.error !== before
     ? state.error.message : t("操作没有生效，请稍后重试"));
   await load();
 }
-function toggleCompanion(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const desired = input.checked;
-  input.checked = props.companionOn;
+function setCompanion(desired: boolean) {
+  if (desired === props.companionOn) return;
   emit("companion", desired);
 }
 
@@ -289,6 +353,10 @@ async function copyDeviceId() {
 async function copyAddress() {
   if (address.value) await copyText(address.value);
 }
+
+/** The chord on the paste-panel button: the platform's own modifier, because a
+ *  Mac reader hunts for Cmd, not Ctrl. */
+const pasteShortcut = navigator.userAgent.includes("Mac") ? "Cmd+Shift+V" : "Ctrl+Shift+V";
 
 /* ── Things that need the reader ──────────────────────────────────────── */
 
@@ -387,49 +455,75 @@ function runAttention(row: AttentionRow) {
       </div>
 
       <div class="overview-row">
-        <!-- This machine's own facts: the two another machine needs in order to
-             pair with it, where it answers, and the QR that reaches a phone
-             without installing anything. -->
-        <section class="overview-card card">
+        <!-- This machine's own facts on the left, and the phone QR on the
+             right: the two halves answer the same question ("what is this
+             machine, and how do I reach it"), and the QR used to be a wide
+             empty half plus a button that opened a dialog. -->
+        <section class="overview-card card overview-machine">
           <h2>{{ t("本机信息") }}</h2>
-          <div class="overview-name">
-            <Monitor :size="17" aria-hidden="true" />
-            <template v-if="!renaming">
-              <span class="overview-name-text">{{ deviceName }}</span>
-              <button class="icon-button icon-button--sm" type="button" :aria-label="t('编辑设备名称')"
-                :title="t('编辑设备名称')" :disabled="busy" @click="startRename"><Pencil :size="15" /></button>
-            </template>
-            <input v-else ref="nameInput" class="overview-name-input" :aria-label="t('编辑设备名称')"
-              :value="nameValue" maxlength="128"
-              @input="nameValue = ($event.target as HTMLInputElement).value"
-              @keydown.enter="saveName" @keydown.escape="cancelRename" @blur="saveName" />
-          </div>
-          <dl class="overview-facts">
-            <dt>{{ t("设备 ID") }}</dt>
-            <dd class="overview-id">
-              <span class="overview-mono">{{ deviceId }}</span>
-              <button class="icon-button icon-button--sm" type="button" :aria-label="t('复制设备 ID')"
-                :title="t('复制设备 ID')" :disabled="!deviceId" @click="copyDeviceId"><Copy :size="13" /></button>
-            </dd>
-            <dt>{{ t("平台") }}</dt>
-            <dd>{{ overview.platform }} · v{{ overview.version }}</dd>
-            <dt>{{ t("本地地址") }}</dt>
-            <dd class="overview-id">
-              <template v-if="address">
-                <span class="overview-mono">{{ address }}</span>
-                <button class="icon-button icon-button--sm" type="button" :aria-label="t('复制本地地址')"
-                  :title="t('复制本地地址')" @click="copyAddress"><Copy :size="13" /></button>
+          <div class="overview-machine-body">
+            <div class="overview-machine-facts">
+              <div class="overview-name">
+                <Monitor :size="17" aria-hidden="true" />
+                <template v-if="!renaming">
+                  <span class="overview-name-text">{{ deviceName }}</span>
+                  <button class="icon-button icon-button--sm" type="button" :aria-label="t('编辑设备名称')"
+                    :title="t('编辑设备名称')" :disabled="busy" @click="startRename"><Pencil :size="15" /></button>
+                </template>
+                <input v-else ref="nameInput" class="overview-name-input" :aria-label="t('编辑设备名称')"
+                  :value="nameValue" maxlength="128"
+                  @input="nameValue = ($event.target as HTMLInputElement).value"
+                  @keydown.enter="saveName" @keydown.escape="cancelRename" @blur="saveName" />
+              </div>
+              <dl class="overview-facts">
+                <dt>{{ t("设备 ID") }}</dt>
+                <dd class="overview-id">
+                  <span class="overview-mono">{{ deviceId }}</span>
+                  <button class="icon-button icon-button--sm" type="button" :aria-label="t('复制设备 ID')"
+                    :title="t('复制设备 ID')" :disabled="!deviceId" @click="copyDeviceId"><Copy :size="13" /></button>
+                </dd>
+                <dt>{{ t("平台") }}</dt>
+                <dd>{{ overview.platform }} · v{{ overview.version }}</dd>
+                <dt>{{ t("本地地址") }}</dt>
+                <dd class="overview-id">
+                  <template v-if="address">
+                    <span class="overview-mono">{{ address }}</span>
+                    <button class="icon-button icon-button--sm" type="button" :aria-label="t('复制本地地址')"
+                      :title="t('复制本地地址')" @click="copyAddress"><Copy :size="13" /></button>
+                  </template>
+                  <span v-else class="note">{{ t("手机伴侣未启用") }}</span>
+                </dd>
+              </dl>
+              <!-- The two ways to reach this machine from another one, under
+                   the address they use.  The card had room under the facts and
+                   nothing in it: these are the doors a reader standing here
+                   actually wants, and they are not repeated among the action
+                   tiles because those are about the clipboard, not the link. -->
+              <div class="overview-machine-links">
+                <button type="button" class="overview-machine-link" @click="emit('internet-page')">
+                  <Globe :size="15" aria-hidden="true" />{{ t("互联网同步") }}
+                </button>
+                <button type="button" class="overview-machine-link" @click="emit('companion-page')">
+                  <Smartphone :size="15" aria-hidden="true" />{{ t("手机伴侣") }}
+                </button>
+              </div>
+            </div>
+            <aside class="overview-qr" :aria-label="t('手机 Companion 二维码')">
+              <p class="overview-qr__title">{{ t("手机扫码访问") }}</p>
+              <template v-if="qrImage">
+                <img :src="qrImage" :alt="t('手机 Companion 二维码')" class="overview-qr__image"
+                  width="150" height="150" />
+                <button class="text-button overview-qr__zoom" type="button" @click="emit('qr')">{{ t("放大二维码") }}</button>
               </template>
-              <template v-else>
-                <span class="note">{{ t("手机伴侣未启用") }}</span>
+              <template v-else-if="!companionOn">
+                <p class="note overview-qr__hint">{{ t("手机网页访问开启后显示二维码") }}</p>
                 <button class="text-button" type="button" @click="emit('companion-page')">{{ t("去开启") }}</button>
               </template>
-            </dd>
-          </dl>
-          <div class="overview-actions">
-            <button class="overview-button" type="button" :disabled="busy" @click="emit('qr')">
-              <QrCode :size="16" />{{ t("显示二维码") }}
-            </button>
+              <template v-else>
+                <p class="note overview-qr__hint" role="status">{{ qrBusy ? t("正在生成二维码…") : (qrMessage || t("二维码不可用")) }}</p>
+                <button v-if="!qrBusy" class="text-button" type="button" @click="loadQr">{{ t("重试") }}</button>
+              </template>
+            </aside>
           </div>
         </section>
 
@@ -438,26 +532,42 @@ function runAttention(row: AttentionRow) {
              Everything more involved stays on the settings page. -->
         <section class="overview-card card">
           <h2>{{ t("快速设置") }}</h2>
-          <label class="overview-switch">
+          <div class="overview-setting">
             <span>{{ t("剪贴板同步") }}</span>
-            <input type="checkbox" role="switch" :aria-label="t('剪贴板同步')" :checked="syncRunning"
-              :disabled="busy" @change="toggleSync" />
-          </label>
-          <label class="overview-switch">
+            <div class="overview-segmented" role="group" :aria-label="t('剪贴板同步')">
+              <button type="button" class="overview-seg" :class="{ 'overview-seg--active': syncRunning }"
+                :aria-pressed="syncRunning" :disabled="busy" @click="setSync(true)">{{ t("开") }}</button>
+              <button type="button" class="overview-seg" :class="{ 'overview-seg--active': !syncRunning }"
+                :aria-pressed="!syncRunning" :disabled="busy" @click="setSync(false)">{{ t("关") }}</button>
+            </div>
+          </div>
+          <div class="overview-setting">
             <span>{{ t("局域网发现") }}</span>
-            <input type="checkbox" role="switch" :aria-label="t('局域网发现')" :checked="!!overview.discovering"
-              :disabled="busy || !overview" @change="toggleDiscovery" />
-          </label>
-          <label class="overview-switch">
+            <div class="overview-segmented" role="group" :aria-label="t('局域网发现')">
+              <button type="button" class="overview-seg" :class="{ 'overview-seg--active': !!overview.discovering }"
+                :aria-pressed="!!overview.discovering" :disabled="busy" @click="setDiscovery(true)">{{ t("开") }}</button>
+              <button type="button" class="overview-seg" :class="{ 'overview-seg--active': !overview.discovering }"
+                :aria-pressed="!overview.discovering" :disabled="busy" @click="setDiscovery(false)">{{ t("关") }}</button>
+            </div>
+          </div>
+          <div class="overview-setting">
             <span>{{ t("在局域网可见") }}</span>
-            <input type="checkbox" role="switch" :aria-label="t('在局域网可见')" :checked="!!overview.visible"
-              :disabled="busy || !overview" @change="toggleVisibility" />
-          </label>
-          <label class="overview-switch">
+            <div class="overview-segmented" role="group" :aria-label="t('在局域网可见')">
+              <button type="button" class="overview-seg" :class="{ 'overview-seg--active': !!overview.visible }"
+                :aria-pressed="!!overview.visible" :disabled="busy" @click="setVisibility(true)">{{ t("开") }}</button>
+              <button type="button" class="overview-seg" :class="{ 'overview-seg--active': !overview.visible }"
+                :aria-pressed="!overview.visible" :disabled="busy" @click="setVisibility(false)">{{ t("关") }}</button>
+            </div>
+          </div>
+          <div class="overview-setting">
             <span>{{ t("手机网页访问") }}</span>
-            <input type="checkbox" role="switch" :aria-label="t('手机网页访问')" :checked="companionOn"
-              :disabled="busy" @change="toggleCompanion" />
-          </label>
+            <div class="overview-segmented" role="group" :aria-label="t('手机网页访问')">
+              <button type="button" class="overview-seg" :class="{ 'overview-seg--active': companionOn }"
+                :aria-pressed="companionOn" :disabled="busy" @click="setCompanion(true)">{{ t("开") }}</button>
+              <button type="button" class="overview-seg" :class="{ 'overview-seg--active': !companionOn }"
+                :aria-pressed="!companionOn" :disabled="busy" @click="setCompanion(false)">{{ t("关") }}</button>
+            </div>
+          </div>
           <p v-if="pauseLeftMs > 0" class="overview-pause">
             <span class="note">{{ t("定时暂停同步") }}</span>
             <button class="overview-button primary" type="button" :disabled="pauseBusy" @click="emit('resume')">{{ t("立即恢复") }}</button>
@@ -476,22 +586,49 @@ function runAttention(row: AttentionRow) {
       <!-- The one row of actions this page exists for.  Each is the window's own
            handler, not a second implementation: 导入/导出 are the settings
            card's, 快捷键 opens the general card, 检查更新 runs the same check,
-           and 更多设置 is just the settings page. -->
+           and 更多设置 is just the settings page.  The actions are tiles on a
+           four-column grid rather than a wrapping row: a row of eight buttons
+           left the card half empty on the second line, and a tile says what it
+           does from anywhere in the card instead of only along the top edge. -->
       <section class="overview-card card">
-        <h2>{{ t("快捷操作") }}</h2>
-        <div class="overview-actions">
-          <button class="overview-button primary" type="button" @click="emit('quick-paste')"><ClipboardPaste :size="16" />{{ t("快速粘贴") }}</button>
-          <button class="overview-button" type="button" @click="emit('send-files')"><SendHorizontal :size="16" />{{ t("发送文件") }}</button>
+        <div class="card-head">
+          <h2>{{ t("快捷操作") }}</h2>
+          <button class="text-button overview-more-link" type="button" @click="emit('settings')">
+            <SettingsIcon :size="14" />{{ t("更多设置") }}<ArrowRight :size="14" aria-hidden="true" />
+          </button>
+        </div>
+        <div class="overview-action-grid">
+          <!-- The overlay is a panel rather than a second history page (1.2.4),
+               and its chord is part of the tile because this is where a reader
+               learns it: the default is shown, and a remapped binding wins
+               wherever the settings page draws the live one. -->
+          <button class="overview-tile overview-tile--primary" type="button" @click="emit('quick-paste')">
+            <ClipboardPaste :size="18" />
+            <span class="overview-tile__label">{{ t("粘贴面板") }}</span>
+            <kbd class="overview-shortcut">{{ pasteShortcut }}</kbd>
+          </button>
+          <button class="overview-tile" type="button" @click="emit('send-files')">
+            <SendHorizontal :size="17" /><span class="overview-tile__label">{{ t("发送文件") }}</span>
+          </button>
           <!-- The device page is one of the three primary pages, so it gets an
                explicit door here as well as the clickable count on the status
                line: the count answers "are they here", this answers "manage
                them". -->
-          <button class="overview-button" type="button" @click="emit('devices')"><Monitor :size="16" />{{ t("设备管理") }}</button>
-          <button class="overview-button" type="button" :disabled="busy" @click="emit('import-history')"><Upload :size="16" />{{ t("导入历史") }}</button>
-          <button class="overview-button" type="button" :disabled="busy" @click="emit('export-history', 'json')"><Download :size="16" />{{ t("导出历史") }}</button>
-          <button class="overview-button" type="button" @click="emit('settings-hotkeys')"><Keyboard :size="16" />{{ t("快捷键设置") }}</button>
-          <button class="overview-button" type="button" @click="emit('check-update')"><RefreshCw :size="16" />{{ t("检查更新") }}</button>
-          <button class="overview-button overview-more" type="button" @click="emit('settings')"><SettingsIcon :size="16" />{{ t("更多设置") }}<ArrowRight :size="15" aria-hidden="true" /></button>
+          <button class="overview-tile" type="button" @click="emit('devices')">
+            <Monitor :size="17" /><span class="overview-tile__label">{{ t("设备管理") }}</span>
+          </button>
+          <button class="overview-tile" type="button" :disabled="busy" @click="emit('import-history')">
+            <Upload :size="17" /><span class="overview-tile__label">{{ t("导入历史") }}</span>
+          </button>
+          <button class="overview-tile" type="button" :disabled="busy" @click="emit('export-history', 'json')">
+            <Download :size="17" /><span class="overview-tile__label">{{ t("导出历史") }}</span>
+          </button>
+          <button class="overview-tile" type="button" @click="emit('settings-hotkeys')">
+            <Keyboard :size="17" /><span class="overview-tile__label">{{ t("快捷键设置") }}</span>
+          </button>
+          <button class="overview-tile" type="button" @click="emit('check-update')">
+            <RefreshCw :size="17" /><span class="overview-tile__label">{{ t("检查更新") }}</span>
+          </button>
         </div>
       </section>
     </template>

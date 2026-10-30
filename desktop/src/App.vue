@@ -48,6 +48,28 @@ const { state } = store;
  * overview, which is where the legacy window opened too: it is the one page
  * that answers "what is this machine doing" without being asked. */
 const tab = ref<(typeof PAGES)[number]>("overview");
+/** Which shape the rail is in: page names, or the icon-only strip.  A
+ *  window-local preference rather than a config field — nothing on the network
+ *  or in the sidecar reads it, and a second machine should not inherit the
+ *  reading width chosen here. */
+const SIDEBAR_COLLAPSED_KEY = "clipsync.sidebar.collapsed";
+function readSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+const sidebarCollapsed = ref(readSidebarCollapsed());
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value;
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed.value ? "1" : "0");
+  } catch {
+    // Storage can be unavailable (private mode); the rail still folds for this
+    // session, it just will not remember the choice.
+  }
+}
 /** The window's one scrolling region.  Every page renders inside it, so its
  * scroll position outlives the page that set it. */
 const contentEl = ref<HTMLElement | null>(null);
@@ -1211,7 +1233,7 @@ async function pasteRemoteFileFromHotkey(item: HistoryItem) {
     await bridge.preparePasteEntry(item.id);
   } catch (error) {
     if (isPasteConfirmRequired(error)) {
-      store.toast("ui.hotkey", t("文件较大，请在快速粘贴窗口中确认后取回"));
+      store.toast("ui.hotkey", t("文件较大，请在粘贴面板中确认后取回"));
       return;
     }
     store.toast("ui.hotkey", pastePrepareErrorText(errorCode(error), errorMessage(error)));
@@ -1234,7 +1256,7 @@ async function pasteRemoteFileFromHotkey(item: HistoryItem) {
       settled = true;
       void run?.cancel();
       run = undefined;
-      store.toast("ui.hotkey", t("取回文件超时，请到快速粘贴窗口重试"));
+      store.toast("ui.hotkey", t("取回文件超时，请到粘贴面板重试"));
       resolve();
     }, PASTE_HOTKEY_TIMEOUT_MS);
     run = followPasteFetch(item.id, {
@@ -2194,15 +2216,34 @@ const archivedDevices = computed(() => state.devices.filter((device) => device.a
 const lanDevices = computed(() => activeDevices.value.filter((device) => !device.relay));
 const native = inDesktop();
 const ready = computed(() => state.status?.health === "ready");
-/** The static boot frame leaves only once the window has something to show.
+/** The boot frame leaves when there is a first page to look at, not merely a
+ *  status.
  *
- * It is outside `#app`, so it covers the shell while the sidecar is still
- * starting; a status (ready or locked) or a startup error is the first point at
- * which the window can render a real page or a real failure. */
+ * The sidecar answers ready before the overview has read anything, so removing
+ * the frame at that moment showed the reader a shell with a skeleton where the
+ * page was — the old white frame → loading shell → real page flash in its second
+ * half.  The frame now waits for the overview's first frame (`@ready`) with a
+ * short fallback: a page whose read failed has said so, and a page that never
+ * answers must not hold the splash forever.  Locked and stopped runtimes have no
+ * overview to wait for — the page in front of the reader is the answer. */
+const BOOT_OVERVIEW_TIMEOUT_MS = 1500;
+let bootTimer: ReturnType<typeof setTimeout> | undefined;
+function dropBoot() {
+  if (bootTimer) clearTimeout(bootTimer);
+  bootTimer = undefined;
+  document.getElementById("boot")?.remove();
+}
+function onOverviewReady() {
+  dropBoot();
+}
 watch(
   () => [state.status, state.error] as const,
   ([status, error]) => {
-    if (status || error) document.getElementById("boot")?.remove();
+    if (error) { dropBoot(); return; }
+    if (!status) return;
+    if (status.health !== "ready") { dropBoot(); return; }
+    if (bootTimer) clearTimeout(bootTimer);
+    bootTimer = setTimeout(dropBoot, BOOT_OVERVIEW_TIMEOUT_MS);
   },
   { immediate: true },
 );
@@ -3407,13 +3448,12 @@ function quickSearchHandOver(scope: "history" | "favorites", query: string) {
 const aboutDialog = useDialog(aboutOpen);
 /** The chords this window answers to, in one place they can be read.
  *
- * Every one of them already had a home — `aria-keyshortcuts` on the nav rows,
- * a tooltip on each, the list's own keys nowhere at all — which is a shortcut
- * only for a reader who already knows it exists.  A panel that takes a global
- * chord of its own would be a new thing to learn, for four lines of text; a
- * folded block in 关于 costs nothing until someone opens it. */
+ * Every one of them already had a home — a tooltip on the control it belongs
+ * to, the list's own keys nowhere at all — which is a shortcut only for a
+ * reader who already knows it exists.  A panel that takes a global chord of its
+ * own would be a new thing to learn, for four lines of text; a folded block in
+ * 关于 costs nothing until someone opens it.*/
 const shortcutRows = computed(() => [
-  { keys: `${MODIFIER.label}+1 … ${MODIFIER.label}+8`, label: t("切换左侧页面") },
   { keys: `${MODIFIER.label}+F`, label: t("在当前页搜索") },
   { keys: `${MODIFIER.label}+K`, label: t("搜索全部历史与收藏") },
   { keys: `${MODIFIER.label}+,`, label: t("打开设置") },
@@ -3690,13 +3730,14 @@ async function confirmDelete() {
   deleteItem.value = null;
 }
 const deleteDialog = useDialog(deleteItem);
-/** The sidebar, top to bottom: what Ctrl+1…8 counts.  The numbers belong to the
- * rows the user can see, which is why this list has to stay in the order the
- * template renders them and not in whatever order would read better here. */
+/** The window's pages.  The order here is the records' order (headings,
+ *  summaries, the type the tab ref is narrowed to), not the sidebar's: the rows
+ *  are drawn in their own reading order, and the digits that used to open them
+ *  were removed in 1.2.4 — a page is opened by clicking its row. */
 const PAGES = ["overview", "history", "devices", "favorites", "transfers", "chat", "ai", "settings", "companion", "internet"] as const;
-/** How the chords are *named* — the tooltip and `aria-keyshortcuts`.  The
- * handler takes Ctrl or Cmd on either platform; a Mac user hunting for ⌘ should
- * not be told Ctrl. */
+/** How a modifier is *named* in the sentences that say so; the keyboard handlers
+ * take Ctrl or Cmd on either platform, and a Mac user hunting for ⌘ should not
+ * be told Ctrl. */
 const MODIFIER = navigator.userAgent.includes("Mac") ? { label: "Cmd", key: "Meta" } : { label: "Ctrl", key: "Control" };
 /** The chord the OS itself pastes with, as a reader would press it.
  *
@@ -3706,12 +3747,6 @@ const MODIFIER = navigator.userAgent.includes("Mac") ? { label: "Cmd", key: "Met
  * binding — those are the reader's own and are read from the form — it is the
  * system's, which is why it is named from `MODIFIER.label` and not from config. */
 const PASTE_SHORTCUT = MODIFIER.label === "Cmd" ? "Cmd+V" : "Ctrl+V";
-/** The digit each page answers to, derived from `PAGES` so the two cannot drift:
- * the handler matches the key the user pressed against this, and the tooltip and
- * `aria-keyshortcuts` are built from the same index. */
-const CHORD_DIGITS = PAGES.map((_, index) => String(index + 1));
-function pageChord(index: number): string { return `${MODIFIER.key}+${CHORD_DIGITS[index]}`; }
-function pageTitle(label: string, index: number): string { return `${label} · ${MODIFIER.label}+${CHORD_DIGITS[index]}`; }
 /** Switch pages the way the sidebar row does: the settings row hydrates the
  * page as well as switching to it, and a chord that skipped that would land on
  * an empty form.  The AI page is the same shape for the same reason — its
@@ -3940,10 +3975,6 @@ function onShortcut(event: KeyboardEvent) {
     return;
   }
   if (event.key === ",") { event.preventDefault(); openPage("settings"); return; }
-  const index = CHORD_DIGITS.indexOf(event.key);
-  if (index < 0) return;
-  event.preventDefault();
-  openPage(PAGES[index]);
 }
 /** How often the sidebar's unread count is read while the chat page is closed.
  *
@@ -4119,6 +4150,9 @@ onUnmounted(() => {
   if (companionStatusTimer) clearInterval(companionStatusTimer);
   document.removeEventListener("visibilitychange", onVisibility);
   window.removeEventListener("keydown", onShortcut);
+  // The boot fallback is the window's own timer, not the page's: it must not
+  // outlive the shell it belongs to.
+  if (bootTimer) clearTimeout(bootTimer);
   // The AI page's own three counters went with it (`AiView` cancels its own
   // in-flight reads when it unmounts); these four belong to the window.
   ++themeGeneration;
@@ -4463,6 +4497,15 @@ function buildSettingsForm(loaded: Record<string, any>): Record<string, any> {
     source_exclusion_patterns: Array.isArray(loaded.source_exclusion_patterns)
       ? loaded.source_exclusion_patterns.join("\n")
       : (loaded.source_exclusion_patterns || ""),
+    // Which kinds of clip this machine sends (1.3.0 next iteration).  All six
+    // ship on, and an absent key reads as on: a config that predates them, or a
+    // sidecar mid-upgrade, must not start withholding types nobody switched off.
+    sync_text: loaded.sync_text ?? true,
+    sync_url: loaded.sync_url ?? true,
+    sync_html: loaded.sync_html ?? true,
+    sync_rtf: loaded.sync_rtf ?? true,
+    sync_image: loaded.sync_image ?? true,
+    sync_file: loaded.sync_file ?? true,
     // The file-transfer limits (1.3.1).  Absent from an older config, which
     // reads as the shipped defaults — the same values the sidecar itself uses.
     max_file_mb: clampNumber(loaded.max_file_mb ?? DEFAULT_MAX_FILE_MB, DEFAULT_MAX_FILE_MB, 0, MAX_FILE_MB),
@@ -4497,7 +4540,7 @@ const HOTKEY_ACTIONS: ReadonlyArray<{ id: string; label: () => string }> = [
   // and `show_quick_paste` opens the overlay, neither of which can depend on
   // the webview being awake.  They are listed here because the card is the one
   // place a binding is read and edited.
-  { id: "show_quick_paste", label: () => t("快速粘贴窗口") },
+  { id: "show_quick_paste", label: () => t("粘贴面板") },
   { id: "toggle_monitor", label: () => t("暂停或恢复同步") },
   { id: "paste_plain", label: () => t("复制最近一条（纯文本）") },
   ...Array.from({ length: 9 }, (_, index) => ({
@@ -5076,6 +5119,15 @@ async function saveSettings() {
       ),
       source_tracking_enabled: settings.value.source_tracking_enabled,
       paste_to_top: settings.value.paste_to_top,
+      // Which kinds of clip may leave this machine (1.3.0 next iteration).  A
+      // plain boolean per type: the sidecar decides what "not sent" means for
+      // each one, and the UI only collects the answer.
+      sync_text: !!settings.value.sync_text,
+      sync_url: !!settings.value.sync_url,
+      sync_html: !!settings.value.sync_html,
+      sync_rtf: !!settings.value.sync_rtf,
+      sync_image: !!settings.value.sync_image,
+      sync_file: !!settings.value.sync_file,
       // What a shortcut does after it copies, and the four rules that decide
       // what the recorder keeps at all (1.3.0).  The pattern list is split the
       // way the process-name list below is: one substring per line, padding and
@@ -5492,11 +5544,39 @@ async function confirmRestoreBackup() {
  * a page with no such card has to say it in a toast instead.  `null` on a
  * refusal, which the caller reports through the store, not as a second notice.
  */
+/** Ask where the export goes before writing it.
+ *
+ *  The export used to pick a folder by itself (Downloads, else the app data
+ *  dir); a reader who asked to export then had to go and find the file.  The
+ *  native save dialog is the answer to "where", and it opens with a usable name
+ *  and the chosen format's suffix.  Cancelling writes nothing. */
+const exportFormat = ref("json");
+const exportOpen = ref(false);
+const exportDialog = useDialog(exportOpen);
+function askExportHistory(format = "json") {
+  if (backupTask.value) return;
+  exportFormat.value = format;
+  exportOpen.value = true;
+}
+async function confirmExportHistory() {
+  exportOpen.value = false;
+  const message = await exportHistory(exportFormat.value);
+  if (message) store.toast("ui.history", message);
+}
+
 async function exportHistory(format: string): Promise<string | null> {
   if (backupTask.value) return null;
+  let path: string | null = null;
+  try {
+    path = await bridge.chooseSaveFile(format);
+  } catch (error) {
+    store.setError(error);
+    return null;
+  }
+  if (!path) return null;
   startBackupTask("export");
   try {
-    const result = await bridge.exportHistory(format);
+    const result = await bridge.exportHistory(format, path);
     backupMessage.value = t("导出完成：{name}", { name: result.filename || result.filepath });
     return backupMessage.value;
   } catch (error) { store.setError(error); return null; }
@@ -5531,8 +5611,9 @@ async function importHistory(): Promise<string | null> {
  * reader is looking.
  */
 async function exportHistoryFromOverview(format: string) {
-  const message = await exportHistory(format);
-  if (message) store.toast("ui.history", message);
+  // The overview one-click export asks both questions: the dialog picks the
+  // format, and the native save picker that follows picks the path.
+  askExportHistory(format || "json");
 }
 async function importHistoryFromOverview() {
   const message = await importHistory();
@@ -5566,23 +5647,33 @@ async function translateText() {
 </script>
 
 <template>
-  <div class="application">
-    <aside class="sidebar">
-      <div class="brand"><img :src="logo" alt="" /><span>ClipSync</span></div>
+  <div class="application" :class="{ 'application--collapsed': sidebarCollapsed }">
+    <aside class="sidebar" :class="{ 'sidebar--collapsed': sidebarCollapsed }">
+      <div class="sidebar-top">
+        <div class="brand"><img :src="logo" alt="" /><span>ClipSync</span></div>
+        <button type="button" class="sidebar-toggle icon-button icon-button--sm"
+          :aria-label="sidebarCollapsed ? t('展开侧边栏') : t('收起侧边栏')"
+          :title="sidebarCollapsed ? t('展开侧边栏') : t('收起侧边栏')"
+          :aria-expanded="!sidebarCollapsed" @click="toggleSidebar">
+          <ChevronRight v-if="sidebarCollapsed" :size="16" aria-hidden="true" />
+          <ChevronLeft v-else :size="16" aria-hidden="true" />
+        </button>
+      </div>
       <nav :aria-label="t('主导航')">
         <!-- The three pages a reader lives in sit at the top: what this machine
              is doing (概览), what it has copied (剪贴板历史), and which machines
              it talks to (设备).  Everything else is a collection kept on one of
-             them, or a tool that configures the window.  The visual order changed
-             and the digit chords did not: `PAGES` still counts 概览/历史/设备 as
-             1/2/3, so a reader's fingers keep working. -->
-        <button :aria-label="t('概览')" :aria-current="tab === 'overview' ? 'page' : undefined" :title="pageTitle(t('概览'), 0)" :aria-keyshortcuts="pageChord(0)" :class="{ active: tab === 'overview' }" @click="tab = 'overview'">
+             them, or a tool that configures the window.  The digits that used to
+             open these rows are gone (1.2.4): a row is opened by clicking it,
+             and a tooltip that advertises a chord the window no longer answers
+             is worse than no tooltip. -->
+        <button :aria-label="t('概览')" :aria-current="tab === 'overview' ? 'page' : undefined" :title="t('概览')" :class="{ active: tab === 'overview' }" @click="tab = 'overview'">
           <Activity :size="18" /><span>{{ t("概览") }}</span>
         </button>
-        <button :aria-label="t('剪贴板历史')" :aria-current="tab === 'history' ? 'page' : undefined" :title="pageTitle(t('剪贴板历史'), 1)" :aria-keyshortcuts="pageChord(1)" :class="{ active: tab === 'history' }" @click="tab = 'history'">
+        <button :aria-label="t('剪贴板历史')" :aria-current="tab === 'history' ? 'page' : undefined" :title="t('剪贴板历史')" :class="{ active: tab === 'history' }" @click="tab = 'history'">
           <History :size="18" /><span>{{ t("剪贴板历史") }}</span>
         </button>
-        <button :aria-label="t('设备')" :aria-current="tab === 'devices' ? 'page' : undefined" :title="pageTitle(t('设备'), 2)" :aria-keyshortcuts="pageChord(2)" :class="{ active: tab === 'devices' }" @click="tab = 'devices'">
+        <button :aria-label="t('设备')" :aria-current="tab === 'devices' ? 'page' : undefined" :title="t('设备')" :class="{ active: tab === 'devices' }" @click="tab = 'devices'">
           <Monitor :size="18" /><span>{{ t("设备") }}</span>
         </button>
         <!-- The collections kept by the history page, and the tools that talk to
@@ -5592,10 +5683,10 @@ async function translateText() {
              rather than twice.  See U36. -->
         <div class="nav-group" role="group" :aria-label="t('内容')">
           <p class="nav-group-label" aria-hidden="true">{{ t("内容") }}</p>
-          <button :aria-label="t('收藏库')" :aria-current="tab === 'favorites' ? 'page' : undefined" :title="pageTitle(t('收藏库'), 3)" :aria-keyshortcuts="pageChord(3)" :class="{ active: tab === 'favorites' }" @click="tab = 'favorites'">
+          <button :aria-label="t('收藏库')" :aria-current="tab === 'favorites' ? 'page' : undefined" :title="t('收藏库')" :class="{ active: tab === 'favorites' }" @click="tab = 'favorites'">
             <Star :size="18" /><span>{{ t("收藏库") }}</span>
           </button>
-          <button :aria-label="t('附近聊天')" :aria-current="tab === 'chat' ? 'page' : undefined" :title="pageTitle(t('附近聊天'), 5)" :aria-keyshortcuts="pageChord(5)" :class="{ active: tab === 'chat' }" @click="tab = 'chat'">
+          <button :aria-label="t('附近聊天')" :aria-current="tab === 'chat' ? 'page' : undefined" :title="t('附近聊天')" :class="{ active: tab === 'chat' }" @click="tab = 'chat'">
             <MessageCircle :size="18" /><span>{{ t("附近聊天") }}</span>
             <!-- The count reaches the reader on whatever page they are on, the
                  way the panel's own chat row carried it.  The label above stays
@@ -5603,13 +5694,13 @@ async function translateText() {
                  then the number would read the two as one name. -->
             <b v-if="chatUnread" class="nav-count" :aria-label="t('{count} 条未读消息', { count: chatUnread })">{{ chatUnread }}</b>
           </button>
-          <button :aria-label="t('文件传输')" :aria-current="tab === 'transfers' ? 'page' : undefined" :title="pageTitle(t('文件传输'), 4)" :aria-keyshortcuts="pageChord(4)" :class="{ active: tab === 'transfers' }" @click="tab = 'transfers'">
+          <button :aria-label="t('文件传输')" :aria-current="tab === 'transfers' ? 'page' : undefined" :title="t('文件传输')" :class="{ active: tab === 'transfers' }" @click="tab = 'transfers'">
             <FileUp :size="18" /><span>{{ t("文件传输") }}</span>
           </button>
         </div>
         <div class="nav-group" role="group" :aria-label="t('工具')">
           <p class="nav-group-label" aria-hidden="true">{{ t("工具") }}</p>
-          <button :aria-label="t('手机伴侣')" :aria-current="tab === 'companion' ? 'page' : undefined" :title="pageTitle(t('手机伴侣'), 8)" :aria-keyshortcuts="pageChord(8)" :class="{ active: tab === 'companion' }" @click="openPage('companion')">
+          <button :aria-label="t('手机伴侣')" :aria-current="tab === 'companion' ? 'page' : undefined" :title="t('手机伴侣')" :class="{ active: tab === 'companion' }" @click="openPage('companion')">
             <Smartphone :size="18" /><span>{{ t("手机伴侣") }}</span>
           </button>
           <button :aria-label="t('互联网同步')" :aria-current="tab === 'internet' ? 'page' : undefined" :title="t('互联网同步（中继）')" :class="{ active: tab === 'internet' }" @click="openPage('internet')">
@@ -5618,7 +5709,7 @@ async function translateText() {
           <!-- AI configuration is a workbench over files, not a preference
                card: it lives beside the device it reads and edits, not among
                the clip collections. -->
-          <button :aria-label="t('AI 配置')" :aria-current="tab === 'ai' ? 'page' : undefined" :title="pageTitle(t('AI 配置'), 6)" :aria-keyshortcuts="pageChord(6)" :class="{ active: tab === 'ai' }" @click="openAiPage">
+          <button :aria-label="t('AI 配置')" :aria-current="tab === 'ai' ? 'page' : undefined" :title="t('AI 配置')" :class="{ active: tab === 'ai' }" @click="openAiPage">
             <Sparkles :size="18" /><span>{{ t("AI 配置") }}</span>
           </button>
         </div>
@@ -5626,7 +5717,7 @@ async function translateText() {
              configuration, so it sits below the pages that hold content,
              behind a rule, the way a mature desktop sidebar carries it. -->
         <div class="sidebar-settings">
-          <button :aria-label="t('设置')" :aria-current="tab === 'settings' ? 'page' : undefined" :title="pageTitle(t('设置'), 7)" :aria-keyshortcuts="pageChord(7)" :class="{ active: tab === 'settings' }" @click="openSettings">
+          <button :aria-label="t('设置')" :aria-current="tab === 'settings' ? 'page' : undefined" :title="t('设置')" :class="{ active: tab === 'settings' }" @click="openSettings">
             <SettingsIcon :size="18" /><span>{{ t("设置") }}</span>
           </button>
         </div>
@@ -5715,8 +5806,8 @@ async function translateText() {
           @import-history="importHistoryFromOverview" @export-history="exportHistoryFromOverview"
           @settings-hotkeys="openSettingsCardFromOverview('general')"
           @settings-update="openSettingsCardFromOverview('update')"
-          @companion-page="openPage('companion')"
-          @check-update="checkForUpdate" @settings="openSettings" />
+          @companion-page="openPage('companion')" @internet-page="openPage('internet')"
+          @check-update="checkForUpdate" @settings="openSettings" @ready="onOverviewReady" />
 
         <HistoryView v-else-if="tab === 'history'" ref="historyView"
           :store="store" :ready="ready" :native="native" :translating="translateItemReading"
@@ -5890,6 +5981,34 @@ async function translateText() {
                 <label class="setting setting--check">
                   <span class="setting-control"><input v-model="settings.source_tracking_enabled" type="checkbox" /><span>{{ t("记录来源应用") }}</span></span>
                 </label>
+                <!-- Which kinds of clip this machine sends (1.3.0 next
+                     iteration).  Off means "recorded here, not sent": the local
+                     history keeps everything, and the receiving side is not the
+                     reader's to switch — that sentence is the whole of the
+                     block's explanation, because the row above it already says
+                     what the switch does for the two sides that are. -->
+                <fieldset class="sync-types">
+                  <legend>{{ t("同步内容类型") }}</legend>
+                  <p class="note setting-note">{{ t("关闭的类型只保留在本机历史，不再发送给其他设备；接收对方内容不受影响。") }}</p>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.sync_text" type="checkbox" /><span>{{ t("文本") }}</span></span>
+                  </label>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.sync_url" type="checkbox" /><span>{{ t("链接") }}</span></span>
+                  </label>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.sync_html" type="checkbox" /><span>HTML</span></span>
+                  </label>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.sync_rtf" type="checkbox" /><span>{{ t("富文本") }}（RTF）</span></span>
+                  </label>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.sync_image" type="checkbox" /><span>{{ t("图片") }}</span></span>
+                  </label>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.sync_file" type="checkbox" /><span>{{ t("文件") }}</span></span>
+                  </label>
+                </fieldset>
                 <fieldset>
                   <legend>{{ t("互联网同步（中继）") }}</legend>
                   <label class="setting setting--check">
@@ -6074,7 +6193,7 @@ async function translateText() {
                   <label class="setting setting--check">
                     <span class="setting-control"><input v-model="settings.auto_paste_enabled" type="checkbox" /><span>{{ t("自动粘贴到当前应用") }}</span></span>
                   </label>
-                  <p class="note setting-note">{{ t("打开后，按快捷键取回历史会直接粘贴到当前应用；关掉则只复制到剪贴板。快速粘贴窗口不受这个开关影响。") }}</p>
+                  <p class="note setting-note">{{ t("打开后，按快捷键取回历史会直接粘贴到当前应用；关掉则只复制到剪贴板。粘贴面板不受这个开关影响。") }}</p>
                 </fieldset>
                 <fieldset>
                   <legend>{{ t("录制规则") }}</legend>
@@ -7236,6 +7355,27 @@ async function translateText() {
         <NoticeStack :store="store" />
       </div>
     </main>
+
+    <!-- The overview's export: one button opens the format question, and the
+         native save picker follows with the path.  The settings card keeps its
+         three format buttons but still asks for the path. -->
+    <AppDialog ref="exportDialog" heading-id="export-history-title"
+      :title="t('导出历史')"
+      @close="exportOpen = false" @cancel="exportOpen = false">
+      <fieldset class="export-format-list">
+        <legend class="note">{{ t("选择格式") }}</legend>
+        <label class="choose-row"><input v-model="exportFormat" type="radio" value="json" />
+          <span>{{ t("JSON（完整数据）") }}</span></label>
+        <label class="choose-row"><input v-model="exportFormat" type="radio" value="csv" />
+          <span>{{ t("CSV（表格）") }}</span></label>
+        <label class="choose-row"><input v-model="exportFormat" type="radio" value="markdown" />
+          <span>{{ t("Markdown（可读文本）") }}</span></label>
+      </fieldset>
+      <template #actions>
+        <button @click="exportOpen = false">{{ t("取消") }}</button>
+        <button class="primary" @click="confirmExportHistory">{{ t("选择保存位置并导出") }}</button>
+      </template>
+    </AppDialog>
 
     <!-- The sidecar's "this paste is large, ask first" question.  It is a
          question rather than a refusal: 继续 prepares the same paste again

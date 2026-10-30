@@ -26,6 +26,7 @@ from internal.config.config import (
     FIELD_RULES,
     Config,
     _validate_field,
+    default_hotkeys,
 )
 from internal.sync.manager import SyncManager
 from internal.web.api import settings as settings_api
@@ -149,7 +150,7 @@ def test_the_five_fields_default_to_what_the_contract_says():
     assert cfg.skip_prelaunch_clipboard is True
     assert cfg.max_non_file_paste_mb == 8.0
     assert cfg.source_exclusion_patterns == []
-    assert cfg.config_version == 4
+    assert cfg.config_version == 5
 
 
 def test_the_schema_table_describes_the_new_fields():
@@ -188,16 +189,62 @@ def test_the_loader_clamps_the_size_cap_into_range():
 # ── 2. hotkeys and the v3 → v4 migration ──────────────────────────────
 
 
-def test_the_default_hotkeys_carry_both_new_actions():
-    assert DEFAULT_HOTKEYS["paste_plain"] == "Ctrl+Alt+V"
-    assert DEFAULT_HOTKEYS["show_quick_paste"] == "Ctrl+Shift+V"
-    # Deliberately unbound: a default would take a system-wide combination away
-    # from whatever the user was already using it for.
+def test_the_default_hotkeys_follow_the_platform_and_leave_the_paste_slots_free():
+    mac = default_hotkeys("Darwin")
+    pc = default_hotkeys("Windows")
+    # The same actions on every platform, with the modifier each one calls its
+    # own: Command on macOS, Ctrl on Windows/Linux.
+    assert mac["show_quick_paste"] == "Cmd+Shift+V"
+    assert pc["show_quick_paste"] == "Ctrl+Shift+V"
+    assert mac["paste_plain"] == "Cmd+Alt+V"
+    assert pc["paste_plain"] == "Ctrl+Alt+V"
+    assert mac["show_window"] == "Cmd+Shift+Space"
+    assert pc["show_window"] == "Ctrl+Shift+Space"
+    # Ctrl+1…9 / Cmd+1…9 switch tabs everywhere else; a default here would take
+    # those chords from every other application for the sake of a shortcut the
+    # paste panel already covers.
+    for index in range(1, 10):
+        assert mac[f"paste_{index}"] == ""
+        assert pc[f"paste_{index}"] == ""
+        assert DEFAULT_HOTKEYS[f"paste_{index}"] == ""
+    # Deliberately unbound: which clip is the newest remote one is not known in
+    # advance.
     assert DEFAULT_HOTKEYS["paste_remote_last"] == ""
     assert Config().hotkeys == DEFAULT_HOTKEYS
+    # On by default, with only the safe chords above registered.
+    assert Config().hotkeys_enabled is True
 
 
-def test_a_v3_config_is_migrated_to_v4_and_saved_that_way(isolated_config):
+def test_a_v4_config_is_rewritten_to_the_platform_modifier(isolated_config, monkeypatch):
+    # The migration asks the platform for its own defaults at load time, so a
+    # Mac upgrading from the Ctrl-based v4 defaults gets Command:
+    # Control+Shift+V would be a chord Mac users do not press.
+    monkeypatch.setattr(config_module.platform, "system", lambda: "Darwin")
+    isolated_config.write_text(
+        json.dumps(
+            {
+                "config_version": 4,
+                "hotkeys": {
+                    "paste_1": "Ctrl+1",
+                    "paste_plain": "Ctrl+Alt+V",
+                    "show_quick_paste": "Ctrl+Shift+V",
+                    "show_window": "Ctrl+Shift+Space",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = config_module.load()
+
+    assert cfg.hotkeys["paste_plain"] == "Cmd+Alt+V"
+    assert cfg.hotkeys["show_quick_paste"] == "Cmd+Shift+V"
+    assert cfg.hotkeys["show_window"] == "Cmd+Shift+Space"
+    assert cfg.hotkeys["paste_1"] == ""
+    assert cfg.config_version == 5
+
+
+def test_a_v3_config_is_migrated_to_v5_and_saved_that_way(isolated_config):
     config_path = isolated_config
     config_path.write_text(
         json.dumps(
@@ -216,24 +263,58 @@ def test_a_v3_config_is_migrated_to_v4_and_saved_that_way(isolated_config):
 
     cfg = config_module.load()
 
-    assert cfg.config_version == 4
-    # The old default moved to the new default...
-    assert cfg.hotkeys["paste_plain"] == "Ctrl+Alt+V"
-    # ...and the action that did not exist before is added.
-    assert cfg.hotkeys["show_quick_paste"] == "Ctrl+Shift+V"
-    # Every other binding is left exactly as stored.
-    assert cfg.hotkeys["paste_1"] == "Ctrl+1"
-    assert cfg.hotkeys["toggle_monitor"] == "Ctrl+Shift+M"
+    assert cfg.config_version == 5
+    # v4 moved plain-text paste to the new default...
+    assert cfg.hotkeys["paste_plain"] == DEFAULT_HOTKEYS["paste_plain"]
+    # ...and added the action that did not exist before.
+    assert cfg.hotkeys["show_quick_paste"] == DEFAULT_HOTKEYS["show_quick_paste"]
+    # v5 moved the untouched defaults to the platform's modifier and cleared
+    # the paste slots (Ctrl+1 was the old default; this user never changed it).
+    assert cfg.hotkeys["paste_1"] == ""
+    assert cfg.hotkeys["toggle_monitor"] == DEFAULT_HOTKEYS["toggle_monitor"]
+    assert cfg.hotkeys_enabled is True
 
-    # The migration is one-way: the save below writes version 4, so a user who
-    # binds paste_plain back to the old combination keeps it on the next start.
-    cfg.hotkeys["paste_plain"] = "Ctrl+Shift+V"
+    # The migration is one-way: the save below writes version 5, so a user who
+    # binds paste_plain back to an old combination keeps it on the next start.
+    old_plain = "Ctrl+Shift+V"
+    cfg.hotkeys["paste_plain"] = old_plain
     config_module.save(cfg)
 
     raw = json.loads(config_path.read_text(encoding="utf-8"))
-    assert raw["config_version"] == 4
-    assert raw["hotkeys"]["paste_plain"] == "Ctrl+Shift+V"
-    assert config_module.load().hotkeys["paste_plain"] == "Ctrl+Shift+V"
+    assert raw["config_version"] == 5
+    assert raw["hotkeys"]["paste_plain"] == old_plain
+    assert config_module.load().hotkeys["paste_plain"] == old_plain
+
+
+def test_a_v4_config_keeps_a_custom_paste_slot_but_loses_the_default_ones(isolated_config):
+    isolated_config.write_text(
+        json.dumps(
+            {
+                "config_version": 4,
+                "hotkeys_enabled": False,
+                "hotkeys": {
+                    "paste_1": "Ctrl+Alt+1",
+                    "paste_2": "Ctrl+2",
+                    "show_window": "Ctrl+Shift+Space",
+                    "paste_remote_last": "",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = config_module.load()
+
+    # A chord the user chose is a choice; a chord still spelled like the v4
+    # default was never touched.
+    assert cfg.hotkeys["paste_1"] == "Ctrl+Alt+1"
+    assert cfg.hotkeys["paste_2"] == ""
+    assert cfg.hotkeys["show_window"] == DEFAULT_HOTKEYS["show_window"]
+    assert cfg.hotkeys["paste_remote_last"] == ""
+    # The one-time v5 flip: hotkeys exist for new users without a trip to
+    # settings; a user who turns them off again stays off.
+    assert cfg.hotkeys_enabled is True
+    assert cfg.config_version == 5
 
 
 def test_a_custom_paste_plain_binding_is_not_rewritten(isolated_config):
@@ -250,8 +331,8 @@ def test_a_custom_paste_plain_binding_is_not_rewritten(isolated_config):
     cfg = config_module.load()
 
     assert cfg.hotkeys["paste_plain"] == "Ctrl+Alt+P"
-    assert cfg.hotkeys["show_quick_paste"] == "Ctrl+Shift+V"
-    assert cfg.config_version == 4
+    assert cfg.hotkeys["show_quick_paste"] == DEFAULT_HOTKEYS["show_quick_paste"]
+    assert cfg.config_version == 5
 
 
 def test_the_new_fields_round_trip_through_save_and_load(isolated_config):
@@ -265,7 +346,7 @@ def test_the_new_fields_round_trip_through_save_and_load(isolated_config):
     config_module.save(cfg)
 
     raw = json.loads(config_path.read_text(encoding="utf-8"))
-    assert raw["config_version"] == 4
+    assert raw["config_version"] == 5
     assert raw["auto_paste_enabled"] is False
     assert raw["source_exclusion_patterns"] == ["keepass", "1password"]
 

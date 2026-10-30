@@ -13,6 +13,7 @@ vi.mock("../src/api/bridge", () => ({
     overview: vi.fn(),
     diagnosticsReport: vi.fn().mockResolvedValue({ summary: "ok" }),
     copyText: vi.fn().mockResolvedValue({ copied: true }),
+    companionQr: vi.fn(),
   },
 }));
 
@@ -66,17 +67,27 @@ function button(view: ReturnType<typeof mountView>, label: string) {
   return view.findAll("button").find(node => (node.text() || "").trim() === label)!;
 }
 
+/** The 开 or 关 button of one two-state switch row, by the row's label. */
+function segment(view: ReturnType<typeof mountView>, label: string, state: "开" | "关") {
+  return view.get(`[aria-label="${label}"]`)
+    .findAll("button").find(node => (node.text() || "").trim() === state)!;
+}
+
 describe("the overview", () => {
   beforeEach(() => {
     vi.mocked(bridge.overview).mockResolvedValue(overview());
     vi.mocked(bridge.diagnosticsReport).mockResolvedValue({ summary: "ok" } as any);
     vi.mocked(bridge.copyText).mockClear().mockResolvedValue({ copied: true } as any);
+    vi.mocked(bridge.companionQr).mockReset().mockResolvedValue({
+      ok: true, url: "http://192.168.1.5:19991/?token=x", qr: "data:image/png;base64,QR",
+    });
     clearStatus();
   });
 
   afterEach(() => {
     vi.mocked(bridge.overview).mockReset();
     vi.mocked(bridge.diagnosticsReport).mockReset();
+    vi.mocked(bridge.companionQr).mockReset();
     clearStatus();
     // Every case here is a page that must not outlive the document it was
     // mounted into.
@@ -188,6 +199,17 @@ describe("the overview", () => {
     } finally { view.unmount(); }
   });
 
+  it("puts the two ways to reach this machine under its address", async () => {
+    const view = mountView();
+    try {
+      await flushPromises();
+      await button(view, "互联网同步").trigger("click");
+      await button(view, "手机伴侣").trigger("click");
+      expect(view.emitted("internet-page")).toHaveLength(1);
+      expect(view.emitted("companion-page")).toHaveLength(1);
+    } finally { view.unmount(); }
+  });
+
   it("offers the phone companion's switch where its address would be", async () => {
     // With no companion running there is no local address to copy, so the card
     // says why and offers the page that starts it — a bare 未启用 would be a
@@ -201,15 +223,29 @@ describe("the overview", () => {
     } finally { view.unmount(); }
   });
 
-  it("shows the QR in one place only", async () => {
-    // It used to be offered twice — in the machine card and again among the
-    // quick actions.  One surface, one entry.
-    const view = mountView();
+  it("shows the phone QR in the machine card, with a way to enlarge it", async () => {
+    // The card's right half used to be empty and the QR sat behind a dialog.
+    // One picture, in place, is the thing a reader came to this card for.
+    const view = mountView(storeStub(), { companionOn: true });
     try {
       await flushPromises();
-      expect(view.findAll("button").filter(node => node.text().trim() === "显示二维码")).toHaveLength(1);
-      await button(view, "显示二维码").trigger("click");
+      expect(view.get(".overview-qr__image").attributes("src")).toBe("data:image/png;base64,QR");
+      expect(view.findAll("button").filter(node => node.text().trim() === "显示二维码")).toHaveLength(0);
+      await button(view, "放大二维码").trigger("click");
       expect(view.emitted("qr")).toHaveLength(1);
+    } finally { view.unmount(); }
+  });
+
+  it("says why the QR is missing and offers to read it again", async () => {
+    vi.mocked(bridge.companionQr).mockResolvedValue({
+      ok: false, url: null, qr: null, error: "手机伴侣没有在运行",
+    });
+    const view = mountView(storeStub(), { companionOn: true });
+    try {
+      await flushPromises();
+      expect(view.get(".overview-qr__hint").text()).toContain("手机伴侣没有在运行");
+      await button(view, "重试").trigger("click");
+      expect(bridge.companionQr).toHaveBeenCalledTimes(2);
     } finally { view.unmount(); }
   });
 
@@ -221,18 +257,18 @@ describe("the overview", () => {
     const view = mountView(store);
     try {
       await flushPromises();
-      await view.get('[aria-label="剪贴板同步"]').setValue(false);
+      await segment(view, "剪贴板同步", "关").trigger("click");
       expect(store.setSyncEnabled).toHaveBeenCalledWith(false);
 
-      await view.get('[aria-label="局域网发现"]').setValue(true);
+      await segment(view, "局域网发现", "开").trigger("click");
       expect(store.setDiscoveryEnabled).toHaveBeenCalledWith(true);
 
-      await view.get('[aria-label="在局域网可见"]').setValue(false);
+      await segment(view, "在局域网可见", "关").trigger("click");
       expect(store.setDiscoveryVisible).toHaveBeenCalledWith(false);
 
       // The phone page's switch is the window's own: it owns the service's
       // status, so the click only reports what was asked for.
-      await view.get('[aria-label="手机网页访问"]').setValue(true);
+      await segment(view, "手机网页访问", "开").trigger("click");
       expect(view.emitted("companion")).toEqual([[true]]);
     } finally { view.unmount(); }
   });
@@ -241,7 +277,7 @@ describe("the overview", () => {
     vi.mocked(bridge.overview).mockResolvedValue(overview({ discovering: false, visible: true }));
     const store = storeStub();
     // The store reports a refusal by recording it, and leaves the runtime
-    // alone; the page has to survive that with the box back where it was.
+    // alone; the page has to survive that with the pair back where it was.
     store.setSyncEnabled.mockImplementation(async () => {
       store.state.error = { code: "RPC_FAILED", message: "同步没有切换", retryable: true };
     });
@@ -249,16 +285,14 @@ describe("the overview", () => {
     const view = mountView(store);
     try {
       await flushPromises();
-      const sync = view.get('[aria-label="剪贴板同步"]');
-      await sync.setValue(false);
+      await segment(view, "剪贴板同步", "关").trigger("click");
       await flushPromises();
-      expect((sync.element as HTMLInputElement).checked).toBe(true);
+      expect(segment(view, "剪贴板同步", "开").attributes("aria-pressed")).toBe("true");
       expect(statusMessage().value).toBe("同步没有切换");
 
-      const discovery = view.get('[aria-label="局域网发现"]');
-      await discovery.setValue(true);
+      await segment(view, "局域网发现", "开").trigger("click");
       await flushPromises();
-      expect((discovery.element as HTMLInputElement).checked).toBe(false);
+      expect(segment(view, "局域网发现", "关").attributes("aria-pressed")).toBe("true");
       expect(statusMessage().value).toBe("操作没有生效，请稍后重试");
     } finally { view.unmount(); }
   });
@@ -279,9 +313,14 @@ describe("the overview", () => {
 
   it("raises one event per quick action, reusing the window's own handlers", async () => {
     const view = mountView();
+    // The paste panel button carries its default chord beside the name (the
+    // panel is opened from a global hotkey, so the button is where a reader
+    // learns it), which means its text is the label plus the key cap.
+    const pastePanel = () => view.findAll("button")
+      .find(node => (node.text() || "").includes("粘贴面板"))!;
     try {
       await flushPromises();
-      await button(view, "快速粘贴").trigger("click");
+      await pastePanel().trigger("click");
       await button(view, "发送文件").trigger("click");
       // 设备 is one of the three primary pages, so it has an explicit door here
       // as well as the status line's clickable count.
@@ -301,9 +340,10 @@ describe("the overview", () => {
       expect(view.emitted("settings-hotkeys")).toHaveLength(1);
       expect(view.emitted("check-update")).toHaveLength(1);
       expect(view.emitted("settings")).toHaveLength(1);
-      // 快速粘贴 is the page's primary action, and 更多设置 is the way off it.
-      expect(button(view, "快速粘贴").classes()).toContain("primary");
-      expect(button(view, "更多设置").classes()).toContain("overview-more");
+      // 粘贴面板 is the page's primary action, and 更多设置 is the way off it.
+      expect(pastePanel().classes()).toContain("overview-tile--primary");
+      expect(pastePanel().get(".overview-shortcut").text()).toBe("Ctrl+Shift+V");
+      expect(button(view, "更多设置").classes()).toContain("overview-more-link");
     } finally { view.unmount(); }
   });
 

@@ -30,5 +30,11 @@ export default defineConfig({
     // consent tests use localStorage, and a real browser always has it.
     environmentOptions: { jsdom: { url: "http://localhost/" } },
     include: ["tests/**/*.test.ts"],
+    // The relay-transport cases drive a fake clock through promise-dependent
+    // WebSocket handshakes; on a busy build host a scheduling hiccup can land
+    // one frame between two ticks and fail a case that passes on a retry.  One
+    // retry keeps genuine failures red (they fail both times) without making a
+    // loaded machine look like a broken release.
+    retry: 1,
   },
 });

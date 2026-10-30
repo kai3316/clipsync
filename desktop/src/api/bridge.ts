@@ -267,7 +267,12 @@ export const bridge = {
   listBackups: () => command<{ backups: Array<Record<string, unknown>> }>("list_backups"),
   createBackup: () => command<{ backup_path: string }>("create_backup"),
   restoreBackup: (path: string) => command<Record<string, unknown>>("restore_backup", { path }),
-  exportHistory: (format: string) => command<Record<string, unknown>>("export_history", { format }),
+  exportHistory: (format: string, path: string | null = null) =>
+    command<Record<string, unknown>>("export_history", { format, path }),
+  /** The native save dialog for a history export.  Returns null when the reader
+   *  cancelled: the window then exports nothing rather than guessing a path. */
+  chooseSaveFile: (format: string) =>
+    command<string | null>("choose_save_file", { format }),
   importHistory: (path: string) => command<Record<string, unknown>>("import_history", { path }),
   chatDevices: () => command<{ devices: Device[] }>("list_chat_devices"),
   chatSessions: () => command<ChatSessionsPage>("list_chat_sessions"),
@@ -378,9 +383,12 @@ export const bridge = {
    *  tray and the hotkey reach the same window through the host itself. */
   openQuickPaste: () => command<{ ok: true }>("open_quick_paste"),
   /** The overlay's search.  Same page shape as `list_history`, and the same
-   *  `kind` vocabulary (`all`/`text`/`image`/`file`/`link`). */
-  quickPasteList: (query: string, kind: string, limit: number) =>
-    command<HistoryPage>("quick_paste_list", { query, kind, limit }),
+   *  `kind` vocabulary (`all`/`text`/`image`/`file`/`link`).  `sort` is the
+   *  host's order — `newest` (the default) or `oldest` — because the rows the
+   *  panel wants first are the rows the sidecar must select first: the list is
+   *  one page, and ordering a page it already cut can only reorder those 20. */
+  quickPasteList: (query: string, kind: string, limit: number, sort: "newest" | "oldest" = "newest") =>
+    command<HistoryPage>("quick_paste_list", { query, kind, limit, sort }),
   /** Take one row: the host writes the clipboard, hides the overlay and pastes
    *  into the application that had the focus.  `plain` is the same text-only
    *  form `copyHistory`'s flag asks for.  A paste failure comes back as a value
@@ -388,8 +396,19 @@ export const bridge = {
    *  re-shown to say why — so the caller has to read `ok`. */
   quickPasteChoose: (entryId: string, plain: boolean) =>
     command<QuickPasteChooseResult>("quick_paste_choose", { entryId, plain }),
-  /** Hide the overlay without choosing anything (Esc, or the focus leaving). */
-  quickPasteClose: () => command<{ ok: true }>("quick_paste_close"),
+  /** The 收藏 mode of the overlay: the saved library, searched and pasted the
+   *  same way a history row is.  A separate command from `listFavorites`
+   *  because the overlay's ACL knows only the panel's own commands. */
+  quickPasteFavorites: (query: string, limit = 20) =>
+    command<FavoritesPage>("quick_paste_favorites", { query, limit }),
+  quickPasteChooseFavorite: (favoriteId: string) =>
+    command<QuickPasteChooseResult>("quick_paste_choose_favorite", { favoriteId }),
+  /** Hide the overlay without choosing anything (Esc, or the focus leaving).
+   *  `restoreMain` asks the host to bring the main window back, which only
+   *  happens when the overlay was opened from that window and Esc asked for it;
+   *  a close caused by the focus leaving leaves the user where they went. */
+  quickPasteClose: (restoreMain = false) =>
+    command<{ ok: true }>("quick_paste_close", { restoreMain }),
   /** The overlay's bootstrap: the language to render in and the stored theme
    *  (the window is a second document with no `App.vue` to have received
    *  either), plus the auto-paste switch for callers that need to word what a

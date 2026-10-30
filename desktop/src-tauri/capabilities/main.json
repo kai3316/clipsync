@@ -85,6 +85,7 @@
     "allow-choose-file",
     "allow-choose-files",
     "allow-choose-folder",
+    "allow-choose-save-file",
     "allow-transfer-action",
     "allow-cancel-all-transfers",
     "allow-clear-transfer-history",

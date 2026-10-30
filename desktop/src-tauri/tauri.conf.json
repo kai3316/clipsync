@@ -17,10 +17,12 @@
       "height": 760,
       "minWidth": 380,
       "minHeight": 440,
-      "dragDropEnabled": true
+      "dragDropEnabled": true,
+      "visible": false,
+      "backgroundColor": "#f5f6f8"
     }],
     "security": {
-      "capabilities": ["main"],
+      "capabilities": ["main", "quick-paste"],
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'",
       "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost ws://127.0.0.1:1420; object-src 'none'; frame-src 'none'; base-uri 'none'"
     }

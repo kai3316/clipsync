@@ -191,8 +191,10 @@ describe("browser isolation", () => {
     await bridge.hideMainAndPaste();
     await bridge.openQuickPaste();
     await bridge.quickPasteList("会议", "text", 20);
+    await bridge.quickPasteList("会议", "text", 20, "oldest");
     await bridge.quickPasteChoose("h1", true);
     await bridge.quickPasteClose();
+    await bridge.quickPasteClose(true);
     await bridge.quickPasteSettings();
     expect(vi.mocked(invoke).mock.calls).toEqual([
       // No delay means the host's own (~90 ms) wait; a caller that names one
@@ -201,9 +203,16 @@ describe("browser isolation", () => {
       ["inject_paste", { delayMs: 120 }],
       ["hide_main_and_paste", undefined],
       ["open_quick_paste", undefined],
-      ["quick_paste_list", { query: "会议", kind: "text", limit: 20 }],
+      ["quick_paste_list", { query: "会议", kind: "text", limit: 20, sort: "newest" }],
+      // The panel's order travels with the read: "oldest" is the host's sort,
+      // not a reversal of the page it already cut.
+      ["quick_paste_list", { query: "会议", kind: "text", limit: 20, sort: "oldest" }],
       ["quick_paste_choose", { entryId: "h1", plain: true }],
-      ["quick_paste_close", undefined],
+      // `restoreMain` travels on every close, so the host never has to guess
+      // whether Esc or a focus loss is the caller; only Esc asks for the main
+      // window back.
+      ["quick_paste_close", { restoreMain: false }],
+      ["quick_paste_close", { restoreMain: true }],
       ["quick_paste_settings", undefined],
     ]);
   });

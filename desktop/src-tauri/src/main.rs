@@ -68,6 +68,14 @@ fn hotkey_map(state: &Hotkeys) -> std::sync::MutexGuard<'_, HashMap<Shortcut, St
 /// on its own.
 struct PasteOrigin(std::sync::Mutex<Option<paste::Foreground>>);
 
+/// Whether the last overlay opening hid the main window, so cancelling with Esc
+/// can put it back instead of leaving the user with nothing but the tray icon.
+/// Set on every open, consumed by `quick_paste_close`; a close caused by the
+/// focus leaving the overlay does not restore it (the user turned to another
+/// application on purpose).
+#[derive(Default)]
+struct QuickPasteOpenedFromMain(std::sync::Mutex<bool>);
+
 /// Take the recorded foreground application, leaving the slot empty for the
 /// next open.
 fn take_paste_origin(app: &tauri::AppHandle) -> Option<paste::Foreground> {
@@ -902,12 +910,53 @@ async fn restore_backup(window: WebviewWindow, host: State<'_, Host>, path: Stri
 }
 
 #[tauri::command]
-async fn export_history(window: WebviewWindow, host: State<'_, Host>, format: String) -> Result<Value, BridgeError> {
+async fn choose_save_file(
+    window: WebviewWindow,
+    format: String,
+) -> Result<Option<String>, BridgeError> {
+    authorize(&window)?;
+    let extension = match format.as_str() {
+        "json" => "json",
+        "csv" => "csv",
+        "markdown" => "md",
+        _ => {
+            return Err(BridgeError::new(
+                "VALIDATION_ERROR",
+                "Invalid export format",
+            ))
+        }
+    };
+    let strings = native_strings(&window);
+    // A default name in Downloads is the one place a reader would have looked
+    // anyway, so the dialog opens on a usable file instead of an empty box; the
+    // chosen path is what the sidecar then writes, rather than a second guess.
+    Ok(rfd::FileDialog::new()
+        .add_filter(strings.filter_history, &[extension])
+        .set_file_name(format!("clipsync-history.{extension}"))
+        .save_file()
+        .map(|path| path.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn export_history(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    format: String,
+    path: Option<String>,
+) -> Result<Value, BridgeError> {
     authorize(&window)?;
     if !matches!(format.as_str(), "json" | "csv" | "markdown") {
         return Err(BridgeError::new("VALIDATION_ERROR", "Invalid export format"));
     }
-    host.bridge().await?.call("history.export", json!({"format": format})).await
+    if let Some(path) = path.as_deref() {
+        if path.is_empty() || path.chars().count() > 4096 {
+            return Err(BridgeError::new("VALIDATION_ERROR", "Invalid export path"));
+        }
+    }
+    host.bridge()
+        .await?
+        .call("history.export", json!({"format": format, "path": path}))
+        .await
 }
 #[tauri::command]
 async fn import_history(window: WebviewWindow, host: State<'_, Host>, path: String) -> Result<Value, BridgeError> {
@@ -3285,6 +3334,7 @@ async fn quick_paste_list(
     query: String,
     kind: String,
     limit: u32,
+    sort: Option<String>,
 ) -> Result<Value, BridgeError> {
     authorize_quick_paste(&window)?;
     let query: String = query.chars().take(512).collect();
@@ -3292,14 +3342,88 @@ async fn quick_paste_list(
         "text" | "image" | "file" | "link" | "all" => kind,
         _ => "all".to_string(),
     };
+    let sort = match sort.as_deref() {
+        Some("oldest") => "oldest",
+        _ => "newest",
+    };
     let limit = limit.clamp(1, 100);
     host.bridge()
         .await?
         .call(
             "history.list",
-            json!({"query": query, "offset": 0, "limit": limit, "kind": kind, "sort": "newest"}),
+            json!({"query": query, "offset": 0, "limit": limit, "kind": kind, "sort": sort}),
         )
         .await
+}
+
+/// Search the favourites library for the overlay.
+///
+/// The panel has a 收藏 mode for the same reason the history page has a
+/// favourites page: the reader saved those clips to reach them quickly, and a
+/// palette that only knows history makes them go back to the window.  It is a
+/// separate command rather than a widened `list_favorites` because the overlay
+/// gets its own narrow ACL (see `capabilities/quick-paste.json`).
+#[tauri::command]
+async fn quick_paste_favorites(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    query: String,
+    limit: u32,
+) -> Result<Value, BridgeError> {
+    authorize_quick_paste(&window)?;
+    let query: String = query.chars().take(512).collect();
+    let limit = limit.clamp(1, 100);
+    host.bridge()
+        .await?
+        .call(
+            "favorites.list",
+            json!({"query": query, "group": "", "offset": 0, "limit": limit}),
+        )
+        .await
+}
+
+/// Copy the chosen favourite, hide the overlay, hand the focus back and paste.
+/// Same contract as `quick_paste_choose`: a paste failure comes back as a
+/// value with `copied: true`, because the clip is already on the clipboard.
+#[tauri::command]
+async fn quick_paste_choose_favorite(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    host: State<'_, Host>,
+    favorite_id: String,
+) -> Result<Value, BridgeError> {
+    authorize_quick_paste(&window)?;
+    if favorite_id.is_empty() || favorite_id.len() > 64 {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid favourite"));
+    }
+    host.bridge()
+        .await?
+        .call("favorites.copy", json!({"favorite_id": favorite_id}))
+        .await?;
+    let origin = take_paste_origin(&app);
+    let _ = window.hide();
+    let pasted = tauri::async_runtime::spawn_blocking(move || {
+        paste::restore_and_paste(origin, Duration::from_millis(0))
+    })
+    .await;
+    match pasted {
+        Ok(Ok(())) => Ok(json!({"ok": true})),
+        Ok(Err(message)) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            Ok(json!({"ok": false, "copied": true, "code": "PASTE_FAILED", "message": message}))
+        }
+        Err(error) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            Ok(json!({
+                "ok": false,
+                "copied": true,
+                "code": "PASTE_FAILED",
+                "message": error.to_string(),
+            }))
+        }
+    }
 }
 
 /// Copy the chosen clip, hide the overlay, hand the focus back and paste.
@@ -3356,9 +3480,32 @@ async fn quick_paste_choose(
 
 /// Hide the overlay (Esc, or the window asked to close).
 #[tauri::command]
-fn quick_paste_close(window: WebviewWindow) -> Result<Value, BridgeError> {
+fn quick_paste_close(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    restore_main: Option<bool>,
+) -> Result<Value, BridgeError> {
     authorize_quick_paste(&window)?;
     let _ = window.hide();
+    let restore = restore_main.unwrap_or(false);
+    let opened_from_main = app
+        .try_state::<QuickPasteOpenedFromMain>()
+        .map(|state| {
+            let mut opened = state
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let was = *opened;
+            *opened = false;
+            was
+        })
+        .unwrap_or(false);
+    if restore && opened_from_main {
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
+    }
     Ok(json!({"ok": true}))
 }
 
@@ -3462,11 +3609,19 @@ fn show_main_window_and(app: &tauri::AppHandle, event: &str) {
 /// application the user came from).
 fn open_quick_paste_for(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let mut opened_from_main = false;
         if let Some(main) = app.get_webview_window("main") {
-            if main.is_focused().unwrap_or(false) {
+            opened_from_main = main.is_focused().unwrap_or(false);
+            if opened_from_main {
                 let _ = main.hide();
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+        }
+        if let Some(state) = app.try_state::<QuickPasteOpenedFromMain>() {
+            *state
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = opened_from_main;
         }
         let origin = paste::record_foreground();
         if let Some(state) = app.try_state::<PasteOrigin>() {
@@ -3502,7 +3657,7 @@ fn ensure_quick_paste_window(app: &tauri::AppHandle) -> tauri::Result<WebviewWin
     if let Some(window) = app.get_webview_window("quick-paste") {
         return Ok(window);
     }
-    tauri::WebviewWindowBuilder::new(
+    let window = tauri::WebviewWindowBuilder::new(
         app,
         "quick-paste",
         tauri::WebviewUrl::App("quick-paste.html".into()),
@@ -3522,7 +3677,26 @@ fn ensure_quick_paste_window(app: &tauri::AppHandle) -> tauri::Result<WebviewWin
             let _ = window.set_focus();
         }
     })
-    .build()
+    .build()?;
+    // A transient overlay goes away when the user turns to another window.
+    // The webview's own blur handler asks for the same thing, but a window
+    // that lost focus can be denied that event (or lose it while the page is
+    // rebuilding), and the reader is then left with a frameless panel they
+    // cannot click away.  This is the host-side guarantee; it only hides a
+    // window that really had the focus first, so the initial unfocused state
+    // of a freshly created window cannot dismiss it.
+    let had_focus = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hide_target = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Focused(focused) = event {
+            if *focused {
+                had_focus.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else if had_focus.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                let _ = hide_target.hide();
+            }
+        }
+    });
+    Ok(window)
 }
 
 /// Make a sound for an incoming chat message the reader asked to hear.
@@ -3719,6 +3893,20 @@ fn tray_call(app: &tauri::AppHandle, method: &str, params: Value) {
 
 fn main() {
     let app = tauri::Builder::default()
+        // The main window is created hidden (tauri.conf.json) so the first
+        // pixels the user sees are the page's own boot frame rather than a
+        // blank WebView surface.  Show it once the page has finished painting;
+        // the setup fallback shows it anyway after a few seconds if the page
+        // never gets there.
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+            {
+                let window = webview.window();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        })
         .plugin(tauri_plugin_autostart::Builder::new().app_name("ClipSync").build())
         // Registered for the Rust side only: this window is given no updater
         // permission, so the plugin's own commands stay unreachable from the
@@ -3810,6 +3998,7 @@ fn main() {
             app.manage(host);
             app.manage(Hotkeys::default());
             app.manage(PasteOrigin(std::sync::Mutex::new(None)));
+    app.manage(QuickPasteOpenedFromMain::default());
             // Built in the source language; `tray::refresh` below relabels it
             // from the saved setting as soon as the sidecar can answer.
             let tray_menu = tray::TrayMenu::build(app.handle(), i18n::DEFAULT_LOCALE)?;
@@ -3819,6 +4008,23 @@ fn main() {
             app.manage(tray_menu);
             app.manage(tray::RefreshGate::default());
             app.manage(i18n::CurrentLocale::default());
+            // The main window is created hidden (tauri.conf.json) so the first
+            // pixels the user sees are the page's own boot frame, not a blank
+            // WebView surface.  Show it once the page has finished loading; the
+            // timeout is a safety net for a page that never gets there, because
+            // the tray is then the only way back in.
+            if let Some(main) = app.get_webview_window("main") {
+                // Safety net only: the app-level page-load hook shows the window
+                // as soon as its page has painted; a page that never finishes
+                // would otherwise leave the process running with nothing but a
+                // tray, and no window to ask about it.
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    if !main.is_visible().unwrap_or(true) {
+                        let _ = main.show();
+                    }
+                });
+            }
             let icon = app.default_window_icon().cloned()
                 .ok_or_else(|| std::io::Error::other("Missing ClipSync tray icon"))?;
             let _tray = tauri::tray::TrayIconBuilder::with_id("clipsync")
@@ -3907,6 +4113,7 @@ fn main() {
             choose_file,
             choose_files,
             choose_folder,
+            choose_save_file,
             transfer_action,
             cancel_all_transfers,
             clear_transfer_history,
@@ -4020,6 +4227,8 @@ fn main() {
             open_quick_paste,
             quick_paste_list,
             quick_paste_choose,
+            quick_paste_favorites,
+            quick_paste_choose_favorite,
             quick_paste_close,
             quick_paste_settings,
             prepare_paste_entry,
@@ -4690,6 +4899,41 @@ mod tests {
                 "{permission} is missing from every capabilities/*.json"
             );
         }
+    }
+
+    #[test]
+    fn every_capability_file_is_enabled_in_the_bundle_config() {
+        // Tauri reads capability files from `capabilities/` at build time, but
+        // only the identifiers listed in `app.security.capabilities` are
+        // *enabled*.  A file outside that list compiles and ships, and its
+        // window then runs with no ACL at all: every command from it comes back
+        // "not allowed", and the quick-paste overlay showed exactly that (its
+        // history read failed and its Esc/blur close could not run) while the
+        // build looked healthy.  This is the guard that would have caught it.
+        let conf = include_str!("../tauri.conf.json");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let mut seen = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("capabilities directory") {
+            let path = entry.expect("capability entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("capability file");
+            let value: serde_json::Value =
+                serde_json::from_str(&source).expect("capability JSON");
+            let identifier = value["identifier"]
+                .as_str()
+                .expect("capability identifier");
+            assert!(
+                conf.contains(&format!("\"{identifier}\"")),
+                "capability {identifier:?} exists in capabilities/ but is not listed in tauri.conf.json app.security.capabilities"
+            );
+            seen.push(identifier.to_owned());
+        }
+        assert!(
+            seen.len() >= 2,
+            "expected the main and quick-paste capabilities, found {seen:?}"
+        );
     }
 
     #[test]

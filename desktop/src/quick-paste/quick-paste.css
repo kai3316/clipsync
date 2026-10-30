@@ -42,6 +42,53 @@
   font-size: 12px;
 }
 
+/* The 收藏 mode chip: an icon and a word, the same size as the kind chips it
+   sits beside, because it is one of them — the list switches mode rather than
+   gaining a filter. */
+.quick-paste-favorites {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The second control row: order, the time windows, and the device select.
+ * One line, wrapping only if the window is narrower than the host makes it;
+ * the device select takes the right edge because it is the one control whose
+ * options grow with the reader's machine list. */
+.quick-paste-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px 10px;
+  flex-shrink: 0;
+}
+
+.quick-paste-times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.quick-paste-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.quick-paste-device {
+  margin-left: auto;
+  max-width: 160px;
+  min-height: 26px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
 /* The list scrolls on its own, so the box and the hints stay put. */
 .quick-paste-list {
   flex: 1 1 auto;
@@ -78,6 +125,26 @@
   font-size: 14px;
   line-height: 20px;
   text-align: center;
+}
+
+/* An image row keeps the kind glyph's slot but fills it with the picture the
+ * sidecar already downscaled: the row is recognised at a glance, and the list
+ * stays a list rather than a gallery. */
+.quick-paste-glyph--image {
+  align-self: center;
+  width: 40px;
+  height: 40px;
+  line-height: 0;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--raised);
+}
+
+.quick-paste-glyph--image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .quick-paste-body {
@@ -151,7 +218,8 @@
 /* A paste is one host round trip; the list stays readable but stops taking
  * clicks and Enter presses until it answers. */
 .quick-paste--busy .quick-paste-list,
-.quick-paste--busy .quick-paste-kinds {
+.quick-paste--busy .quick-paste-kinds,
+.quick-paste--busy .quick-paste-filters {
   opacity: 0.6;
   pointer-events: none;
 }
@@ -240,5 +308,40 @@
  * they answer. */
 .quick-paste-confirm .quick-paste-transfer-name {
   font-weight: 600;
+}
+
+/* The enlarged picture under the pointer, the same gesture the history list
+ * offers: the 40px thumbnail identifies the row, the card says what the
+ * picture is before it is pasted.  It is fixed to the pointer and never takes
+ * a click (pointer-events: none), so it cannot steal the gesture it explains. */
+.quick-paste-preview {
+  position: fixed;
+  z-index: 30;
+  max-width: 364px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
+.quick-paste-preview img {
+  display: block;
+  max-width: 340px;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  object-fit: contain;
+}
+
+.quick-paste-preview__size {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
 }
 
