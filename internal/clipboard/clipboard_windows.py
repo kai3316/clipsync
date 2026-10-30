@@ -193,6 +193,22 @@ CF_URL = user32.RegisterClipboardFormatW("UniformResourceLocatorW")
 # byte for byte, for the applications that ask for PNG first.
 CF_PNG = user32.RegisterClipboardFormatW("PNG")
 
+# The three formats Windows applications publish to ask clipboard monitors not
+# to record a copy.  There is no single marker: password managers and the
+# "sensitive clipboard" APIs of password vaults use one or another, and the
+# convention is that *presence* of the first two means "leave this alone",
+# while the third carries a DWORD whose value 0 says the same thing.
+#
+# Names are registered as written, not invented: the id a name gets is the id
+# the publishing application's own registration returns, so a name spelled
+# differently would be a format this process alone ever sees — which looks
+# exactly like "no application marks its copies".
+CF_EXCLUDE_FROM_MONITOR = user32.RegisterClipboardFormatW(
+    "ExcludeClipboardContentFromMonitorProcessing"
+)
+CF_CLIPBOARD_VIEWER_IGNORE = user32.RegisterClipboardFormatW("Clipboard Viewer Ignore")
+CF_CAN_INCLUDE_IN_HISTORY = user32.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
+
 # Message constants
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
@@ -200,6 +216,75 @@ WM_DESTROY = 0x0002
 WNDPROC = ctypes.WINFUNCTYPE(
     ctypes.c_longlong, ctypes.c_void_p, ctypes.c_uint, ctypes.c_ulonglong, ctypes.c_longlong
 )
+
+
+def _clipboard_dword(fmt: int) -> int | None:
+    """The first DWORD of a global-memory clipboard format, or None.
+
+    The clipboard must already be open.  Shared by the concealed-marker check
+    below; any failure answers None, which callers treat as "no marker".
+    """
+    handle = user32.GetClipboardData(fmt)
+    if not handle:
+        return None
+    ptr = kernel32.GlobalLock(handle)
+    if not ptr:
+        return None
+    try:
+        if kernel32.GlobalSize(handle) < 4:
+            return None
+        return struct.unpack("<I", ctypes.string_at(ptr, 4))[0]
+    finally:
+        kernel32.GlobalUnlock(handle)
+
+
+def _clipboard_concealed() -> bool:
+    """Whether the current clipboard asks monitors not to record its content.
+
+    Read on the monitor's own thread, once per clipboard event, right before
+    the callback fires — the same moment the source-app info is captured, so
+    both describe that one event.  The marker can be transient (1Password
+    clears it, and its own "clear clipboard after N seconds" timer rewrites the
+    clipboard), so reading it any later would be reading a different clipboard.
+
+    The clipboard lock is taken because this process's own writer may be
+    publishing a remote clip at the same moment and Win32 lets one thread hold
+    the clipboard at a time; without it, this check would make a concurrent
+    remote write fail for no reason.  A clipboard this process cannot open *is*
+    momentary, and "not concealed" is the answer that never silently drops
+    content — the capture that follows would fail its own read anyway.
+    """
+    marker_formats = {
+        fmt
+        for fmt in (CF_EXCLUDE_FROM_MONITOR, CF_CLIPBOARD_VIEWER_IGNORE)
+        if fmt
+    }
+    if not marker_formats and not CF_CAN_INCLUDE_IN_HISTORY:
+        return False  # registration refused; there is no marker to look for
+    with _CLIPBOARD_LOCK:
+        if not user32.OpenClipboard(None):
+            return False
+        try:
+            present = set()
+            fmt = 0
+            while True:
+                fmt = user32.EnumClipboardFormats(fmt)
+                if fmt == 0:
+                    break
+                present.add(fmt)
+            if marker_formats & present:
+                return True
+            # "CanIncludeInClipboardHistory" is presence *and* value: the
+            # publishing application writes a DWORD, and only 0 means "do not
+            # include".
+            if CF_CAN_INCLUDE_IN_HISTORY and CF_CAN_INCLUDE_IN_HISTORY in present:
+                return _clipboard_dword(CF_CAN_INCLUDE_IN_HISTORY) == 0
+            return False
+        except Exception:
+            logger.debug("Could not inspect the clipboard for concealed markers", exc_info=True)
+            return False
+        finally:
+            user32.CloseClipboard()
 
 
 class _BITMAP(ctypes.Structure):
@@ -1129,9 +1214,13 @@ class WindowsClipboardMonitor(ClipboardMonitor):
                 return 0
             if self._callback:
                 try:
-                    # Capture source app info before the callback fires,
-                    # so we know which app produced the clipboard content.
+                    # Capture source app info and the "do not record" marker
+                    # before the callback fires, so we know which app produced
+                    # the clipboard content and whether it asked to be left
+                    # out of history.  Both describe this event and are read
+                    # while it is still the current clipboard.
                     self.last_source_app = self.get_active_app()
+                    self.last_concealed = _clipboard_concealed()
                     self._callback()
                 except Exception:
                     logger.warning("Clipboard change callback failed", exc_info=True)

@@ -82,10 +82,6 @@ KNOWINGLY_UNREAD = {
         "the uploaded file lands in the history and the transfer list, both of "
         "which the window re-reads; the phone that sent it has its own reply"
     ),
-    "transfers.changed": (
-        "rpc.py publishes this beside a mutation the caller has already "
-        "awaited, and the transfers page re-reads its list on every event"
-    ),
     "url.sent": (
         "the click that sent the URL raises its own toast from the reply "
         "(`已发送网址到 {name}`); this event says the same thing to nobody"

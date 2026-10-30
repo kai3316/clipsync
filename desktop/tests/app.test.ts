@@ -1,4 +1,4 @@
-import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
+import { flushPromises, mount, type DOMWrapper, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App.vue";
 import { bridge } from "../src/api/bridge";
@@ -227,6 +227,18 @@ vi.mock("../src/api/bridge", () => ({
     setDiscoveryVisible: vi.fn().mockResolvedValue({ enabled: true, visible: false }),
     copyHistory: vi.fn().mockResolvedValue({ copied: true }),
     copyText: vi.fn().mockResolvedValue({ copied: true }),
+    // The paste half of the hotkeys and of the row menu's 「粘贴到当前应用」.
+    // Resolved by default, so a case about the copy path does not have to
+    // say what the injection did; a case about the fallback overrides it.
+    injectPaste: vi.fn().mockResolvedValue({ ok: true }),
+    hideMainAndPaste: vi.fn().mockResolvedValue({ ok: true }),
+    openQuickPaste: vi.fn().mockResolvedValue({ ok: true }),
+    // The on-demand paste of a remote-file row (1.3.1): starting it, abandoning
+    // it, and the forwarded events that say how it ended.  A case about the
+    // fetch captures the event handler it registered.
+    preparePasteEntry: vi.fn().mockResolvedValue({ requested: true }),
+    cancelPasteEntry: vi.fn().mockResolvedValue({ cancelled: 1 }),
+    onSidecarEvent: vi.fn().mockResolvedValue(() => {}),
     deleteHistory: vi.fn().mockResolvedValue({ deleted: true }),
     batchPinHistory: vi.fn().mockResolvedValue({ updated: 1 }),
     batchDeleteHistory: vi.fn().mockResolvedValue({ deleted: 1 }),
@@ -308,6 +320,28 @@ async function clickMenuItem(app: VueWrapper, label: string) {
   const item = app.findAll(".context-menu-item").find(node => node.text() === label);
   if (!item) throw new Error(`no menu entry named ${label}`);
   await item.trigger("click");
+  await flushPromises();
+}
+/** Open a remote-file row's menu and hand back its 仅下载到本机 entry.
+ *
+ * The row's own button is 取回并粘贴 now (1.3.1): the explicit download — fetch
+ * the files without pasting them — moved into the menu, which is where the
+ * action for a file wanted on disk belongs.  The entry carries the tooltip the
+ * row's old download button used to, so a case can still read what it says
+ * about the route and the peer's reachability.
+ */
+async function downloadRemoteEntry(app: VueWrapper, index = 0) {
+  closeContextMenu();
+  await app.findAll(".history-row")[index].trigger("contextmenu");
+  await flushPromises();
+  const entry = app.findAll(".context-menu-item").find(node => node.text().includes(t("仅下载到本机")));
+  if (!entry) throw new Error("no 仅下载到本机 entry on the row menu");
+  return entry;
+}
+/** Take that download through the menu. */
+async function clickDownloadRemote(app: VueWrapper, index = 0) {
+  const entry = await downloadRemoteEntry(app, index);
+  await entry.trigger("click");
   await flushPromises();
 }
 async function openPanel(app: VueWrapper, label: string) {
@@ -535,34 +569,36 @@ describe("history rendering", () => {
     }
   });
 
-  it("groups the sidebar's rows into what is here and what is another machine", async () => {
-    // Eight rows in one column with nothing between them: a reader had to learn
-    // eight names before they could find one page.  Two labels cost no logic —
-    // the pages, the order in `PAGES` and the digit chords are untouched,
-    // because a group heading is a word above a row and not a different row.
-    // See U36.
+  it("puts the three primary pages first, then the collections and the tools", async () => {
+    // 概览 / 剪贴板历史 / 设备 are the pages a reader lives in, so they sit at
+    // the top; everything else is a collection kept by the history page or a
+    // tool that configures the window.  The grouping is a word above a row, not
+    // a different row, and the digit chords did not move with the order: the
+    // sidebar advertises `PAGES`' own numbering, so old habits keep working.
     const app = mount(App);
     try {
       await flushPromises();
       const nav = app.get('nav[aria-label="主导航"]');
       const groups = nav.findAll('[role="group"]');
-      expect(groups.map(group => group.attributes("aria-label"))).toEqual(["内容", "设备与工具"]);
+      expect(groups.map(group => group.attributes("aria-label"))).toEqual(["内容", "工具"]);
       // The visible line is the same words, hidden from the accessibility tree
       // so the group is named once rather than twice.
       const labels = groups.flatMap(group => group.findAll(".nav-group-label"));
-      expect(labels.map(node => node.text())).toEqual(["内容", "设备与工具"]);
+      expect(labels.map(node => node.text())).toEqual(["内容", "工具"]);
       expect(labels.every(node => node.attributes("aria-hidden") === "true")).toBe(true);
+      // The primary three are above both groups; 设置 stays at the bottom.
+      expect(nav.findAll(":scope > button").map(node => node.attributes("aria-label")))
+        .toEqual(["概览", "剪贴板历史", "设备"]);
       expect(groups[0].findAll("button").map(node => node.attributes("aria-label")))
-        .toEqual(["剪贴板历史", "收藏库", "附近聊天", "文件传输"]);
+        .toEqual(["收藏库", "附近聊天", "文件传输"]);
       expect(groups[1].findAll("button").map(node => node.attributes("aria-label")))
-        .toEqual(["设备", "手机伴侣", "互联网同步", "AI 配置"]);
-      // 概览 is above the groups and 设置 below them: neither belongs to one.
-      expect(nav.findAll(":scope > button").map(node => node.attributes("aria-label"))).toEqual(["概览"]);
+        .toEqual(["手机伴侣", "互联网同步", "AI 配置"]);
       expect(nav.get(".sidebar-settings button").attributes("aria-label")).toBe("设置");
-      // Grouping moved rows on screen, not the chord each one answers to.
+      // Moving rows on screen did not move the chords they answer to.
       const chordOf = (label: string) =>
         nav.findAll("button").find(button => button.attributes("aria-label") === label)!
           .attributes("aria-keyshortcuts");
+      expect(chordOf("概览")).toBe("Control+1");
       expect(chordOf("剪贴板历史")).toBe("Control+2");
       expect(chordOf("设备")).toBe("Control+3");
       expect(chordOf("收藏库")).toBe("Control+4");
@@ -2311,22 +2347,22 @@ describe("history rendering", () => {
     try {
       await flushPromises();
       // 复制 would clear this machine's clipboard for a file it does not have,
-      // so the row offers the ask in its place rather than beside it.
+      // so the row offers the fetch-and-paste in its place rather than beside
+      // it; the explicit download is the menu's secondary entry.
       expect(app.find('[aria-label="复制记录"]').exists()).toBe(false);
-      await app.get('[aria-label="下载文件"]').trigger("click");
-      await flushPromises();
+      await clickDownloadRemote(app, 0);
       // The id out of the row's offer, not the row's own: history ids are
       // numbered per machine, so "7" here names a different record over there —
       // the ask would come back as that record's file, or as a refusal.
       expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("42", "peer-1");
       // The id on the wire is also what a refusal comes back with, so it is
       // what marks the row as waiting.
-      expect(app.get('[aria-label="下载文件"]').attributes("title"))
-        .toBe(t("已请求下载，正在等待那台设备"));
+      const pending = await downloadRemoteEntry(app, 0);
+      expect(pending.attributes("title")).toBe(t("已请求下载，正在等待那台设备"));
       // A row whose offer named no entry is not offered a click that could only
       // ask the peer for the wrong record.
-      const unreadable = app.findAll('[aria-label="下载文件"]')[1];
-      expect(unreadable.attributes("disabled")).toBeDefined();
+      const unreadable = await downloadRemoteEntry(app, 1);
+      expect(unreadable.attributes("aria-disabled")).toBeDefined();
       expect(unreadable.attributes("title")).toBe(t("这条记录无法下载"));
       app.unmount();
     } finally {
@@ -2354,11 +2390,11 @@ describe("history rendering", () => {
     const app = mountOn("history");
     try {
       await flushPromises();
-      const button = app.get('[aria-label="下载文件"]');
-      expect(button.attributes("disabled"), "a relay peer is a download source now").toBeUndefined();
+      const entry = await downloadRemoteEntry(app);
+      expect(entry.attributes("aria-disabled"), "a relay peer is a download source now").toBeUndefined();
       // The route is named before the click, because a relay transfer is slower and the reader is
       // about to move a file of unknown size across the internet.
-      expect(button.attributes("title"))
+      expect(entry.attributes("title"))
         .toBe(t("从 {name} 下载这个文件（经互联网，比局域网慢）", { name: "Studio away" }));
     } finally {
       app.unmount();
@@ -2382,11 +2418,11 @@ describe("history rendering", () => {
     const app = mountOn("history");
     try {
       await flushPromises();
-      const button = app.get('[aria-label="下载文件"]');
-      const title = button.attributes("title");
+      const entry = await downloadRemoteEntry(app);
+      const title = entry.attributes("title");
       expect(title, "the row said the device was offline while its clips were arriving")
         .not.toContain(t("当前不在线"));
-      expect(button.attributes("disabled")).toBeUndefined();
+      expect(entry.attributes("aria-disabled")).toBeUndefined();
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
@@ -2413,10 +2449,10 @@ describe("history rendering", () => {
     const app = mountOn("history");
     try {
       await flushPromises();
-      const button = app.get('[aria-label="下载文件"]');
-      expect(button.attributes("disabled"), "the window is not the one deciding reachability").toBeUndefined();
-      expect(button.attributes("title")).toContain(t("可能不在线"));
-      await button.trigger("click");
+      const entry = await downloadRemoteEntry(app);
+      expect(entry.attributes("aria-disabled"), "the window is not the one deciding reachability").toBeUndefined();
+      expect(entry.attributes("title")).toContain(t("可能不在线"));
+      await entry.trigger("click");
       await flushPromises();
       expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("42", "peer-1");
     } finally {
@@ -2442,9 +2478,9 @@ describe("history rendering", () => {
     const app = mountOn("history");
     try {
       await flushPromises();
-      const button = app.get('[aria-label="下载文件"]');
-      expect(button.attributes("disabled")).toBeUndefined();
-      expect(button.attributes("title")).toBe(t("从 Studio 下载这个文件"));
+      const entry = await downloadRemoteEntry(app);
+      expect(entry.attributes("aria-disabled")).toBeUndefined();
+      expect(entry.attributes("title")).toBe(t("从 Studio 下载这个文件"));
     } finally {
       app.unmount();
       vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
@@ -2471,8 +2507,9 @@ describe("history rendering", () => {
     try {
       await flushPromises();
       expect(app.find('[aria-label="复制记录"]').exists()).toBe(false);
-      await app.get('[aria-label="下载文件"]').trigger("click");
-      await flushPromises();
+      // The row's own button is the paste; the menu holds the download.
+      expect(app.find('[aria-label="取回并粘贴"]').exists()).toBe(true);
+      await clickDownloadRemote(app);
       expect(bridge.requestEntryFiles).toHaveBeenCalledExactlyOnceWith("42", "peer-1");
       app.unmount();
     } finally {
@@ -2482,6 +2519,247 @@ describe("history rendering", () => {
       })]));
     }
   });
+
+  /* ── The on-demand paste of a remote file (1.3.1) ────────────────────── */
+
+  /** A remote-file row: its bytes are on the peer until a paste fetches them. */
+  function remoteFileRow(overrides: Record<string, unknown> = {}) {
+    return historyRow({
+      id: "7", content_type: "FILE_REMOTE", preview: "report.pdf",
+      source_device: "peer-1", source_name: "Studio", offer_entry: "42",
+      ...overrides,
+    });
+  }
+
+  /** Mount the history page with one remote-file row, and capture the
+   *  `sidecar:event` handler the window registers for the fetch. */
+  let sidecar: ((event: { type: string; name?: string; session_id: string; data?: unknown }) => void) | null = null;
+  async function mountRemote(rows = [remoteFileRow()]) {
+    sidecar = null;
+    vi.mocked(bridge.hideMainAndPaste).mockClear();
+    vi.mocked(bridge.cancelPasteEntry).mockReset().mockResolvedValue({ cancelled: 1 });
+    vi.mocked(bridge.injectPaste).mockClear();
+    vi.mocked(bridge.devices).mockResolvedValue({ items: [
+      { id: "peer-1", name: "Studio", paired: true, connection_state: "online",
+        pairing_status: "paired", pairing_code: null, sas: null },
+    ] });
+    vi.mocked(bridge.history).mockResolvedValue({
+      session_id: "s", seq: 0, offset: 0, total: rows.length, items: rows,
+    } as any);
+    vi.mocked(bridge.preparePasteEntry).mockReset().mockResolvedValue({ requested: true });
+    vi.mocked(bridge.onSidecarEvent).mockReset().mockImplementation(async (handler: any) => {
+      sidecar = handler;
+      return () => { sidecar = null; };
+    });
+    const app = mountOn("history");
+    await flushPromises();
+    return app;
+  }
+  /** Deliver the event the host would forward for this paste. */
+  async function emitPasteEvent(name: string, data: Record<string, unknown>) {
+    sidecar?.({ type: "event", name, session_id: "s", data });
+    await flushPromises();
+    await flushPromises();
+  }
+
+  it("starts the fetch from the row's own button and draws the window's bar", async () => {
+    vi.mocked(bridge.transfers).mockResolvedValue({ active: [
+      { id: "t1", filename: "report.pdf", size: 2048, direction: "down", status: "running",
+        progress: 50, speed: 1024, eta: "1 分钟", paste_entry: "7" },
+    ], history: [], speed_test: {} } as any);
+    const app = await mountRemote();
+    try {
+      // The row's 复制 is gone (the bytes are not here yet); its button starts
+      // the fetch-and-paste instead.
+      expect(app.find('[aria-label="复制记录"]').exists()).toBe(false);
+      await app.get('[aria-label="取回并粘贴"]').trigger("click");
+      await flushPromises();
+      expect(bridge.preparePasteEntry).toHaveBeenCalledWith("7", false);
+      // A paste that finishes after the click is visible from anywhere in the
+      // window: a fixed bar above the status line, not a page-local spinner.
+      expect(app.find(".paste-fetch").exists()).toBe(true);
+      expect(app.get(".paste-fetch").text()).toContain("report.pdf");
+      expect(app.get(".paste-fetch").text()).toContain("50%");
+      // It is not pasted until the files are here.
+      expect(bridge.hideMainAndPaste).not.toHaveBeenCalled();
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.transfers).mockResolvedValue({ active: [], history: [], speed_test: {} } as any);
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
+
+  it("hides the window and pastes once the files arrive", async () => {
+    const app = await mountRemote();
+    try {
+      await app.get('[aria-label="取回并粘贴"]').trigger("click");
+      await flushPromises();
+      await emitPasteEvent("clip_files.paste_ready", { entry_id: "7", paths: ["C:/files/report.pdf"] });
+      // The backend already wrote the clipboard and rewrote the row; the window
+      // only has to step out of the way and let the host type the chord.
+      expect(bridge.hideMainAndPaste).toHaveBeenCalledOnce();
+      expect(app.find(".paste-fetch").exists()).toBe(false);
+      expect(app.text()).toContain(t("已取回 {count} 个文件并粘贴", { count: 1 }));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
+
+  it("says why a fetch failed, and takes the bar away", async () => {
+    const app = await mountRemote();
+    try {
+      await app.get('[aria-label="取回并粘贴"]').trigger("click");
+      await flushPromises();
+      await emitPasteEvent("clip_files.paste_failed", { entry_id: "7", reason: "timeout" });
+      expect(app.find(".paste-fetch").exists()).toBe(false);
+      expect(app.text()).toContain(t("等待传输超时，请重试"));
+      // Nothing was pasted and the row is still remote — the failure is the
+      // whole answer, not a half-success.
+      expect(bridge.hideMainAndPaste).not.toHaveBeenCalled();
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
+
+  it("cancels the fetch from the bar, on the runtime side too", async () => {
+    const app = await mountRemote();
+    try {
+      await app.get('[aria-label="取回并粘贴"]').trigger("click");
+      await flushPromises();
+      await app.get(".paste-fetch").findAll("button").find(node => node.text() === t("取消取回"))!.trigger("click");
+      await flushPromises();
+      expect(bridge.cancelPasteEntry).toHaveBeenCalledWith("7");
+      expect(app.find(".paste-fetch").exists()).toBe(false);
+      expect(app.text()).toContain(t("已取消取回文件"));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
+
+  it("starts the same fetch from the row menu's 粘贴到当前应用", async () => {
+    const app = await mountRemote();
+    try {
+      await app.findAll(".history-row")[0].trigger("contextmenu");
+      await flushPromises();
+      // The primary entry is the paste on every kind of row; for a remote file
+      // it means "fetch it, then paste it" rather than "copy it".  The menu
+      // entry's text also carries its shortcut, so its label span is the name.
+      const entry = app.findAll(".context-menu-item")
+        .find(node => node.get(".context-menu-label").text() === t("粘贴到当前应用"));
+      expect(entry, "no 粘贴到当前应用 entry on a remote row").toBeTruthy();
+      await entry!.trigger("click");
+      await flushPromises();
+      expect(bridge.preparePasteEntry).toHaveBeenCalledWith("7", false);
+      expect(app.find(".paste-fetch").exists()).toBe(true);
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
+
+  it("asks before a large paste and shows its size from the row's offer", async () => {
+    // PASTE_CONFIRM_REQUIRED's error reaches the window without the sidecar's
+    // `details`, so the size comes from the same preview read the hover card
+    // makes: the offer's files, summed.
+    vi.mocked(bridge.previewHistoryEntry).mockResolvedValue({
+      kind: "files", image: "", width: 0, height: 0,
+      files: [
+        { name: "report.pdf", size: 1024, kind: "file", exists: false },
+        { name: "photos.zip", size: 2048, kind: "file", exists: false },
+      ],
+      total: 2,
+    } as any);
+    const app = await mountRemote();
+    try {
+      vi.mocked(bridge.preparePasteEntry).mockRejectedValue({
+        code: "PASTE_CONFIRM_REQUIRED", message: "too large", retryable: false,
+      });
+      await app.get('[aria-label="取回并粘贴"]').trigger("click");
+      await flushPromises();
+      const dialog = app.get('[aria-labelledby="paste-confirm-title"]');
+      expect(dialog.text()).toContain(t("文件约 {size}，粘贴前需先从另一台设备传输。继续？", { size: "3.0 KB" }));
+      await dialog.findAll("button").find(node => node.text() === t("继续"))!.trigger("click");
+      await flushPromises();
+      // The answer is the same call with the confirmation attached; the sidecar
+      // remembers it for this attempt only.
+      expect(bridge.preparePasteEntry).toHaveBeenLastCalledWith("7", true);
+    } finally {
+      vi.mocked(bridge.previewHistoryEntry).mockResolvedValue({
+        kind: "", image: "", width: 0, height: 0, files: [], total: 0,
+      } as any);
+      app.unmount();
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+    }
+  });
+
+  it("fetches and pastes a remote file from a paste shortcut, with no bar", async () => {
+    // The reader pressed the key in another application, so there is nowhere to
+    // draw progress: the fetch runs headless and only its outcome is said.  A
+    // large-file question cannot be answered from here either, so it is a
+    // sentence pointing at the surface that can ask.
+    let fireHotkey!: (action: string) => void;
+    let hotkeySidecar: ((event: any) => void) | undefined;
+    vi.mocked(bridge.onHotkey).mockImplementation(async (handler: any) => {
+      fireHotkey = handler;
+      return () => {};
+    });
+    vi.mocked(bridge.onSidecarEvent).mockReset().mockImplementation(async (handler: any) => {
+      hotkeySidecar = handler;
+      return () => { hotkeySidecar = undefined; };
+    });
+    vi.mocked(bridge.history).mockResolvedValue({
+      session_id: "s", seq: 0, offset: 0, total: 1, items: [remoteFileRow()],
+    } as any);
+    vi.mocked(bridge.preparePasteEntry).mockReset().mockResolvedValue({ requested: true });
+    vi.mocked(bridge.injectPaste).mockClear();
+    const app = mount(App);
+    try {
+      await flushPromises();
+      fireHotkey("paste_1");
+      await flushPromises();
+      expect(bridge.preparePasteEntry).toHaveBeenCalledWith("7");
+      expect(app.find(".paste-fetch").exists()).toBe(false);
+      hotkeySidecar?.({
+        type: "event", name: "clip_files.paste_ready", session_id: "s",
+        data: { entry_id: "7", paths: ["C:/files/report.pdf"] },
+      });
+      await flushPromises();
+      await flushPromises();
+      expect(bridge.injectPaste).toHaveBeenCalledOnce();
+      expect(app.text()).toContain(t("已取回 {count} 个文件并粘贴", { count: 1 }));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.onHotkey).mockResolvedValue(() => {});
+      vi.mocked(bridge.onSidecarEvent).mockResolvedValue(() => {});
+      vi.mocked(bridge.devices).mockResolvedValue({ items: [] });
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
+      vi.mocked(bridge.injectPaste).mockResolvedValue({ ok: true } as any);
+    }
+  });
+
   it("opens the hover card on an image row with the picture the sidecar drew", async () => {
     vi.clearAllMocks();
     vi.mocked(bridge.history).mockResolvedValue({ session_id: "s", seq: 0, offset: 0, total: 1, items: [
@@ -4177,7 +4455,14 @@ describe("the window's right-click menus", () => {
     app = mountOn("history");
     await flushPromises();
   });
-  afterEach(() => { app.unmount(); closeContextMenu(); });
+  afterEach(() => {
+    app.unmount();
+    closeContextMenu();
+    vi.mocked(bridge.hideMainAndPaste).mockReset().mockResolvedValue({ ok: true });
+    vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+      preview: '<img src=x onerror="window.injected=true">',
+    })]));
+  });
 
   it("copies the row it was opened on, not the first one", async () => {
     vi.mocked(bridge.copyHistory).mockClear();
@@ -4217,8 +4502,89 @@ describe("the window's right-click menus", () => {
     expect(labels()).not.toContain(t("复制为纯文本"));
   });
 
+  it("copies the row and then hands the OS the paste, from one entry", async () => {
+    // The menu's 「粘贴到当前应用」 is 复制 plus the system chord: the copy has to
+    // land before the paste is asked for, or the window behind would receive
+    // whatever the clipboard held before.
+    vi.mocked(bridge.copyHistory).mockClear();
+    vi.mocked(bridge.hideMainAndPaste).mockClear();
+    await app.findAll(".history-row")[0].trigger("contextmenu");
+    await flushPromises();
+    // The entries' labels are their own span: the text of the button also
+    // carries whatever shortcut is drawn at its right edge.
+    const items = () => app.findAll(".context-menu-item");
+    const labelOf = (node: DOMWrapper<Element>) =>
+      node.get(".context-menu-label").text();
+    const labels = items().map(labelOf);
+    // Right after 复制, which is the action it extends.
+    expect(labels.indexOf(t("粘贴到当前应用"))).toBe(labels.indexOf(t("复制")) + 1);
+    await items().find(node => labelOf(node) === t("粘贴到当前应用"))!.trigger("click");
+    await flushPromises();
+    expect(bridge.copyHistory).toHaveBeenLastCalledWith("a");
+    expect(bridge.hideMainAndPaste).toHaveBeenCalledOnce();
+  });
+
+  it("says which key to press when the paste half is refused", async () => {
+    vi.mocked(bridge.copyHistory).mockClear();
+    vi.mocked(bridge.hideMainAndPaste).mockRejectedValue({
+      code: "PASTE_FAILED", message: "the OS refused the injection",
+    });
+    await app.findAll(".history-row")[0].trigger("contextmenu");
+    await flushPromises();
+    await app.findAll(".context-menu-item")
+      .find(node => node.get(".context-menu-label").text() === t("粘贴到当前应用"))!
+      .trigger("click");
+    await flushPromises();
+    // The clipboard holds the clip either way — that is the half the sentence
+    // reports, and the key it names is the system's own, not a configured one.
+    expect(bridge.copyHistory).toHaveBeenCalledOnce();
+    expect(app.text()).toContain(t("已复制，请手动按 {shortcut} 粘贴", { shortcut: "Ctrl+V" }));
+  });
+
+  it("leaves the paste entry out for a file that lives on another device", async () => {
+    app.unmount();
+    closeContextMenu();
+    vi.mocked(bridge.history).mockResolvedValue(historyPage([
+      historyRow({
+        id: "remote-file", preview: "report.pdf", content_type: "FILE_REMOTE",
+        source_device: "peer-1", offer_entry: "7",
+      }),
+    ]));
+    app = mountOn("history");
+    await flushPromises();
+    await app.findAll(".history-row")[0].trigger("contextmenu");
+    await flushPromises();
+    // There is nothing on this machine to put on the clipboard yet, so the
+    // entry would only ever paste the previous clipboard's contents.
+    const labels = app.findAll(".context-menu-item").map(node => node.text());
+    expect(labels).not.toContain(t("粘贴到当前应用"));
+  });
+
 });
 
+
+describe("the history toolbar's quick-paste entry", () => {
+  it("opens the overlay from the page that holds the rows", async () => {
+    setLocale("zh-CN");
+    vi.mocked(bridge.openQuickPaste).mockClear();
+    const app = mountOn("history");
+    try {
+      await flushPromises();
+      const entry = app.findAll("button")
+        .find(node => node.attributes("aria-label") === t("快速粘贴"))!;
+      expect(entry.exists(), "no quick-paste entry on the history toolbar").toBe(true);
+      await entry.trigger("click");
+      await flushPromises();
+      // One command: the window, the focus bookkeeping and the paste into the
+      // application behind it are all the host's, so the page opens nothing
+      // itself and has nothing to say about it afterwards.
+      expect(bridge.openQuickPaste).toHaveBeenCalledOnce();
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.openQuickPaste).mockClear();
+    }
+  });
+});
 
 describe("the update button on a device row", () => {
   /** The two devices the update cases need: one ahead of us, one behind. */
@@ -4992,6 +5358,7 @@ describe("global hotkeys", () => {
     vi.mocked(bridge.onHotkey).mockResolvedValue(() => {});
     vi.mocked(bridge.settings).mockResolvedValue({ settings: {} } as any);
     vi.mocked(bridge.setHotkeys).mockResolvedValue([]);
+    vi.mocked(bridge.injectPaste).mockReset().mockResolvedValue({ ok: true });
     vi.mocked(bridge.status).mockResolvedValue({
       version: "test", health: "ready", device_name: "Local",
       session_id: "s", seq: 0, sync_state: "not_started",
@@ -5114,6 +5481,95 @@ describe("global hotkeys", () => {
       expect(bridge.copyHistory).not.toHaveBeenCalled();
     } finally {
       vi.mocked(bridge.copyHistory).mockClear();
+      app.unmount();
+    }
+  });
+
+  it("pastes what the shortcut copied, and says so, when auto-paste is on", async () => {
+    vi.mocked(bridge.history).mockResolvedValue(historyPage([
+      historyRow({ id: "a", preview: "first" }),
+      historyRow({ id: "b", preview: "second" }),
+    ]));
+    vi.mocked(bridge.injectPaste).mockClear();
+    const { app, fire } = await mountWithHotkeys({ hotkeys_enabled: true, auto_paste_enabled: true });
+    try {
+      fire("paste_2");
+      await flushPromises();
+      expect(bridge.copyHistory).toHaveBeenLastCalledWith("b", false);
+      // The copy is only the first half now: the host types the system chord
+      // into the application that had the focus, and the toast says pasted
+      // rather than copied because that is what happened.
+      expect(bridge.injectPaste).toHaveBeenCalledOnce();
+      expect(app.text()).toContain(t("已粘贴第 {n} 条", { n: 2 }));
+      expect(app.text()).not.toContain(t("已复制第 {n} 条", { n: 2 }));
+    } finally {
+      vi.mocked(bridge.copyHistory).mockClear();
+      app.unmount();
+    }
+  });
+
+  it("falls back to the clipboard when the paste is refused", async () => {
+    vi.mocked(bridge.injectPaste).mockRejectedValue({
+      code: "PASTE_FAILED", message: "the OS refused the injection",
+    });
+    const { app, fire } = await mountWithHotkeys({ hotkeys_enabled: true, auto_paste_enabled: true });
+    try {
+      fire("paste_1");
+      await flushPromises();
+      // The clipboard already holds the clip, so this is the one sentence that
+      // leaves the reader something to do — not the failure band, which is for
+      // a sidecar that stopped answering.
+      expect(app.text()).toContain(t("已复制，请按 {shortcut} 手动粘贴", { shortcut: "Ctrl+V" }));
+      expect(app.find(".error-band").exists()).toBe(false);
+    } finally { app.unmount(); }
+  });
+
+  it("only copies when auto-paste is switched off", async () => {
+    vi.mocked(bridge.injectPaste).mockClear();
+    const { app, fire } = await mountWithHotkeys({ hotkeys_enabled: true, auto_paste_enabled: false });
+    try {
+      fire("paste_1");
+      await flushPromises();
+      expect(bridge.copyHistory).toHaveBeenLastCalledWith("1", false);
+      expect(bridge.injectPaste).not.toHaveBeenCalled();
+      expect(app.text()).toContain(t("已复制第 {n} 条", { n: 1 }));
+    } finally { app.unmount(); }
+  });
+
+  it("pastes the newest remote item, and says when there is none", async () => {
+    // `source_device` marks the rows that arrived from another machine; this
+    // shortcut is the one key that reaches them without reading the list.
+    vi.mocked(bridge.history).mockResolvedValue(historyPage([
+      historyRow({ id: "local", preview: "here" }),
+      historyRow({ id: "remote", preview: "from laptop", source_device: "peer-1" }),
+    ]));
+    vi.mocked(bridge.injectPaste).mockClear();
+    const { app, fire } = await mountWithHotkeys({ hotkeys_enabled: true, auto_paste_enabled: true });
+    try {
+      fire("paste_remote_last");
+      await flushPromises();
+      // The newest fifty, because a local clip on top of the stack must not
+      // hide the remote one this chord is for.
+      expect(bridge.history).toHaveBeenLastCalledWith("", 0, 50, "all", "newest");
+      expect(bridge.copyHistory).toHaveBeenLastCalledWith("remote", false);
+      expect(bridge.injectPaste).toHaveBeenCalledOnce();
+      expect(app.text()).toContain(t("已粘贴最新远程项"));
+
+      // Nothing from a peer in the window: the press is answered rather than
+      // left silent, and the clipboard keeps whatever it held.
+      vi.mocked(bridge.copyHistory).mockClear();
+      vi.mocked(bridge.injectPaste).mockClear();
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({ id: "local", preview: "here" })]));
+      fire("paste_remote_last");
+      await flushPromises();
+      expect(bridge.copyHistory).not.toHaveBeenCalled();
+      expect(bridge.injectPaste).not.toHaveBeenCalled();
+      expect(app.text()).toContain(t("还没有可粘贴的远程内容"));
+    } finally {
+      vi.mocked(bridge.copyHistory).mockClear();
+      vi.mocked(bridge.history).mockResolvedValue(historyPage([historyRow({
+        preview: '<img src=x onerror="window.injected=true">',
+      })]));
       app.unmount();
     }
   });
@@ -5455,6 +5911,194 @@ describe("the settings form's own numbers", () => {
   });
 });
 
+describe("the paste and recording card", () => {
+  /** The checkbox under a label, by the words the reader sees. */
+  const check = (app: VueWrapper, label: string) => app.findAll("label")
+    .find(node => (node.text() || "").trim() === label)!.get("input");
+
+  it("shows the stored rules, and saves exactly the five fields", async () => {
+    setLocale("zh-CN");
+    vi.clearAllMocks();
+    vi.mocked(bridge.settings).mockResolvedValue({ settings: {
+      device_name: "Local",
+      auto_paste_enabled: false,
+      skip_password_manager_clips: true,
+      skip_prelaunch_clipboard: false,
+      max_non_file_paste_mb: 12,
+      source_exclusion_patterns: ["kdenlive", "Signal"],
+    } } as any);
+    vi.mocked(bridge.updateSettings).mockResolvedValue({} as any);
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设置"]').trigger("click");
+      await flushPromises();
+      // The card lives in 通用, after 剪贴板历史.
+      await app.findAll(".settings-nav-group button")
+        .find(chip => chip.text() === t("粘贴与录制"))!.trigger("click");
+      await flushPromises();
+      expect(app.findAll(".settings-section")
+        .filter(card => (card.element as HTMLElement).style.display !== "none")
+        .map(card => card.attributes("id"))).toEqual(["settings-recording"]);
+
+      // The stored values, including the list as one pattern per line.
+      expect((check(app, t("自动粘贴到当前应用")).element as HTMLInputElement).checked).toBe(false);
+      expect((check(app, t("密码管理器内容不记录")).element as HTMLInputElement).checked).toBe(true);
+      expect((check(app, t("跳过启动前复制的内容")).element as HTMLInputElement).checked).toBe(false);
+      expect((app.get('[aria-label="非文件类单条大小上限"]').element as HTMLInputElement).value).toBe("12");
+      expect((app.get('[aria-label="来源应用排除列表"]').element as HTMLTextAreaElement).value)
+        .toBe("kdenlive\nSignal");
+
+      // Changed: the switch on, a number past the ceiling, a list with padding
+      // and an empty line, and one rule off.
+      await check(app, t("自动粘贴到当前应用")).setValue(true);
+      await check(app, t("跳过启动前复制的内容")).setValue(true);
+      await app.get('[aria-label="非文件类单条大小上限"]').setValue("99999");
+      await app.get('[aria-label="来源应用排除列表"]').setValue("  kdenlive \n\n Signal \n");
+      await flushPromises();
+      expect(app.text()).toContain(t("有未保存的更改"));
+      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
+      await flushPromises();
+      expect(bridge.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+        auto_paste_enabled: true,
+        skip_password_manager_clips: true,
+        skip_prelaunch_clipboard: true,
+        // Clamped to the sidecar's ceiling, and the box is put back to it: a
+        // form still showing 99999 beside a bar saying "saved" would be a
+        // number the reader believes is in force.
+        max_non_file_paste_mb: 1024,
+        source_exclusion_patterns: ["kdenlive", "Signal"],
+      }));
+      expect((app.get('[aria-label="非文件类单条大小上限"]').element as HTMLInputElement).value)
+        .toBe("1024");
+      expect(app.text()).toContain(t("所有更改都已保存"));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} } as any);
+      setLocale("zh-CN");
+    }
+  });
+
+  it("draws what the sidecar would do for a config that never stored the fields", async () => {
+    // The rules ship on and the limit is 8 MB, so an older config draws the
+    // shipped policy rather than four empty boxes the reader has to interpret.
+    setLocale("zh-CN");
+    vi.clearAllMocks();
+    vi.mocked(bridge.settings).mockResolvedValue({ settings: { device_name: "Local" } } as any);
+    vi.mocked(bridge.updateSettings).mockResolvedValue({} as any);
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await app.get('[aria-label="设置"]').trigger("click");
+      await flushPromises();
+      expect((check(app, t("自动粘贴到当前应用")).element as HTMLInputElement).checked).toBe(true);
+      expect((check(app, t("密码管理器内容不记录")).element as HTMLInputElement).checked).toBe(true);
+      expect((check(app, t("跳过启动前复制的内容")).element as HTMLInputElement).checked).toBe(true);
+      expect((app.get('[aria-label="非文件类单条大小上限"]').element as HTMLInputElement).value).toBe("8");
+      expect((app.get('[aria-label="来源应用排除列表"]').element as HTMLTextAreaElement).value).toBe("");
+      // And a save with nothing typed sends those defaults, which is the same
+      // policy the sidecar holds — not a config the visit rewrote.
+      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
+      await flushPromises();
+      expect(bridge.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+        auto_paste_enabled: true,
+        max_non_file_paste_mb: 8,
+        source_exclusion_patterns: [],
+      }));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} } as any);
+      setLocale("zh-CN");
+    }
+  });
+});
+
+describe("the file card", () => {
+  /** A settings read with the three 1.3.1 limits and the receive folder. */
+  function stored(overrides: Record<string, unknown> = {}) {
+    return { settings: {
+      device_name: "Local", max_file_mb: 100, confirm_large_file_mb: 0,
+      relay_paste_max_mb: 25, file_receive_dir: "D:/incoming", ...overrides,
+    } } as any;
+  }
+  async function openFilesCard(app: ReturnType<typeof mount>) {
+    await app.get('[aria-label="设置"]').trigger("click");
+    await flushPromises();
+    await app.findAll(".settings-nav-group button")
+      .find(chip => chip.text() === t("文件"))!.trigger("click");
+    await flushPromises();
+  }
+  const input = (app: VueWrapper, label: string) => app.get(`[aria-label="${label}"]`);
+
+  it("shows the stored limits and saves them, clamping past the ceiling", async () => {
+    setLocale("zh-CN");
+    vi.clearAllMocks();
+    vi.mocked(bridge.settings).mockResolvedValue(stored());
+    vi.mocked(bridge.updateSettings).mockResolvedValue({} as any);
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await openFilesCard(app);
+      expect((input(app, t("单个文件大小上限")).element as HTMLInputElement).value).toBe("100");
+      expect((input(app, t("粘贴前确认的文件大小")).element as HTMLInputElement).value).toBe("0");
+      expect((input(app, t("中继取回文件上限")).element as HTMLInputElement).value).toBe("25");
+      expect((input(app, t("文件接收目录")).element as HTMLInputElement).value).toBe("D:/incoming");
+
+      // 0 is a real value on all three (no cap / never ask / no extra relay
+      // cap), so the form must keep it rather than fall back to the default.
+      await input(app, t("单个文件大小上限")).setValue("999999");
+      await input(app, t("粘贴前确认的文件大小")).setValue("512");
+      await input(app, t("文件接收目录")).setValue("  E:/files  ");
+      await flushPromises();
+      expect(app.text()).toContain(t("有未保存的更改"));
+      await app.findAll("button").find(button => button.text() === "保存设置")!.trigger("submit");
+      await flushPromises();
+      expect(bridge.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+        max_file_mb: 65536,
+        confirm_large_file_mb: 512,
+        relay_paste_max_mb: 25,
+        file_receive_dir: "E:/files",
+      }));
+      // The clamped number is what the box shows after a save: the form and
+      // the stored policy cannot be two different numbers.
+      expect((input(app, t("单个文件大小上限")).element as HTMLInputElement).value).toBe("65536");
+      expect(app.text()).toContain(t("所有更改都已保存"));
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} } as any);
+      setLocale("zh-CN");
+    }
+  });
+
+  it("draws the shipped defaults, and fills the receive folder from the picker", async () => {
+    setLocale("zh-CN");
+    vi.clearAllMocks();
+    vi.mocked(bridge.settings).mockResolvedValue({ settings: { device_name: "Local" } } as any);
+    vi.mocked(bridge.updateSettings).mockResolvedValue({} as any);
+    vi.mocked(bridge.chooseFolder).mockResolvedValue("E:/received");
+    const app = mount(App);
+    try {
+      await flushPromises();
+      await openFilesCard(app);
+      expect((input(app, t("单个文件大小上限")).element as HTMLInputElement).value).toBe("2048");
+      expect((input(app, t("粘贴前确认的文件大小")).element as HTMLInputElement).value).toBe("512");
+      expect((input(app, t("中继取回文件上限")).element as HTMLInputElement).value).toBe("50");
+      expect((input(app, t("文件接收目录")).element as HTMLInputElement).value).toBe("");
+
+      // The picker replaces the box rather than appending, like the data
+      // directory's own row.
+      await input(app, t("选择接收目录")).trigger("click");
+      await flushPromises();
+      expect((input(app, t("文件接收目录")).element as HTMLInputElement).value).toBe("E:/received");
+    } finally {
+      app.unmount();
+      vi.mocked(bridge.chooseFolder).mockReset();
+      vi.mocked(bridge.settings).mockResolvedValue({ settings: {} } as any);
+      setLocale("zh-CN");
+    }
+  });
+});
+
 describe("dialog chrome", () => {
   // jsdom has `HTMLDialogElement` but not its two methods, and this case is the
   // only one in this file that asks whether the element is really open: the
@@ -5547,12 +6191,12 @@ describe("the settings rail", () => {
       await app.get('[aria-label="设置"]').trigger("click");
       await flushPromises();
       expect(chips(app).map(chip => chip.text())).toEqual([
-        "常规", "剪贴板历史", "同步", "局域网发现", "网络与高级", "翻译",
+        "常规", "剪贴板历史", "粘贴与录制", "文件", "同步", "局域网发现", "网络与高级", "翻译",
         "安全", "数据备份", "软件更新", "诊断与维护",
       ]);
       // One click from the strip to the last card, which used to be a group
       // tab and then a chip.
-      await chips(app)[9].trigger("click");
+      await chips(app)[11].trigger("click");
       expect(shown(app)).toEqual(["settings-diagnostics"]);
       // The four names are over their runs of chips and are not controls: no
       // chip carries a group's name, and nothing at that level opens anything.
@@ -5587,20 +6231,21 @@ describe("the settings rail", () => {
       // than anyone does.
       await new Promise(resolve => setTimeout(resolve, 200));
       await flushPromises();
-      // 中继 is the sync card's word: it matches there and nowhere else, which
-      // makes it a query whose answer is one chip in one group.
-      // A matching chip carries its count after its name, which is the one
-      // thing about its text that is not the name.
+      // 中继 is named by two cards now — the sync card's own limits and the
+      // file card's relay-paste limit — so two chips hold it, one in each of
+      // two groups.
       const matched = chips(app).filter(chip => chip.classes("has-match"))
         .map(chip => chip.text().split(" · ")[0]);
       const dimmed = chips(app).filter(chip => chip.classes("dimmed")).map(chip => chip.text());
-      expect(matched).toEqual(["同步"]);
+      expect(matched).toEqual(["文件", "同步"]);
       // Nothing is left neutral while a query is up: every chip either holds
       // the query or is reported as not holding it.
       expect(matched.length + dimmed.length).toBe(chips(app).length);
       expect(dimmed).toContain("剪贴板历史");
-      expect(cluster(app, "通用").get(".settings-nav-label").classes("dimmed")).toBe(true);
+      // A group's name dims only when nothing in it matches.
+      expect(cluster(app, "通用").get(".settings-nav-label").classes("dimmed")).toBe(false);
       expect(cluster(app, "连接").get(".settings-nav-label").classes("dimmed")).toBe(false);
+      expect(cluster(app, "数据").get(".settings-nav-label").classes("dimmed")).toBe(true);
       // And with the query dropped, every name is bright again.
       await app.get(".settings-search-clear").trigger("click");
       await flushPromises();

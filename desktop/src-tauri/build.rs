@@ -137,6 +137,15 @@ fn main() {
             "internet_pairing_enter",
             "internet_pairing_rename",
             "internet_pairing_unpair",
+            "inject_paste",
+            "hide_main_and_paste",
+            "open_quick_paste",
+            "quick_paste_list",
+            "quick_paste_choose",
+            "quick_paste_close",
+            "quick_paste_settings",
+            "prepare_paste_entry",
+            "cancel_paste_entry",
         ]),
     ))
     .expect("Tauri build configuration");

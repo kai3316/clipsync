@@ -132,10 +132,10 @@ SUBSCRIBE_QOS = 1
 # How many QoS>0 messages may sit in paho's outgoing queue before publish()
 # refuses more.  Only reachable on a slow link: the file sender streams as
 # fast as it can read, so an unbounded queue is the whole attachment in RAM
-# (a relay attachment is now up to MAX_FILE_SIZE, not the 5 MiB it used to be
-# capped at).  When it fills, publish() reports the refusal and the sender
-# backs off instead of buffering — bounded memory, and a stall the app can
-# name rather than an OOM it cannot.
+# (a relay attachment is now up to the app's 2 GiB cap, not the 5 MiB it used
+# to be capped at).  When it fills, publish() reports the refusal and the
+# sender backs off instead of buffering — bounded memory, and a stall the app
+# can name rather than an OOM it cannot.
 MAX_QUEUED_MESSAGES = 256
 MAX_INFLIGHT_MESSAGES = 20
 

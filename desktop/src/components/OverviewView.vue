@@ -1,47 +1,51 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
-  Activity, Check, ClipboardType, Copy, FileText, FileUp, Image as ImageIcon, Link, Monitor,
-  Pencil, Pin, QrCode, RefreshCw, SendHorizontal,
+  Activity, AlertCircle, ArrowRight, ClipboardPaste, Copy, Download, Keyboard, Monitor,
+  Pencil, QrCode, RefreshCw, SendHorizontal, Settings as SettingsIcon, Upload,
 } from "@lucide/vue";
 import { bridge } from "../api/bridge";
-import type { DiagnosticStatus, Overview, OverviewRecentItem } from "../api/types";
+import type { DiagnosticStatus, Overview } from "../api/types";
 import type { createApplicationStore } from "../stores/application";
 import { t } from "../i18n";
-import { previewText } from "../i18n/format";
 import { copyText } from "../lib/clipboard";
-import { isMenuKey, keyboardMenuPoint } from "../lib/context-menu";
+import { pairingInFlight } from "../lib/device-row";
+import { announce } from "../lib/status";
 
 /**
- * The dashboard: what this machine is doing right now.
+ * The overview: this machine, its usual switches, and the actions reached most.
  *
- * The legacy window opened on this page and the phone's panel still does, and
- * it is the one page that answers without being asked — so it is drawn from a
- * read of its own (`overview.get`) rather than from the history and device
- * lists the other pages keep, and it is the sidebar's first row.
+ * It used to be a dashboard — four counters, a network ring, a repeat of the
+ * device list and a feed of the newest clips.  On an ordinary day most of those
+ * numbers were 0, the ring was a drawing of the same numbers, the device list
+ * was the devices page a click away, and the feed was the history page again.
+ * What is left is the part a reader opens the window *for*: what this machine
+ * is and where it can be reached, the four switches that are flipped often
+ * enough to belong here rather than behind Settings, and one row of buttons to
+ * the things one does from a clipboard manager.
  *
- * Four of the things it can do belong to the window rather than to this page:
- * starting and stopping the phone service, renaming this device, the two
- * dialogs behind 显示二维码 and 发送链接到设备, and the three pages its rows
- * lead to.  Those are handed up as events; the three switches that are plain
- * writes to the runtime go through the store, which is where every other page
- * reaches it too.
+ * Nothing on this page is a clipboard list: the history page owns those rows,
+ * their actions and their menu.  The page is a hub, not a second copy of it.
+ *
+ * The reads are the page's own (`overview.get`, plus the diagnostics summary
+ * for its chip) rather than the lists the other pages keep, because this is the
+ * page that answers before it is asked.
  */
 const props = defineProps<{
   store: ReturnType<typeof createApplicationStore>;
   enabled: boolean;
-  /** Whether the runtime is syncing.  The window's bottom bar reads the same
-   * field for its own switch: two switches over one fact have to be one fact,
-   * or the page and the bar disagree the moment a timed pause expires. */
+  /** Whether the runtime is syncing.  The bottom bar reads the same field for
+   * its own state: two readings of one fact have to be one fact, or the page
+   * and the bar disagree the moment a timed pause expires. */
   syncRunning: boolean;
-  /** The phone service's stored switch, and the address that reaches it.  Both
-   * come from the settings page's own read of the service — this page toggles
-   * it but does not own it. */
+  /** The phone service's stored switch.  This page flips it but does not own
+   * it — the devices page and the settings form draw the same field.  It is the
+   * LAN phone page, not the internet relay: that one sends traffic through a
+   * third-party broker and is only turned on from its own page. */
   companionOn: boolean;
-  companionUrl: string | null;
   /** Milliseconds left on a timed pause, and whether one is being armed or
-   * cleared right now.  The deadline and its countdown are the bottom bar's,
-   * which is where the pause presets live when this page is not on screen. */
+   * cleared right now.  The deadline lives in the window (`App.vue` reads it
+   * from the runtime), which is also where the tray's presets land. */
   pauseLeftMs: number;
   pauseBusy: boolean;
 }>();
@@ -52,16 +56,20 @@ const emit = defineEmits<{
   (event: "companion", enabled: boolean): void;
   (event: "rename", name: string): void;
   (event: "qr"): void;
-  (event: "send-url"): void;
   (event: "devices"): void;
-  (event: "history"): void;
   (event: "diagnostics"): void;
-  /** The right-click menu on a feed row.  It is raised rather than built here
-   * because it is the history page's own menu: the row is the same row, and a
-   * menu written again on this page would be a second set of conditions to keep
-   * in step with the first.  Raised with a point rather than with the event,
-   * because the row opens it from the keyboard too. */
-  (event: "row-menu", payload: { clientX: number; clientY: number }, item: OverviewRecentItem): void;
+  (event: "quick-paste"): void;
+  (event: "send-files"): void;
+  (event: "import-history"): void;
+  (event: "export-history", format: string): void;
+  (event: "settings-hotkeys"): void;
+  (event: "check-update"): void;
+  /** Open the settings page's update card. */
+  (event: "settings-update"): void;
+  /** The companion (phone page) page, for the switch's 去开启. */
+  (event: "companion-page"): void;
+  /** 更多设置: the window's whole configuration page. */
+  (event: "settings"): void;
 }>();
 
 const state = props.store.state;
@@ -69,7 +77,7 @@ const busy = computed(() => !props.enabled || state.pending);
 const deviceId = computed(() => state.status?.device_id || "");
 const deviceName = computed(() => state.status?.device_name || t("此设备"));
 
-/* ── The read ─────────────────────────────────────────────────────────── */
+/* ── The reads ────────────────────────────────────────────────────────── */
 
 const overview = ref<Overview | null>(null);
 const failed = ref("");
@@ -91,20 +99,20 @@ async function load() {
   }
 }
 
-/** Network health is a read of its own — the diagnostics suite, not this
- * page's counters — because the chip is a summary of checks the runtime only
- * runs when asked.  Kept to the cadence the legacy panel used, and skipped
- * while the window is hidden: a report nobody is looking at is a suite of
- * socket probes run for nobody. */
+/** Network health is a read of its own — the diagnostics suite, not this page's
+ * counters — because the chip is a summary of checks the runtime only runs when
+ * asked.  Kept to a cadence the report can carry, and skipped while the window
+ * is hidden: a report nobody is looking at is a suite of socket probes run for
+ * nobody. */
 const health = ref<DiagnosticStatus | "">("");
 const healthAvailable = computed(() => !!state.status?.capabilities?.includes("diagnostics.report"));
 
 async function loadHealth() {
   if (!props.enabled || disposed || !healthAvailable.value) return;
   try {
-    // Through the store, which keeps the report for a minute: the chip is how
-    // a reader opens the diagnostics dialog, and the dialog would otherwise run
-    // the same suite again for the answer this line just took.
+    // Through the store, which keeps the report for a minute: the chip is how a
+    // reader opens the diagnostics card, and the card would otherwise run the
+    // same suite again for the verdict this line just took.
     const report = await props.store.diagnostics();
     if (!disposed) health.value = report?.summary || "";
   } catch {
@@ -114,34 +122,16 @@ async function loadHealth() {
   }
 }
 
-/** How often the health chip asks the runtime for a fresh verdict.
- *
- * The chip is one word on a status bar, and what it costs is a whole
- * diagnostics report: the runtime runs every check — the listening port,
- * discovery, the relay, and on macOS a subprocess to ask the firewall what
- * state it is in — and this page reads the summary off the end of it.  At
- * eight seconds that was a suite of probes every eighth second, for a word
- * that says 网络正常 almost every time it is looked at.
- *
- * Network health does not turn over that fast, and a reader who wants a
- * verdict now has the chip itself: it opens the report and runs it on the
- * spot.  This is the same promise at a cadence the report can keep — two
- * minutes, with the store holding the answer for one of them, so a chip
- * pressed just after a tick opens the report it already has.
- */
+/** How often the health chip asks for a fresh verdict: a whole diagnostics
+ * report is socket work, and network health does not turn over faster than
+ * this.  The store holds the answer for a minute, so a chip pressed just after
+ * a tick opens the report it already has. */
 const HEALTH_POLL_MS = 120_000;
-
 let overviewTimer: ReturnType<typeof setInterval> | undefined;
 let healthTimer: ReturnType<typeof setInterval> | undefined;
-/** Whether this page is on screen to be read at all.
- *
- * A window that is minimized or occluded is not, and the two periodic reads
- * below are socket work whose answer nobody would see — they wait for the
- * window to come back, and the first tick after it does redraws the page.
- *
- * Focus is deliberately not consulted: a dashboard kept open beside the work is
- * usually not the focused window, and that is exactly when it is being watched.
- */
+
+/** Whether this page is on screen to be read at all: a window that is minimized
+ * or occluded runs no probes for a verdict nobody would see. */
 function awake() {
   return !document.hidden;
 }
@@ -151,31 +141,18 @@ onMounted(() => {
   overviewTimer = setInterval(() => { if (awake()) void load(); }, 5000);
   healthTimer = setInterval(() => { if (awake()) void loadHealth(); }, HEALTH_POLL_MS);
 });
-/** The two reads above wait on `enabled`, and the window mounts this page
- * before it has heard from the sidecar at all — so the first read has to follow
- * that flag in rather than wait for the next turn of a five-second clock.  This
- * page is the one a reader sees first, and without this it opens saying 概览暂不可用
- * on every launch, for as long as the clock takes to come round. */
+/** The reads wait on `enabled`, and the window mounts this page before it has
+ * heard from the sidecar at all — so the first read follows that flag in rather
+ * than waiting for the next turn of a five-second clock. */
 watch(() => props.enabled, (on) => {
   if (!on) return;
   void load();
   void loadHealth();
 });
-
-/** Whether the runtime is still coming up, rather than not being there.
- *
+/** Whether the runtime is still coming up, rather than not being there at all.
  * The window mounts this page with no status at all, and the shell calls that
  * 正在启动 — so the page says the same thing instead of reporting a verdict it
- * does not have yet.  A stopped engine, or a sidecar too old to serve the
- * overview, is what the other branch is for.
- *
- * The error is the half of that the shell already reads and this page did not:
- * its own chip asks "is there a window at all, then has anything failed, then
- * how is the runtime" in that order, so a browser preview and a sidecar that
- * died both read 连接异常 or 浏览器预览 up there.  Without it the page below the
- * chip claimed to be reading for as long as the window stayed open — the one
- * outcome a reader cannot act on, and, on the landing page, the one that reads
- * as a hung application. */
+ * does not have yet. */
 const starting = computed(() =>
   !state.error && (!state.status || state.status.health === "starting"));
 onUnmounted(() => {
@@ -186,16 +163,23 @@ onUnmounted(() => {
 
 /* ── The switches ─────────────────────────────────────────────────────── */
 
-/** A switch goes back to the truth it was drawn from before its write is
- * sent: the browser has already flipped the box under the reader's finger,
- * and a refused write would otherwise leave it flipped.  The read that
- * follows puts it where the runtime says it is. */
+/** A switch goes back to the truth it was drawn from before its write is sent:
+ * the browser has already flipped the box under the reader's finger, and a
+ * refused write would otherwise leave it flipped.  The read that follows puts
+ * it where the runtime says it is. */
+/** Say a refused switch out loud.  The store's failure band is at the top of the
+ * window and can be scrolled out of sight from here, so the refusal also goes
+ * to the status bar — the same place every other click's answer lands. */
+function reportSwitchFailure() {
+  announce(state.error?.message || t("操作没有生效，请稍后重试"));
+}
 async function toggleSync(event: Event) {
   const input = event.target as HTMLInputElement;
   const desired = input.checked;
   input.checked = props.syncRunning;
   if (busy.value) return;
   await props.store.setSyncEnabled(desired);
+  if (state.error) reportSwitchFailure();
   await load();
 }
 async function toggleDiscovery(event: Event) {
@@ -203,7 +187,12 @@ async function toggleDiscovery(event: Event) {
   const desired = input.checked;
   input.checked = !!overview.value?.discovering;
   if (busy.value) return;
-  await props.store.setDiscoveryEnabled(desired);
+  const before = state.error;
+  const result = await props.store.setDiscoveryEnabled(desired);
+  // A null answer is either a refusal the store reported (a new error) or a
+  // guard that never asked the runtime at all; only the first has a message.
+  if (!result) announce(state.error && state.error !== before
+    ? state.error.message : t("操作没有生效，请稍后重试"));
   await load();
 }
 async function toggleVisibility(event: Event) {
@@ -211,7 +200,10 @@ async function toggleVisibility(event: Event) {
   const desired = input.checked;
   input.checked = !!overview.value?.visible;
   if (busy.value) return;
-  await props.store.setDiscoveryVisible(desired);
+  const before = state.error;
+  const result = await props.store.setDiscoveryVisible(desired);
+  if (!result) announce(state.error && state.error !== before
+    ? state.error.message : t("操作没有生效，请稍后重试"));
   await load();
 }
 function toggleCompanion(event: Event) {
@@ -231,13 +223,36 @@ const pausePresets = computed(() => [
 ]);
 const pauseLeftMinutes = computed(() => Math.max(1, Math.ceil(props.pauseLeftMs / 60000)));
 
-/* ── This device ──────────────────────────────────────────────────────── */
+const networkLabel = computed(() => {
+  const kind = overview.value?.network_type;
+  if (kind === "ethernet") return t("以太网");
+  if (kind === "lan") return t("局域网");
+  return "Wi-Fi";
+});
+const healthLabel = computed(() => {
+  if (health.value === "ok") return t("网络正常");
+  if (health.value === "warn") return t("网络需注意");
+  if (health.value === "fail") return t("网络异常");
+  return t("检查网络");
+});
+const devicesOnline = computed(() => overview.value?.connected_count || 0);
+/** What the device slot says, and its three cases are three next steps: devices
+ * here, devices paired but away, or nothing paired yet.  A zero is said as a way
+ * to pair rather than as a number to look at. */
+const deviceLine = computed(() => {
+  const paired = overview.value?.paired_count || 0;
+  if (devicesOnline.value > 0) return t("{count} 台设备在线", { count: devicesOnline.value });
+  if (paired > 0) return t("已配对 {count} 台 · 当前离线", { count: paired });
+  return t("还没有配对设备 · 去配对");
+});
+
+/* ── This machine ─────────────────────────────────────────────────────── */
 
 const renaming = ref(false);
 const nameValue = ref("");
 const nameInput = ref<HTMLInputElement | null>(null);
-/** Escape takes the editor away, and the blur that follows must not commit
- * what the reader just cancelled. */
+/** Escape takes the editor away, and the blur that follows must not commit what
+ * the reader just cancelled. */
 let cancelled = false;
 
 async function startRename() {
@@ -261,148 +276,52 @@ function cancelRename() {
   void nextTick(() => { cancelled = false; });
 }
 
-/** The address the phone opens.  The token-carrying URL when the service is
- * running — that is the one the QR encodes and the one that works without the
- * phone being told a token — and otherwise the plain page address, which is
- * what the reader is being shown. */
-const address = computed(() => (overview.value ? `${overview.value.local_ip}:${overview.value.port}` : ""));
-/** The id another machine needs to find this one.  It lives here because the
- * devices page no longer draws a row for this machine, and a value written out
- * in full is still one you have to select by hand to send to somebody. */
+/** The address other machines on this network reach this one at, while the
+ * phone service is serving it: `ip:port`, which is what a reader reads out or
+ * pastes into a browser.  Empty when there is nothing listening. */
+const address = computed(() => {
+  const o = overview.value;
+  return o && o.local_ip ? `${o.local_ip}:${o.port}` : "";
+});
 async function copyDeviceId() {
   if (deviceId.value) await copyText(deviceId.value);
 }
-
 async function copyAddress() {
-  const value = props.companionUrl
-    || (overview.value?.local_ip ? `http://${overview.value.local_ip}:${overview.value.port}/mobile.html` : "");
-  if (value) await copyText(value);
+  if (address.value) await copyText(address.value);
 }
 
-/* ── Counters, ring and feed ──────────────────────────────────────────── */
+/* ── Things that need the reader ──────────────────────────────────────── */
 
-const stats = computed(() => {
+type AttentionAction = "devices" | "settings-update";
+type AttentionRow = { id: string; text: string; action: AttentionAction; actionLabel: string };
+/** A line, not a block, and only when there is something to say: a newer build
+ * or a pairing waiting on this window.  The list is built from payloads the page
+ * already has — an empty list renders nothing at all, which is the point.  An
+ * offline device is not repeated here: the status line above already says how
+ * many are away. */
+const attention = computed<AttentionRow[]>(() => {
+  const rows: AttentionRow[] = [];
   const o = overview.value;
-  return {
-    connected: o?.connected_count || 0,
-    paired: o?.paired_count || 0,
-    history: o?.history_count || 0,
-    today: o?.history_today || 0,
-    images: o?.history_images || 0,
-    pinned: o?.history_pinned || 0,
-    transfers: o?.active_transfers || 0,
-    completed: o?.transfer_completed || 0,
-  };
+  if (!o) return rows;
+  if (state.updateCheck?.available) {
+    rows.push({
+      id: "update", text: t("有新版本 {version} 可用", { version: state.updateCheck.latest || "" }),
+      action: "settings-update", actionLabel: t("查看更新"),
+    });
+  }
+  const pending = state.devices.filter((device) => !device.archived && pairingInFlight(device)).length;
+  if (pending > 0) {
+    rows.push({
+      id: "pairing", text: t("有 {count} 个配对请求等待确认", { count: pending }),
+      action: "devices", actionLabel: t("去处理"),
+    });
+  }
+  return rows;
 });
-
-/** A paired device that is not connected right now is the ring's middle band,
- * so the two counts are made to describe different machines before they are
- * drawn: `paired_count` already contains every connected one. */
-const ring = computed(() => {
-  const connected = stats.value.connected;
-  const paired = Math.max(0, stats.value.paired - connected);
-  const discovered = overview.value?.discovered_count || 0;
-  return { connected, paired, discovered, total: connected + paired + discovered || 1 };
-});
-const ringStyle = computed(() => {
-  const r = ring.value;
-  const connected = (r.connected / r.total) * 100;
-  const paired = (r.paired / r.total) * 100;
-  const discovered = (r.discovered / r.total) * 100;
-  return {
-    background: "conic-gradient("
-      + `var(--state-connected) 0% ${connected}%,`
-      + `var(--state-paired) ${connected}% ${connected + paired}%,`
-      + `var(--state-discovered) ${connected + paired}% ${connected + paired + discovered}%,`
-      + `transparent ${connected + paired + discovered}% 100%)`,
-  };
-});
-
-/** Put a feed row's clip back on the clipboard.
- *
- * The row's whole job now, and the history page's own action — `store.copy` is
- * what a history row's 复制 runs, so the copy is the same one down to the
- * clipboard write, and it sets the store's `copiedId`, which is what lets the
- * row show the same tick the history rows show.
- */
-function copyRecent(item: OverviewRecentItem) {
-  void props.store.copy(item);
+function runAttention(row: AttentionRow) {
+  if (row.action === "devices") emit("devices");
+  else emit("settings-update");
 }
-
-/** The row's menu, from the keyboard.
- *
- * The click copies, which is the row's whole job — and the menu beside it held
- * 置顶 and 删除 for a reader with no way to ask for it: a right button was the
- * only route, and the row is a button that otherwise answers Enter and Space.
- * `Shift+F10` and the menu key are the two spellings, and the answer is the
- * history page's own menu, raised with a point because a key has none. */
-function recentKeydown(event: KeyboardEvent, item: OverviewRecentItem) {
-  if (!isMenuKey(event)) return;
-  event.preventDefault();
-  emit("row-menu", keyboardMenuPoint(event), item);
-}
-
-function typeIcon(type: string) {
-  const kind = String(type || "").toUpperCase();
-  if (kind === "URL" || kind === "LINK") return Link;
-  if (kind === "FILE") return FileUp;
-  if (kind.startsWith("IMAGE")) return ImageIcon;
-  return kind === "TEXT" || !kind ? ClipboardType : FileText;
-}
-
-/** Uptime in the legacy panel's own compact form — `2d 4h`, `3h 12m`, `9m` —
- * which is unit-short and needs no translation. */
-function uptime(seconds: number) {
-  const total = Math.max(0, Math.floor(Number(seconds) || 0));
-  const days = Math.floor(total / 86400);
-  const hours = Math.floor((total % 86400) / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${total % 60}s`;
-}
-
-function ago(timestamp: number) {
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - Number(timestamp || 0)));
-  if (seconds < 60) return t("刚刚");
-  if (seconds < 3600) return t("{minutes} 分钟前", { minutes: Math.floor(seconds / 60) });
-  if (seconds < 86400) return t("{hours} 小时前", { hours: Math.floor(seconds / 3600) });
-  return t("{days} 天前", { days: Math.floor(seconds / 86400) });
-}
-
-const networkLabel = computed(() => {
-  const kind = overview.value?.network_type;
-  if (kind === "ethernet") return t("以太网");
-  if (kind === "lan") return t("局域网");
-  return "Wi-Fi";
-});
-const healthLabel = computed(() => {
-  if (health.value === "ok") return t("网络正常");
-  if (health.value === "warn") return t("网络需注意");
-  if (health.value === "fail") return t("网络异常");
-  return t("检查网络");
-});
-/** Every name the overview answered with, and the handful the card draws.
- *
- * The badge beside the heading is a count of the first, not of the second:
- * the list is a sample — a device count that is meant to be read at a glance
- * cannot also be a column of chips — so a card that drew nine names and said
- * "8" was answering a different question than the chip above it, which says
- * the same machines' number in full.  What the card leaves out is said in
- * words instead of being quietly dropped. */
-const CONNECTED_NAMES_SHOWN = 8;
-const connectedNames = computed(() => overview.value?.connected_names || []);
-const connectedNamesShown = computed(() => connectedNames.value.slice(0, CONNECTED_NAMES_SHOWN));
-const connectedNamesHidden = computed(() =>
-  Math.max(0, connectedNames.value.length - connectedNamesShown.value.length));
-/** Whether this machine has done nothing yet.
- *
- * A page with no devices and no history is where a first run lands, and until
- * now it said so in three separate notes on three separate cards — one per
- * card, none of them saying what to do first.  What it needs is one ordered
- * answer, and it needs it only while it is true: from the first clip onward the
- * cards say what to press instead.  See U195. */
 </script>
 
 <template>
@@ -411,46 +330,74 @@ const connectedNamesHidden = computed(() =>
       <RefreshCw v-if="starting" class="spinning" :size="26" />
       <Activity v-else :size="36" />
       <h2>{{ starting ? t("正在读取概览") : t("概览暂不可用") }}</h2>
-      <p v-if="!starting" class="note">{{ t("同步引擎未运行，无法读取概览。") }}</p></div>
-    <div v-else-if="!overview" class="empty empty--page">
-      <Activity :size="36" /><h2>{{ loading ? t("正在读取概览") : t("概览暂不可用") }}</h2>
-      <p v-if="failed" class="note">{{ failed }}</p>
+      <p v-if="!starting" class="note">{{ t("同步引擎未运行，无法读取概览。") }}</p>
+    </div>
+    <div v-else-if="!overview" class="overview-skeleton" :aria-busy="loading" role="status">
+      <!-- Kept in the page's own shape while the first read is in the air: the
+           status strip and the two cards stay where they will be, so the page
+           does not flash an empty panel and then jump. -->
+      <div class="overview-status overview-skeleton-strip" aria-hidden="true"></div>
+      <div class="overview-row" aria-hidden="true">
+        <div class="overview-card card overview-skeleton-card"></div>
+        <div class="overview-card card overview-skeleton-card"></div>
+      </div>
+      <div v-if="failed" class="error-band" role="alert">
+        <span>{{ failed }}</span>
+        <button class="text-button" type="button" @click="load">{{ t("重试") }}</button>
+      </div>
+      <p v-else class="note" role="status">{{ t("正在读取概览") }}</p>
     </div>
     <template v-else>
-      <div v-if="failed" class="error-band" role="alert">{{ failed }}</div>
+      <div v-if="failed" class="error-band" role="alert">
+        <span>{{ failed }}</span>
+        <button class="text-button" type="button" @click="load">{{ t("重试") }}</button>
+      </div>
 
-      <!-- Status bar: one line of what the machine is doing, and at the far end
-           whether anything is wrong.  It used to carry the connected count and
-           the uptime too, which the 此设备 card below already writes in its own
-           chips — the same two numbers twice on one screen, which is most of
-           what made this page read as cluttered.  What is left is the state and
-           the network, and nothing here is said twice anywhere else. -->
+      <!-- One line of what the machine is doing: sync, the network, the devices
+           on it and the health verdict that opens the diagnostics card.  The
+           IP is the only other thing a reader copies out of a status bar. -->
       <div class="overview-status">
         <span class="overview-dot" :class="syncRunning ? 'overview-dot--on' : 'overview-dot--off'" aria-hidden="true"></span>
         <span>{{ syncRunning ? t("同步运行中") : t("同步已暂停") }}</span>
+        <span v-if="pauseLeftMs > 0" class="note">{{ t("已暂停 · 剩余 {minutes} 分钟", { minutes: pauseLeftMinutes }) }}</span>
         <span class="overview-sep" aria-hidden="true"></span>
         <span class="muted">{{ networkLabel }}<template v-if="overview.network_detail"> · {{ overview.network_detail }}</template></span>
-        <span class="overview-gap"></span>
+        <span class="overview-sep" aria-hidden="true"></span>
+        <!-- The device count is a way to the devices page, and its empty form is
+             a way to pair.  Not a zero to look at, and not the device list that
+             page already draws. -->
+        <button class="text-button overview-device-line" type="button" @click="emit('devices')">
+          <span class="overview-dot" :class="devicesOnline ? 'overview-dot--on' : 'overview-dot--off'" aria-hidden="true"></span>{{ deviceLine }}
+        </button>
         <button class="overview-health" :class="health ? `overview-health--${health}` : ''"
-          :title="t('打开网络诊断')" @click="emit('diagnostics')">
+          type="button" :title="t('打开网络诊断')" @click="emit('diagnostics')">
           <span class="overview-dot" :class="`overview-dot--${health || 'unknown'}`" aria-hidden="true"></span>{{ healthLabel }}
         </button>
-        <span v-if="overview.local_ip" class="note">{{ overview.local_ip }}:{{ overview.port }}</span>
       </div>
 
-      <!-- The first-run tutorial lives in the welcome flow now: it belongs to
-           the moment before the window has anything in it, not to every empty
-           overview the window will later open on. -->
+      <!-- Said as a line when it is true, and not drawn at all when it is not. -->
+      <div v-if="attention.length" class="overview-attention" role="status">
+        <AlertCircle :size="16" aria-hidden="true" />
+        <ul class="overview-attention-list">
+          <li v-for="row in attention" :key="row.id">
+            <span>{{ row.text }}</span>
+            <button class="text-button" type="button" @click="runAttention(row)">{{ row.actionLabel }}</button>
+          </li>
+        </ul>
+      </div>
 
       <div class="overview-row">
+        <!-- This machine's own facts: the two another machine needs in order to
+             pair with it, where it answers, and the QR that reaches a phone
+             without installing anything. -->
         <section class="overview-card card">
-          <h2>{{ t("此设备") }}</h2>
+          <h2>{{ t("本机信息") }}</h2>
           <div class="overview-name">
             <Monitor :size="17" aria-hidden="true" />
             <template v-if="!renaming">
               <span class="overview-name-text">{{ deviceName }}</span>
-              <button class="icon-button icon-button--sm" :aria-label="t('编辑设备名称')" :title="t('编辑设备名称')"
-                :disabled="busy" @click="startRename"><Pencil :size="15" /></button>
+              <button class="icon-button icon-button--sm" type="button" :aria-label="t('编辑设备名称')"
+                :title="t('编辑设备名称')" :disabled="busy" @click="startRename"><Pencil :size="15" /></button>
             </template>
             <input v-else ref="nameInput" class="overview-name-input" :aria-label="t('编辑设备名称')"
               :value="nameValue" maxlength="128"
@@ -459,41 +406,43 @@ const connectedNamesHidden = computed(() =>
           </div>
           <dl class="overview-facts">
             <dt>{{ t("设备 ID") }}</dt>
-            <dd class="overview-mono overview-id">
-              <span>{{ deviceId }}</span>
-              <button class="icon-button icon-button--sm" :aria-label="t('复制设备 ID')"
-                :title="t('复制设备 ID')" :disabled="!deviceId" @click="copyDeviceId">
-                <Copy :size="13" /></button>
+            <dd class="overview-id">
+              <span class="overview-mono">{{ deviceId }}</span>
+              <button class="icon-button icon-button--sm" type="button" :aria-label="t('复制设备 ID')"
+                :title="t('复制设备 ID')" :disabled="!deviceId" @click="copyDeviceId"><Copy :size="13" /></button>
             </dd>
             <dt>{{ t("平台") }}</dt>
             <dd>{{ overview.platform }} · v{{ overview.version }}</dd>
+            <dt>{{ t("本地地址") }}</dt>
+            <dd class="overview-id">
+              <template v-if="address">
+                <span class="overview-mono">{{ address }}</span>
+                <button class="icon-button icon-button--sm" type="button" :aria-label="t('复制本地地址')"
+                  :title="t('复制本地地址')" @click="copyAddress"><Copy :size="13" /></button>
+              </template>
+              <template v-else>
+                <span class="note">{{ t("手机伴侣未启用") }}</span>
+                <button class="text-button" type="button" @click="emit('companion-page')">{{ t("去开启") }}</button>
+              </template>
+            </dd>
           </dl>
-          <p class="overview-chips">
-            <span class="overview-chip"><span class="overview-dot"
-              :class="stats.connected ? 'overview-dot--on' : 'overview-dot--off'" aria-hidden="true"></span>
-              {{ t("已连接 {count} 台", { count: stats.connected }) }}</span>
-            <span class="overview-chip">{{ t("运行时间") }} {{ uptime(overview.uptime_seconds) }}</span>
-          </p>
-          <p v-if="overview.web_enabled && overview.local_ip" class="overview-address">
-            <span class="note">{{ t("本地地址") }}</span>
-            <code>{{ address }}</code>
-            <button class="overview-button" :disabled="busy" @click="copyAddress"><Copy :size="15" />{{ t("复制地址") }}</button>
-          </p>
+          <div class="overview-actions">
+            <button class="overview-button" type="button" :disabled="busy" @click="emit('qr')">
+              <QrCode :size="16" />{{ t("显示二维码") }}
+            </button>
+          </div>
         </section>
 
+        <!-- The four switches a reader flips often enough that they should not be
+             three clicks into Settings, and the timed pause the tray also offers.
+             Everything more involved stays on the settings page. -->
         <section class="overview-card card">
-          <h2>{{ t("快速控制") }}</h2>
+          <h2>{{ t("快速设置") }}</h2>
           <label class="overview-switch">
             <span>{{ t("剪贴板同步") }}</span>
             <input type="checkbox" role="switch" :aria-label="t('剪贴板同步')" :checked="syncRunning"
               :disabled="busy" @change="toggleSync" />
           </label>
-          <!-- Named the way the settings card names them.  The two used to be
-               one word each — discovery and visibility — which is the same
-               pair of switches under two shorter names, one of them the
-               settings card's own word turned inside out.  A reader who set
-               these on one page met a different pair on the other and could
-               not tell which was which. -->
           <label class="overview-switch">
             <span>{{ t("局域网发现") }}</span>
             <input type="checkbox" role="switch" :aria-label="t('局域网发现')" :checked="!!overview.discovering"
@@ -505,117 +454,45 @@ const connectedNamesHidden = computed(() =>
               :disabled="busy || !overview" @change="toggleVisibility" />
           </label>
           <label class="overview-switch">
-            <span>{{ t("远程访问") }}</span>
-            <input type="checkbox" role="switch" :aria-label="t('远程访问')" :checked="companionOn"
+            <span>{{ t("手机网页访问") }}</span>
+            <input type="checkbox" role="switch" :aria-label="t('手机网页访问')" :checked="companionOn"
               :disabled="busy" @change="toggleCompanion" />
           </label>
           <p v-if="pauseLeftMs > 0" class="overview-pause">
-            <span class="note">{{ t("已暂停 · 剩余 {minutes} 分钟", { minutes: pauseLeftMinutes }) }}</span>
-            <button class="overview-button" :disabled="pauseBusy" @click="emit('resume')">{{ t("立即恢复") }}</button>
+            <span class="note">{{ t("定时暂停同步") }}</span>
+            <button class="overview-button primary" type="button" :disabled="pauseBusy" @click="emit('resume')">{{ t("立即恢复") }}</button>
           </p>
           <p v-else-if="syncRunning" class="overview-pause">
             <span class="note">{{ t("定时暂停同步") }}</span>
-            <button v-for="preset in pausePresets" :key="preset.minutes" class="overview-button"
+            <button v-for="preset in pausePresets" :key="preset.minutes" class="overview-button" type="button"
               :disabled="pauseBusy" @click="emit('pause', preset.minutes)">{{ preset.label }}</button>
           </p>
           <p v-else class="overview-pause">
-            <button class="overview-button" :disabled="pauseBusy" @click="emit('resume')">{{ t("恢复同步") }}</button>
+            <button class="overview-button" type="button" :disabled="pauseBusy" @click="emit('resume')">{{ t("恢复同步") }}</button>
           </p>
         </section>
       </div>
 
-      <div class="overview-stats">
-        <article class="overview-stat">
-          <Activity :size="16" aria-hidden="true" /><strong>{{ stats.connected }}</strong>
-          <!-- 共 … 台 to tell this whole-set count from the ring's 已配对（离线）
-               beside it: `paired_count` already contains every connected one,
-               so two adjacent words of the same shape carried two numbers. -->
-          <span>{{ t("已连接") }}</span><small>{{ t("共 {count} 台已配对", { count: stats.paired }) }}</small>
-        </article>
-        <article class="overview-stat">
-          <ClipboardType :size="16" aria-hidden="true" /><strong>{{ stats.history }}</strong>
-          <span>{{ t("历史记录") }}</span><small>+{{ stats.today }} {{ t("今天") }}</small>
-        </article>
-        <article class="overview-stat">
-          <ImageIcon :size="16" aria-hidden="true" /><strong>{{ stats.images }}</strong>
-          <span>{{ t("图片") }}</span><small>{{ stats.pinned }} {{ t("已置顶") }}</small>
-        </article>
-        <article class="overview-stat">
-          <FileUp :size="16" aria-hidden="true" /><strong>{{ stats.transfers }}</strong>
-          <span>{{ t("传输") }}</span><small>{{ stats.completed }} {{ t("已完成") }}</small>
-        </article>
-      </div>
-
-      <div class="overview-row">
-        <section class="overview-card card">
-          <h2>{{ t("网络地图") }}</h2>
-          <div class="overview-ring-wrap">
-            <!-- The legend is the drawing's own text: it carries all three
-                 numbers, so the ring itself is decoration and says nothing. -->
-            <div class="overview-ring" :style="ringStyle" aria-hidden="true">
-              <span class="overview-ring-center">
-                <strong>{{ ring.connected }}</strong><small>{{ t("已连接") }}</small>
-              </span>
-            </div>
-            <ul class="overview-legend">
-              <li><span class="overview-swatch overview-swatch--connected" aria-hidden="true"></span>{{ ring.connected }} {{ t("已连接") }}</li>
-              <li><span class="overview-swatch overview-swatch--paired" aria-hidden="true"></span>{{ ring.paired }} {{ t("已配对（离线）") }}</li>
-              <li><span class="overview-swatch overview-swatch--discovered" aria-hidden="true"></span>{{ ring.discovered }} {{ t("已发现") }}</li>
-            </ul>
-          </div>
-        </section>
-
-        <section class="overview-card card">
-          <h2>{{ t("已连接设备") }}<span v-if="connectedNames.length" class="badge badge--count">{{ connectedNames.length }}</span></h2>
-          <div v-if="connectedNamesShown.length" class="overview-chips">
-            <button v-for="name in connectedNamesShown" :key="name" class="overview-chip overview-chip--link"
-              :title="t('设备')" @click="emit('devices')">
-              <span class="overview-dot overview-dot--on" aria-hidden="true"></span>{{ name }}
-            </button>
-          </div>
-          <p v-else class="note">{{ t("还没有已连接的设备——复制内容并配对一台设备即可开始同步。") }}</p>
-          <!-- Said after the empty line rather than instead of it: a `v-else`
-               here would fall to this note's own condition, and a card with
-               eight chips and nothing left over would then read as one with
-               nothing connected at all. -->
-          <p v-if="connectedNamesHidden" class="note">{{ t("另有 {count} 台未在此列出", { count: connectedNamesHidden }) }}</p>
-          <div class="overview-actions">
-            <button class="overview-button" :disabled="busy" @click="emit('qr')"><QrCode :size="16" />{{ t("显示二维码") }}</button>
-            <button class="overview-button" :disabled="busy" @click="emit('send-url')"><SendHorizontal :size="16" />{{ t("发送链接到设备") }}</button>
-          </div>
-        </section>
-      </div>
-
+      <!-- The one row of actions this page exists for.  Each is the window's own
+           handler, not a second implementation: 导入/导出 are the settings
+           card's, 快捷键 opens the general card, 检查更新 runs the same check,
+           and 更多设置 is just the settings page. -->
       <section class="overview-card card">
-        <!-- The way into the history is on the card, not on its rows.  A row
-             used to be a link to the history page, which cost the reader a page
-             change for the thing they most often wanted — the clip itself —
-             and left the right-click doing nothing at all.  The row copies
-             now, and 查看全部 is the route it gave up. -->
-        <div class="overview-card-head card-head">
-          <h2>{{ t("最近活动") }}</h2>
-          <button class="overview-button" @click="emit('history')">{{ t("查看全部") }}</button>
+        <h2>{{ t("快捷操作") }}</h2>
+        <div class="overview-actions">
+          <button class="overview-button primary" type="button" @click="emit('quick-paste')"><ClipboardPaste :size="16" />{{ t("快速粘贴") }}</button>
+          <button class="overview-button" type="button" @click="emit('send-files')"><SendHorizontal :size="16" />{{ t("发送文件") }}</button>
+          <!-- The device page is one of the three primary pages, so it gets an
+               explicit door here as well as the clickable count on the status
+               line: the count answers "are they here", this answers "manage
+               them". -->
+          <button class="overview-button" type="button" @click="emit('devices')"><Monitor :size="16" />{{ t("设备管理") }}</button>
+          <button class="overview-button" type="button" :disabled="busy" @click="emit('import-history')"><Upload :size="16" />{{ t("导入历史") }}</button>
+          <button class="overview-button" type="button" :disabled="busy" @click="emit('export-history', 'json')"><Download :size="16" />{{ t("导出历史") }}</button>
+          <button class="overview-button" type="button" @click="emit('settings-hotkeys')"><Keyboard :size="16" />{{ t("快捷键设置") }}</button>
+          <button class="overview-button" type="button" @click="emit('check-update')"><RefreshCw :size="16" />{{ t("检查更新") }}</button>
+          <button class="overview-button overview-more" type="button" @click="emit('settings')"><SettingsIcon :size="16" />{{ t("更多设置") }}<ArrowRight :size="15" aria-hidden="true" /></button>
         </div>
-        <ul v-if="overview.recent_items.length" class="overview-feed">
-          <li v-for="item in overview.recent_items" :key="item.id">
-            <button class="overview-feed-row" type="button" :title="t('复制到剪贴板')"
-              @click="copyRecent(item)" @contextmenu.prevent="emit('row-menu', $event, item)"
-              @keydown="recentKeydown($event, item)">
-              <component :is="typeIcon(item.content_type)" :size="15" aria-hidden="true" />
-              <span class="overview-feed-text">{{ previewText(item.preview) || t("（无内容）") }}</span>
-              <!-- The mark's box is here whether or not there is a mark in it.  A
-                   `v-if` with no `v-else` leaves no element behind, and the grid
-                   hands that column to the next child — the age — which is how
-                   the age ended up 14px wide and standing on end. -->
-              <span class="overview-feed-mark">
-                <Check v-if="state.copiedId === item.id" :size="13" class="overview-feed-copied" :aria-label="t('已复制')" />
-                <Pin v-else-if="item.pinned" :size="13" :aria-label="t('已置顶')" />
-              </span>
-              <span class="note overview-feed-age">{{ ago(item.timestamp) }}</span>
-            </button>
-          </li>
-        </ul>
-        <p v-else class="note">{{ t("复制文本、图片和文件时，剪贴板活动将显示在这里。") }}</p>
       </section>
     </template>
   </section>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-quick-paste-close"
+description = "Enables the quick_paste_close command without any pre-configured scope."
+commands.allow = ["quick_paste_close"]
+
+[[permission]]
+identifier = "deny-quick-paste-close"
+description = "Denies the quick_paste_close command without any pre-configured scope."
+commands.deny = ["quick_paste_close"]

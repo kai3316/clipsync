@@ -74,16 +74,26 @@ from internal.protocol.codec import (
 
 # Same-package reuse: received-file names MUST be sanitized exactly like
 # clipboard file transfers, so share the one implementation.
-from internal.sync.file_transfer import MAX_FILE_SIZE, _sanitize_file_name
+from internal.sync.file_transfer import _sanitize_file_name
 from internal.transport.relay import MAX_RELAY_FRAME, frame_limit_for
 
 logger = logging.getLogger(__name__)
 
 SendFn = Callable[[bytes], Any]
 
+# The largest attachment a chat file may be, in bytes.
+#
+# Kept apart from the clipboard file transfer's limits on purpose: those are a
+# user policy (``max_file_mb``) inside a protocol ceiling derived from the chunk
+# count, while chat attachments are their own feature with their own shape (and
+# their own chunk sender).  It stays at the value the app has always used --
+# 2 GiB -- and moving it is a separate decision, so a change to the file
+# transfer policy can never silently widen or narrow what a chat can carry.
+CHAT_MAX_FILE_SIZE = 2 * 1024**3
+
 
 class ChatFileTooLargeError(Exception):
-    """A file was refused because it exceeds :data:`MAX_FILE_SIZE`.
+    """A file was refused because it exceeds :data:`CHAT_MAX_FILE_SIZE`.
 
     The relay no longer has a size cap of its own: what the public broker
     limits is the *message*, and a chat attachment is already cut into chunks
@@ -953,7 +963,7 @@ class ChatManager:
         except OSError:
             logger.debug("chat: send_file stat failed for %s", file_path)
             return None
-        if size > MAX_FILE_SIZE:
+        if size > CHAT_MAX_FILE_SIZE:
             # The one size limit left, and a real one: refuse early and loudly
             # so the UI can name it instead of reporting a transfer that never
             # started for no stated reason.
@@ -1889,7 +1899,7 @@ class ChatManager:
             or not isinstance(size, int)
             or isinstance(size, bool)
             or size < 0
-            or size > MAX_FILE_SIZE
+            or size > CHAT_MAX_FILE_SIZE
             or not isinstance(raw_name, str)
             or not raw_name
         ):

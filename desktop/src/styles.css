@@ -393,7 +393,7 @@ header p { margin-top: 7px; font-size: 12px; }
    2px 8px — which put two heights of pill on one line wherever a row carried
    two of them, and left `border-radius: 9px` on two more from an older shape.
    They are named for their own states below; the `--*` names are the tones. */
-.badge, .ai-version, .speed-quality, .channel, .overview-chip, .nav-count, .overview-health {
+.badge, .ai-version, .speed-quality, .channel, .nav-count, .overview-health {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px;
   background: var(--surface); color: var(--muted); font-size: 12px;
@@ -538,6 +538,17 @@ input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color
 .sync-state { display: inline-flex; align-items: center; gap: 5px; }
 .sync-state--stopped { color: var(--warn-text); font-weight: 550; }
 .pause-status { white-space: nowrap; }
+/* An on-demand paste's fetch, above the status bar and visible from any page:
+ * the reader's paste is happening later than their click, and the row it came
+ * from may be a page away.  The bar is one line — what, how far, how fast, how
+ * long — with the one action that ends it. */
+.paste-fetch { position: fixed; left: 0; right: 0; bottom: 40px; z-index: 120; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px var(--page-gutter); background: var(--raised); border-top: 1px solid var(--line); box-shadow: var(--shadow-soft); color: var(--muted); font-size: 12px; }
+.paste-fetch-name { min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; font-weight: 550; }
+.paste-fetch-progress { flex: 1 1 160px; min-width: 120px; height: 8px; accent-color: var(--accent); }
+.paste-fetch-percent { color: var(--accent-text); font-weight: 600; font-variant-numeric: tabular-nums; }
+/* The fetch bar's cancel button is the strip's size rather than the window's
+   36px control: it belongs to the line, not to a page. */
+.paste-fetch .text-button { margin-left: auto; }
 /* One device's share of the clipboard, on the device's own row.
    Quiet by default: this is a setting a user changes once, and a switch that
    shouts on every row turns the list into a form.  The checkbox borrows the
@@ -2185,157 +2196,83 @@ button.danger-outline:hover:not(:disabled),
 *::-webkit-scrollbar-thumb { background: var(--line); border: 3px solid transparent; background-clip: content-box; border-radius: 999px; }
 *::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
 /* ── The overview page ──────────────────────────────────────────────────────
-   The one page drawn from a read of its own rather than from the lists the
-   other pages keep, so it is the only place in the window where five unrelated
-   counts and a live status line share a screen.  It is laid out in the order
-   the questions are asked — what is this machine doing, what can I switch,
-   what has it done, who is here, what just happened — as one column of cards
-   in the page's own gutter, with the two pairs that sit side by side folding
-   to one column when the window is narrow.
-
-   The three shapes the eye lands on — the status strip, the counters and the
-   ring — all say their numbers in words beside the shape rather than inside
-   it.  A colour here is always a second copy of something already written
-   down, never the only copy of it. */
+   A hub, not a dashboard: this machine's own facts, the four switches a reader
+   flips often, and one row of the actions they come here for.  What used to
+   fill the page — four counters, a network ring, the device list again, a feed
+   of the newest clips — was either a zero on an ordinary day or a second copy
+   of a page that owns it; the history page owns the clips. */
 .overview-view { flex: 1; min-width: 0; margin: 0 var(--page-gutter); padding: 20px 0 28px; display: grid; gap: var(--card-gap); align-content: start; }
 /* A read that failed is news about the whole page, so its band spans the page
    rather than sitting inset inside it like the cards it replaces. */
 .overview-view > .error-band { margin: 0 calc(var(--page-gutter) * -1); }
 /* The status line is the page's headline and its only strip: what the machine
-   is doing, on which network, with how many devices — and at the far end,
-   whether anything is wrong and how long it has been up.  The health chip is
-   a button because a verdict that is not "normal" is the start of a question,
-   and the diagnostics card is the answer to it. */
+   is doing, on which network, with how many devices — then whether anything is
+   wrong and the address it answers on.  The health chip is a button because a
+   verdict that is not "normal" is the start of a question, and the diagnostics
+   card is the answer to it. */
 .overview-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 40px; padding: 6px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); font-size: 13px; }
 .overview-sep { width: 1px; align-self: stretch; margin: 2px 1px; background: var(--line); }
-.overview-gap { flex: 1; }
 .overview-health { min-height: 26px; padding: 3px 10px; background: transparent; }
 .overview-health--ok { color: var(--accent-text); }
 .overview-health--warn { color: var(--warn-text); }
 .overview-health--fail { color: var(--danger-text); }
-/* The state as one glyph, wherever it appears: the sync line, the device
-   card's chips, a connected device's name, the health chip. */
+/* The state as one glyph, wherever it appears: the sync line, the device line,
+   the health chip. */
 .overview-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
 .overview-dot--on, .overview-dot--ok { background: var(--accent); }
 .overview-dot--off, .overview-dot--unknown { background: var(--muted); }
 .overview-dot--warn { background: var(--warn); }
 .overview-dot--fail { background: var(--danger); }
-/* Two rows of cards, each pair being one question answered twice: the machine
-   beside its controls, and the network map beside the devices on it.
-   One rule for both, and `stretch` rather than `start`, which is what the two
-   rows used to disagree about: the first split into two equal columns and the
-   second into a fixed 300px beside the rest, and both let each card take its
-   own height.  The effect on screen was two cards in a row whose titles sat at
-   different heights and whose bottom edges never lined up — the raggedness a
-   reader calls 乱 without being able to name it.  Equal columns and one shared
-   height put every card title on its row's own line. */
+/* The device count is a button, because the number is a way to the devices page
+   and its empty form is a way to pair.  It stays the size of the strip it sits
+   in rather than the window's 36px control. */
+.overview-device-line { min-height: 26px; padding: 3px 8px; font-size: 12.5px; }
+/* Two cards side by side: this machine's facts, and the switches.  `stretch`
+   rather than `start` so their titles sit on one line and their bottom edges
+   line up, which is what the two cards in a row are for. */
 .overview-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--card-gap); align-items: stretch; }
 /* The overview's cards are the window's cards — `.card` in the template supplies
-   the fill, the border, the radius and the padding, and `.card > h2` (or
-   `.card-head` where the title shares its line with a way out of the card) the
-   title.  All this adds is what an overview card holds: a column of unlike
-   things — a name, a fact list, a row of chips, a ring, a feed — that are a
-   column rather than a list, so they are spaced by one gap instead of by rules. */
+   the fill, the border, the radius and the padding — and this adds only what the
+   page's content needs: a column of unlike things spaced by one gap. */
 .overview-card { display: grid; gap: 12px; align-content: start; }
-/* First run: a numbered list, because these three things have an order and a
-   grid of cards does not say so.  The numbers carry the sequence, so the steps
-   themselves stay sentences rather than commands with arrows. */
-.overview-start { border-color: var(--accent-line); background: var(--accent-soft); }
-.overview-steps { margin: 0; padding-left: 20px; display: grid; gap: 10px; }
-.overview-steps li { display: grid; gap: 3px; }
-.overview-steps li strong { font-weight: 600; }
-.overview-steps .note { margin: 0; }
-.overview-steps-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 /* ── This machine ── */
 .overview-name { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600; }
 .overview-name > svg { flex-shrink: 0; color: var(--accent-text); }
 .overview-name-text { min-width: 0; overflow-wrap: anywhere; }
 /* The box the name is corrected in keeps the line's own height, which is the
    window's small control: this is a name being edited in place, not a form being
-   opened.  The pencil beside it is `.icon-button--sm` in the template. */
+   opened. */
 .overview-name-input { flex: 1; min-width: 0; min-height: var(--control-sm); padding: 3px 8px; font: inherit; font-size: 15px; font-weight: 600; color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
 .overview-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: 12px; }
 .overview-facts dt { color: var(--muted); }
 .overview-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-/* The device ID is read back on the other screen to prove these are the same
-   two machines, so it is set in the face that makes a hex string comparable. */
+/* The device ID and the local address are read out on another screen to prove
+   these are the same two machines, so they are set in the face that makes a hex
+   string and an address comparable. */
 .overview-facts .overview-mono { font-family: var(--font-mono); font-size: 11px; }
 .overview-facts .overview-id { display: flex; align-items: center; gap: 6px; }
 .overview-facts .overview-id span { min-width: 0; overflow-wrap: anywhere; }
-.overview-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
-.overview-chip { max-width: 100%; overflow-wrap: anywhere; }
-/* It is the same pill as everywhere else, in the one row where a label can be
-   clicked: `--link` marks the device names that lead to the page they name, and
-   it colours under the pointer rather than changing its fill, so the row stays a
-   row of readings. */
-.overview-chip--link { cursor: pointer; }
-.overview-chip--link:hover { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-text); }
-.overview-address { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin: 0; }
-.overview-address code { min-width: 0; padding: 3px 8px; font-family: var(--font-mono); font-size: 12px; background: var(--code); border: 1px solid var(--line); border-radius: var(--radius); overflow-wrap: anywhere; }
-/* The page's own buttons are the height of the strip they sit in rather than the
-   window's 36px control: five of them at full height would be the loudest thing
-   on a page whose subject is numbers.  That is the window's small button — the
-   page's own name for it rides on that rule's selector group, so `.overview-button`
-   still means what it always meant at the eight places the template wears it. */
 /* ── The switches ── */
 .overview-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; font-size: 13px; }
 .overview-pause { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding-top: 10px; border-top: 1px solid var(--line); }
-/* ── The counters ── */
-.overview-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
-.overview-stat { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 0 9px; padding: 14px 16px; background: var(--card-bg); border: 1px solid var(--line); border-radius: var(--radius-lg); }
-.overview-stat > svg { color: var(--muted); }
-/* Digits that line up: four counters read side by side are compared by their
-   numbers, and a proportional face shifts each one off the column above it. */
-.overview-stat strong { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.overview-stat span { grid-column: 1 / -1; margin-top: 5px; font-size: 12px; color: var(--muted); }
-.overview-stat small { grid-column: 1 / -1; margin-top: 1px; font-size: 11px; color: var(--muted); }
-/* ── The network map ── */
-.overview-ring-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
-/* The ring is the three counts drawn to scale and the legend beside it writes
-   all three out, so the drawing is never the only place a number lives. */
-.overview-ring { position: relative; width: 108px; height: 108px; flex-shrink: 0; border-radius: 50%; }
-.overview-ring-center { position: absolute; inset: 20px; display: grid; place-content: center; gap: 1px; text-align: center; background: var(--raised); border-radius: 50%; }
-.overview-ring-center strong { font-size: 21px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.overview-ring-center small { font-size: 11px; color: var(--muted); }
-.overview-legend { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; min-width: 0; font-size: 12px; }
-.overview-legend li { display: flex; align-items: center; gap: 8px; }
-.overview-swatch { width: 10px; height: 10px; flex-shrink: 0; border-radius: 3px; }
-.overview-swatch--connected { background: var(--accent); }
-.overview-swatch--paired { background: var(--state-paired); }
-.overview-swatch--discovered { background: var(--state-discovered); }
+/* ── The action row ── */
 .overview-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-/* ── The feed ── */
-.overview-feed { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-/* A row of the feed copies its clip, so the whole row is the target and it
-   lights up as one under the pointer.  The mark column is a fixed 14px whether
-   or not a row carries a mark, so the one line of text every row holds is the
-   same width on all of them instead of shifting under the eye as the ticked and
-   unticked rows alternate.
-   The column is held open by `.overview-feed-mark` and not by the track alone:
-   a `v-if` with no `v-else` leaves no box behind, and a track no element lands
-   in is a track the next element slides into — which is how the age came to sit
-   in this 14px column, one character wide, on every row with neither a tick nor
-   a pin. */
-.overview-feed-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 14px max-content; align-items: center; gap: 10px; width: 100%; min-height: 34px; padding: 6px 8px; font-size: 13px; text-align: left; border: 1px solid transparent; }
-.overview-feed-row:hover:not(:disabled) { background: var(--surface); border-color: var(--line); }
-.overview-feed-row > svg { flex-shrink: 0; color: var(--muted); }
-/* The mark's box: the tick, or the pin, or nothing — but a box either way. */
-.overview-feed-mark { display: flex; align-items: center; justify-content: center; color: var(--muted); }
-/* One line per clip: the feed is a glance at what just happened, and the whole
-   of it is one click away on the history page. */
-.overview-feed-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-/* When the row ran short of room the age broke one character to a line and stood
-   up the right of the row as a column of glyphs: the track holding it was `auto`,
-   whose minimum is the text's *min-content* width, and for Chinese that is a
-   single character.  `max-content` says the column is as wide as the whole age
-   and no narrower, and the clip's own track — `minmax(0, 1fr)` — is the one that
-   gives way, which is what its ellipsis is for. */
-.overview-feed-age { white-space: nowrap; }
-/* The tick a row shows for as long as it is the one last copied, in the
-   history page's own green — the same confirmation the history rows and the
-   favourites rows give, for the same action.  It takes the pin's place rather
-   than sitting beside it, so the row's right edge is one width. */
-.overview-feed-row .overview-feed-copied { color: var(--accent-text); }
+/* 更多设置 is the way off this page rather than another action on it, so it is
+   pushed to the end of the row when there is room for one line. */
+.overview-more { margin-left: auto; }
+/* ── Things that need the reader ── */
+/* A banner, not a panel: at most two short sentences, each with the one control
+   that answers it.  An empty list draws nothing at all. */
+.overview-attention { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 14px; background: var(--warn-soft); border: 1px solid var(--line); border-radius: var(--radius-lg); color: var(--warn-text); font-size: 13px; }
+.overview-attention-list { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin: 0; padding: 0; list-style: none; }
+.overview-attention-list li { display: flex; align-items: center; gap: 6px; }
+/* The first read's placeholder: the page keeps the shape it will have instead of
+   flashing an empty panel and then jumping.  Static rather than shimmering — the
+   window has a no-motion setting, and a skeleton is not news. */
+.overview-skeleton { display: grid; gap: var(--card-gap); }
+.overview-skeleton-strip { min-height: 40px; }
+.overview-skeleton-card { min-height: 150px; background: var(--surface); border-style: dashed; }
+
 @media (max-width: 1000px) {
   /* The gutter is the one number a narrow window moves, and everything placed by
      it moves with it: the page header, the toolbar, the lists and their filter
@@ -2436,12 +2373,13 @@ button.danger-outline:hover:not(:disabled),
   .group-line { flex: 0 0 auto; }
   .group-line .group-row { flex: 0 1 auto; width: auto; }
   .favorites-list .pagination { flex-wrap: wrap; }
-  /* The overview's two pairs of cards sit side by side only while there is
-     room for two; narrow, each pair folds to one column and the four counters
-     to two — the count a narrow card holds without its number and its label
-     fighting over the line. */
+  /* The overview's two cards sit side by side only while there is room for two;
+     narrow, each takes a full line and the action row wraps under its own
+     length.  The action buttons shrink a size so the eight of them stay within
+     two lines instead of one word per line. */
   .overview-row { grid-template-columns: minmax(0, 1fr); }
-  .overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-actions .overview-button { padding: 3px 8px; font-size: 11.5px; }
+  .overview-more { margin-left: 0; }
 }
 /* The dark theme is the same token list with the other values, in two blocks
    because CSS cannot put a media query and an attribute selector in one rule

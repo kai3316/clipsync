@@ -1,26 +1,20 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OverviewView from "../src/components/OverviewView.vue";
 import { bridge } from "../src/api/bridge";
 import type { Overview } from "../src/api/types";
+import { clearStatus, statusMessage } from "../src/lib/status";
 
+// The page reads two things of its own: the overview snapshot and the
+// diagnostics summary its chip shows.  Everything else it does is a write to
+// the runtime through the store, or an event the window answers.
 vi.mock("../src/api/bridge", () => ({
   bridge: {
     overview: vi.fn(),
     diagnosticsReport: vi.fn().mockResolvedValue({ summary: "ok" }),
     copyText: vi.fn().mockResolvedValue({ copied: true }),
-    copyHistory: vi.fn().mockResolvedValue({ copied: true }),
   },
 }));
-
-/** A feed row's clip, as the sidecar now serves one: a history row, with the
- *  preview cut to what the feed's single line shows. */
-function clip(id: string) {
-  return {
-    id, timestamp: 0, preview: "", content_type: "TEXT", pinned: false,
-    source_name: "", source_app: "", source_title: "", transport: "", paste_count: 0,
-  };
-}
 
 /** A runtime snapshot as the page reads one. */
 function overview(overrides: Partial<Overview> = {}): Overview {
@@ -35,27 +29,24 @@ function overview(overrides: Partial<Overview> = {}): Overview {
   };
 }
 
-/** The store the page reaches through.  Only the four things it touches are
- * here: the page owns one read of its own, and everything else it can do is
- * either a write to the runtime or an event the window answers. */
+/** The store the page reaches through.  Only what it touches is here: the reads
+ * it makes go through `bridge`, and the switches are the store's own actions. */
 function storeStub(capabilities: string[] = ["diagnostics.report"]) {
   return {
     state: {
-      status: { device_id: "dev-1", device_name: "Laptop", capabilities },
+      status: { device_id: "dev-1", device_name: "Laptop", capabilities, health: "ready" },
       pending: false,
       error: null as any,
-      copiedId: null as string | null,
+      devices: [] as any[],
+      updateCheck: null as any,
+      update: { phase: "idle" },
     },
-    copy: vi.fn(async function (this: any, item: { id: string }) {
-      this.state.copiedId = item.id;
-      await bridge.copyHistory(item.id);
-    }),
     // The chip reads the report the same way the window's dialog does, so the
     // page goes through the store for it (which is what holds it for a minute).
     diagnostics: vi.fn(async () => bridge.diagnosticsReport()),
     setSyncEnabled: vi.fn().mockResolvedValue(undefined),
-    setDiscoveryEnabled: vi.fn().mockResolvedValue(undefined),
-    setDiscoveryVisible: vi.fn().mockResolvedValue(undefined),
+    setDiscoveryEnabled: vi.fn().mockResolvedValue({ enabled: true, visible: true }),
+    setDiscoveryVisible: vi.fn().mockResolvedValue({ enabled: true, visible: false }),
   };
 }
 
@@ -63,220 +54,399 @@ type Store = ReturnType<typeof storeStub>;
 
 function mountView(store: Store = storeStub(), props: Record<string, unknown> = {}) {
   return mount(OverviewView, {
-    props: { store: store as any, enabled: true, syncRunning: true, companionOn: false,
-      companionUrl: null, pauseLeftMs: 0, pauseBusy: false, ...props },
+    props: {
+      store: store as any, enabled: true, syncRunning: true, companionOn: false,
+      pauseLeftMs: 0, pauseBusy: false, ...props,
+    },
   });
 }
 
+/** A button by the words a reader sees on it. */
+function button(view: ReturnType<typeof mountView>, label: string) {
+  return view.findAll("button").find(node => (node.text() || "").trim() === label)!;
+}
+
 describe("the overview", () => {
-  it("says it cannot tell rather than guessing when the report is unavailable", async () => {
+  beforeEach(() => {
     vi.mocked(bridge.overview).mockResolvedValue(overview());
-    vi.mocked(bridge.diagnosticsReport).mockRejectedValue(new Error("no report"));
+    vi.mocked(bridge.diagnosticsReport).mockResolvedValue({ summary: "ok" } as any);
+    vi.mocked(bridge.copyText).mockClear().mockResolvedValue({ copied: true } as any);
+    clearStatus();
+  });
+
+  afterEach(() => {
+    vi.mocked(bridge.overview).mockReset();
+    vi.mocked(bridge.diagnosticsReport).mockReset();
+    clearStatus();
+    // Every case here is a page that must not outlive the document it was
+    // mounted into.
+    Object.defineProperty(document, "hidden", { value: false, configurable: true });
+  });
+
+  /* ── The status line ──────────────────────────────────────────────── */
+
+  it("says how many devices are online, and leads to the devices page", async () => {
+    vi.mocked(bridge.overview).mockResolvedValue(overview({ connected_count: 2, paired_count: 3 }));
     const view = mountView();
     try {
       await flushPromises();
-      expect(view.get(".overview-health").text()).toContain("检查网络");
+      const line = view.get(".overview-device-line");
+      expect(line.text()).toContain("2 台设备在线");
+      await line.trigger("click");
+      expect(view.emitted("devices")).toHaveLength(1);
+    } finally { view.unmount(); }
+  });
+
+  it("names paired-but-off devices rather than showing a zero", async () => {
+    vi.mocked(bridge.overview).mockResolvedValue(overview({ connected_count: 0, paired_count: 2 }));
+    const view = mountView();
+    try {
+      await flushPromises();
+      expect(view.get(".overview-device-line").text()).toContain("已配对 2 台 · 当前离线");
+      expect(view.text()).not.toContain("0 台设备在线");
+    } finally { view.unmount(); }
+  });
+
+  it("offers pairing instead of a zero when there is no device at all", async () => {
+    // No big empty panel: a reader whose machine has no peers gets one line and
+    // the QR in the card beside it, not a block of instructions between them.
+    const view = mountView();
+    try {
+      await flushPromises();
+      expect(view.get(".overview-device-line").text()).toContain("还没有配对设备 · 去配对");
+      expect(view.find(".empty--page").exists()).toBe(false);
+      expect(view.text()).not.toContain("暂无设备");
+    } finally { view.unmount(); }
+  });
+
+  it("reports the pause deadline in the status line, and resumes from the card", async () => {
+    const view = mountView(storeStub(), { pauseLeftMs: 20 * 60_000, syncRunning: false });
+    try {
+      await flushPromises();
+      expect(view.get(".overview-status").text()).toContain("同步已暂停");
+      expect(view.get(".overview-status").text()).toContain("剩余 20 分钟");
+      // The resume control sits in the settings card, where the presets are, so
+      // a paused reader has one obvious way back.
+      await button(view, "立即恢复").trigger("click");
+      expect(view.emitted("resume")).toHaveLength(1);
+    } finally { view.unmount(); }
+  });
+
+  it("shows the health chip from the report, and does not ask for one it cannot run", async () => {
+    vi.mocked(bridge.diagnosticsReport).mockResolvedValue({ summary: "fail" } as any);
+    const view = mountView();
+    try {
+      await flushPromises();
+      expect(view.get(".overview-health").text()).toContain("网络异常");
+      expect(view.get(".overview-health").classes()).toContain("overview-health--fail");
+      await view.get(".overview-health").trigger("click");
+      expect(view.emitted("diagnostics")).toHaveLength(1);
     } finally { view.unmount(); }
 
-    // A runtime that does not run the suite is not asked: the probes are socket
-    // work, and a report nobody can have is not worth asking twice for.
     vi.mocked(bridge.diagnosticsReport).mockClear();
     const without = mountView(storeStub([]));
     try {
       await flushPromises();
-      expect(bridge.diagnosticsReport).not.toHaveBeenCalled();
       expect(without.get(".overview-health").text()).toContain("检查网络");
+      expect(bridge.diagnosticsReport).not.toHaveBeenCalled();
     } finally { without.unmount(); }
   });
 
-  it("shows the runtime's truth on a switch, not the reader's click", async () => {
-    vi.mocked(bridge.overview).mockResolvedValue(overview({ discovering: false }));
-    const store = storeStub();
-    // What the box reads at the moment the write is sent, which is the whole
-    // point: the browser has already flipped it under the reader's finger.
-    let checkedWhenWritten: boolean | undefined;
-    let view!: ReturnType<typeof mountView>;
-    store.setDiscoveryEnabled.mockImplementation(async () => {
-      checkedWhenWritten = (view.get('[aria-label="局域网发现"]').element as HTMLInputElement).checked;
-    });
-    view = mountView(store);
-    try {
-      await flushPromises();
-      await view.get('[aria-label="局域网发现"]').setValue(true);
-      await flushPromises();
-      expect(store.setDiscoveryEnabled).toHaveBeenCalledWith(true);
-      expect(checkedWhenWritten).toBe(false);
-      // And the read that follows puts it where the runtime says it is — which
-      // is still off, because discovery never came up.
-      expect((view.get('[aria-label="局域网发现"]').element as HTMLInputElement).checked).toBe(false);
-    } finally { view.unmount(); }
-  });
+  /* ── This machine ─────────────────────────────────────────────────── */
 
-  it("keeps a refused write from leaving the sync switch flipped", async () => {
-    vi.mocked(bridge.overview).mockResolvedValue(overview({ sync_enabled: true }));
-    const store = storeStub();
-    // The store's actions report a refusal by recording it, and leave the
-    // runtime alone — which is what the page has to survive.
-    store.setSyncEnabled.mockImplementation(async () => { store.state.error = new Error("refused"); });
-    const view = mountView(store);
-    try {
-      await flushPromises();
-      await view.get('[aria-label="剪贴板同步"]').setValue(false);
-      await flushPromises();
-      expect(store.setSyncEnabled).toHaveBeenCalledWith(false);
-      expect((view.get('[aria-label="剪贴板同步"]').element as HTMLInputElement).checked).toBe(true);
-    } finally { view.unmount(); }
-  });
-
-  it("renames this device, and only when the name actually changed", async () => {
-    vi.mocked(bridge.overview).mockResolvedValue(overview());
+  it("shows this machine's facts, copies them and lets the name be edited", async () => {
+    vi.mocked(bridge.overview).mockResolvedValue(overview({
+      web_enabled: true, local_ip: "192.168.1.7", port: 8765, platform: "Windows", version: "1.2.3",
+    }));
     const view = mountView();
     try {
       await flushPromises();
+      const text = view.text();
+      expect(text).toContain("设备 ID");
+      expect(text).toContain("dev-1");
+      expect(text).toContain("Windows · v1.2.3");
+      expect(text).toContain("192.168.1.7:8765");
+
+      await view.get('[aria-label="复制设备 ID"]').trigger("click");
+      await flushPromises();
+      expect(bridge.copyText).toHaveBeenLastCalledWith("dev-1");
+      // `copyText` is the window's shared helper, so it says 已复制！ on the
+      // status line — the same confirmation every other copy in the window gives.
+      expect(statusMessage().value).toBe("已复制！");
+      await view.get('[aria-label="复制本地地址"]').trigger("click");
+      await flushPromises();
+      expect(bridge.copyText).toHaveBeenLastCalledWith("192.168.1.7:8765");
+
+      // Renaming happens where the name is, and only a changed name is sent.
       await view.get('[aria-label="编辑设备名称"]').trigger("click");
       const input = view.get("input.overview-name-input");
       expect((input.element as HTMLInputElement).value).toBe("Laptop");
       await input.setValue("  Study PC  ");
       await input.trigger("keydown.enter");
       expect(view.emitted("rename")).toEqual([["Study PC"]]);
-
-      // Escape takes the editor away, and the blur that follows it must not
-      // commit what the reader just cancelled.
-      await view.get('[aria-label="编辑设备名称"]').trigger("click");
-      await view.get("input.overview-name-input").setValue("Renamed by mistake");
-      await view.get("input.overview-name-input").trigger("keydown.escape");
-      await flushPromises();
-      expect(view.emitted("rename")).toHaveLength(1);
-      expect(view.text()).toContain("Laptop");
+      expect(view.emitted("qr")).toBeUndefined();
     } finally { view.unmount(); }
   });
 
-  it("copies the address the phone opens", async () => {
-    vi.mocked(bridge.overview).mockResolvedValue(overview({
-      web_enabled: true, local_ip: "192.168.1.7", port: 8765,
-    }));
-    const view = mountView(storeStub(), { companionUrl: "http://192.168.1.7:8765/mobile.html?token=abc" });
-    try {
-      await flushPromises();
-      expect(view.get(".overview-address code").text()).toBe("192.168.1.7:8765");
-      await view.get(".overview-address button").trigger("click");
-      await flushPromises();
-      // The token-carrying address when the service is up, because that is the
-      // one that works without the phone being told a token.
-      expect(bridge.copyText).toHaveBeenCalledWith("http://192.168.1.7:8765/mobile.html?token=abc");
-    } finally { view.unmount(); }
-
-    vi.mocked(bridge.overview).mockResolvedValue(overview({ web_enabled: false, local_ip: "192.168.1.7" }));
-    const hidden = mountView();
-    try {
-      await flushPromises();
-      expect(hidden.find(".overview-address").exists()).toBe(false);
-    } finally { hidden.unmount(); }
-  });
-
-  it("lists recent activity, copies on a click and leads on from the card", async () => {
-    const now = Math.floor(Date.now() / 1000);
-    vi.mocked(bridge.overview).mockResolvedValue(overview({ recent_items: [
-      { ...clip("a"), preview: "https://example.com", content_type: "URL", timestamp: now - 30, pinned: true },
-      { ...clip("b"), preview: "", content_type: "IMAGE", timestamp: now - 600 },
-    ] }));
+  it("offers the phone companion's switch where its address would be", async () => {
+    // With no companion running there is no local address to copy, so the card
+    // says why and offers the page that starts it — a bare 未启用 would be a
+    // dead end.
     const view = mountView();
     try {
       await flushPromises();
-      const rows = view.findAll(".overview-feed-row");
-      expect(rows).toHaveLength(2);
-      expect(rows[0].text()).toContain("https://example.com");
-      expect(rows[0].text()).toContain("刚刚");
-      expect(rows[0].find('[aria-label="已置顶"]').exists()).toBe(true);
-      // A clip with no text of its own still says something, rather than
-      // showing a row with nothing in it.
-      expect(rows[1].text()).toContain("（无内容）");
-      expect(rows[1].text()).toContain("10 分钟前");
-      // A row copies — the clip itself, through the history page's own action —
-      // rather than walking the reader to the page they were already looking at
-      // the newest of.  The card carries the way there.
-      await rows[1].trigger("click");
-      await flushPromises();
-      expect(view.emitted("history")).toBeUndefined();
-      expect(bridge.copyHistory).toHaveBeenCalledWith("b");
-      expect(view.get(".overview-card-head button").text()).toBe("查看全部");
-      await view.get(".overview-card-head button").trigger("click");
-      expect(view.emitted("history")).toHaveLength(1);
+      expect(view.text()).toContain("手机伴侣未启用");
+      await button(view, "去开启").trigger("click");
+      expect(view.emitted("companion-page")).toHaveLength(1);
     } finally { view.unmount(); }
   });
 
-  it("opens a feed row's menu from the keyboard, not only from the right button", async () => {
-    // 置顶 and 删除 live on that menu, and the row's only other key is the one
-    // that copies — so a reader without a mouse had no way to reach either.
-    vi.mocked(bridge.overview).mockResolvedValue(overview({
-      recent_items: [{ ...clip("a"), preview: "from the phone" }],
-    }));
+  it("shows the QR in one place only", async () => {
+    // It used to be offered twice — in the machine card and again among the
+    // quick actions.  One surface, one entry.
     const view = mountView();
     try {
       await flushPromises();
-      const row = view.get(".overview-feed-row");
-      // The menu key, and the spelling of it a keyboard without one uses.
-      await row.trigger("keydown", { key: "F10", shiftKey: true });
-      const first = view.emitted("row-menu");
-      expect(first).toHaveLength(1);
-      expect((first![0][1] as { id: string }).id).toBe("a");
-      await row.trigger("keydown", { key: "ContextMenu" });
-      expect(view.emitted("row-menu")).toHaveLength(2);
-      // Enter is the row's own key, and it still copies rather than opening
-      // anything.
-      await row.trigger("keydown", { key: "Enter" });
-      expect(view.emitted("row-menu")).toHaveLength(2);
-    } finally { view.unmount(); }
-  });
-
-  it("hands the actions it does not own up to the window", async () => {
-    vi.mocked(bridge.overview).mockResolvedValue(overview({ connected_names: ["Phone", "Tablet"] }));
-    const view = mountView(storeStub(), { companionOn: true });
-    try {
-      await flushPromises();
-      const names = view.findAll(".overview-chip--link");
-      expect(names.map(chip => chip.text())).toEqual(["Phone", "Tablet"]);
-      // Nothing is left out, so the card must not say that something is — and
-      // must not fall through to its empty line either.
-      expect(view.text()).not.toContain("另有");
-      expect(view.text()).not.toContain("还没有已连接的设备");
-      await names[0].trigger("click");
-      expect(view.emitted("devices")).toHaveLength(1);
-
-      // The phone service's switch is the window's to answer: the page reports
-      // the click and shows what the window's read says, which is still on.
-      const remote = view.get('[aria-label="远程访问"]');
-      await remote.setValue(false);
-      expect(view.emitted("companion")).toEqual([[false]]);
-      expect((remote.element as HTMLInputElement).checked).toBe(true);
-
-      await view.findAll("button").find(button => button.text() === "显示二维码")!.trigger("click");
-      await view.findAll("button").find(button => button.text() === "发送链接到设备")!.trigger("click");
+      expect(view.findAll("button").filter(node => node.text().trim() === "显示二维码")).toHaveLength(1);
+      await button(view, "显示二维码").trigger("click");
       expect(view.emitted("qr")).toHaveLength(1);
-      expect(view.emitted("send-url")).toHaveLength(1);
     } finally { view.unmount(); }
   });
 
-  /** The card lists a sample of the connected machines and its badge counts
-   *  all of them.  Both numbers used to come from the sample, so a page that
-   *  said 已连接 12 台 in one card carried a badge reading 8 in the next, and
-   *  the four machines left out were simply gone. */
-  it("counts every connected device, and says how many the card leaves out", async () => {
-    const names = Array.from({ length: 12 }, (_, index) => `Device ${index + 1}`);
-    vi.mocked(bridge.overview).mockResolvedValue(
-      overview({ connected_count: 12, connected_names: names }));
+  /* ── The switches ─────────────────────────────────────────────────── */
+
+  it("writes the four switches through the store and the window", async () => {
+    vi.mocked(bridge.overview).mockResolvedValue(overview({ discovering: false, visible: true }));
+    const store = storeStub();
+    const view = mountView(store);
+    try {
+      await flushPromises();
+      await view.get('[aria-label="剪贴板同步"]').setValue(false);
+      expect(store.setSyncEnabled).toHaveBeenCalledWith(false);
+
+      await view.get('[aria-label="局域网发现"]').setValue(true);
+      expect(store.setDiscoveryEnabled).toHaveBeenCalledWith(true);
+
+      await view.get('[aria-label="在局域网可见"]').setValue(false);
+      expect(store.setDiscoveryVisible).toHaveBeenCalledWith(false);
+
+      // The phone page's switch is the window's own: it owns the service's
+      // status, so the click only reports what was asked for.
+      await view.get('[aria-label="手机网页访问"]').setValue(true);
+      expect(view.emitted("companion")).toEqual([[true]]);
+    } finally { view.unmount(); }
+  });
+
+  it("puts a refused switch back and says so, instead of leaving it flipped", async () => {
+    vi.mocked(bridge.overview).mockResolvedValue(overview({ discovering: false, visible: true }));
+    const store = storeStub();
+    // The store reports a refusal by recording it, and leaves the runtime
+    // alone; the page has to survive that with the box back where it was.
+    store.setSyncEnabled.mockImplementation(async () => {
+      store.state.error = { code: "RPC_FAILED", message: "同步没有切换", retryable: true };
+    });
+    store.setDiscoveryEnabled.mockResolvedValue(null as any);
+    const view = mountView(store);
+    try {
+      await flushPromises();
+      const sync = view.get('[aria-label="剪贴板同步"]');
+      await sync.setValue(false);
+      await flushPromises();
+      expect((sync.element as HTMLInputElement).checked).toBe(true);
+      expect(statusMessage().value).toBe("同步没有切换");
+
+      const discovery = view.get('[aria-label="局域网发现"]');
+      await discovery.setValue(true);
+      await flushPromises();
+      expect((discovery.element as HTMLInputElement).checked).toBe(false);
+      expect(statusMessage().value).toBe("操作没有生效，请稍后重试");
+    } finally { view.unmount(); }
+  });
+
+  it("offers the timed pause presets while sync runs", async () => {
     const view = mountView();
     try {
       await flushPromises();
-      const heading = view.findAll("h2").find(node => node.text().includes("已连接设备"))!;
-      expect(heading.get(".badge").text()).toBe("12");
-      expect(view.findAll(".overview-chip--link")).toHaveLength(8);
-      expect(view.text()).toContain("另有 4 台未在此列出");
+      const pause = view.get(".overview-pause");
+      const labels = pause.findAll("button").map(node => node.text());
+      expect(labels).toEqual(["15 分钟", "30 分钟", "1 小时"]);
+      await pause.findAll("button")[1].trigger("click");
+      expect(view.emitted("pause")).toEqual([[30]]);
     } finally { view.unmount(); }
   });
 
-  /** The chip is one word; the report behind it runs subprocesses to write it. */
-  it("does not run a whole diagnostics report for one word on the status bar", async () => {
+  /* ── The quick actions ────────────────────────────────────────────── */
+
+  it("raises one event per quick action, reusing the window's own handlers", async () => {
+    const view = mountView();
+    try {
+      await flushPromises();
+      await button(view, "快速粘贴").trigger("click");
+      await button(view, "发送文件").trigger("click");
+      // 设备 is one of the three primary pages, so it has an explicit door here
+      // as well as the status line's clickable count.
+      await button(view, "设备管理").trigger("click");
+      await button(view, "导入历史").trigger("click");
+      await button(view, "导出历史").trigger("click");
+      await button(view, "快捷键设置").trigger("click");
+      await button(view, "检查更新").trigger("click");
+      await button(view, "更多设置").trigger("click");
+      expect(view.emitted("quick-paste")).toHaveLength(1);
+      expect(view.emitted("send-files")).toHaveLength(1);
+      expect(view.emitted("devices")).toHaveLength(1);
+      expect(view.emitted("import-history")).toHaveLength(1);
+      // The settings card's export defaults to JSON; CSV and Markdown stay on
+      // that card's own three buttons.
+      expect(view.emitted("export-history")).toEqual([["json"]]);
+      expect(view.emitted("settings-hotkeys")).toHaveLength(1);
+      expect(view.emitted("check-update")).toHaveLength(1);
+      expect(view.emitted("settings")).toHaveLength(1);
+      // 快速粘贴 is the page's primary action, and 更多设置 is the way off it.
+      expect(button(view, "快速粘贴").classes()).toContain("primary");
+      expect(button(view, "更多设置").classes()).toContain("overview-more");
+    } finally { view.unmount(); }
+  });
+
+  /* ── The banner ───────────────────────────────────────────────────── */
+
+  it("draws the attention banner only when it has something to say", async () => {
+    // Nothing to report: no heading, no empty panel, no "0 项".
+    const quiet = mountView();
+    try {
+      await flushPromises();
+      expect(quiet.find(".overview-attention").exists()).toBe(false);
+      expect(quiet.text()).not.toContain("需要处理");
+    } finally { quiet.unmount(); }
+  });
+
+  it("sends an available update to the settings card instead of checking again", async () => {
+    const store = storeStub();
+    store.state.updateCheck = { available: true, latest: "1.3.0", current: "1.2.3", url: "" };
+    vi.mocked(bridge.overview).mockResolvedValue(overview());
+    const view = mountView(store);
+    try {
+      await flushPromises();
+      const banner = view.get(".overview-attention");
+      expect(banner.text()).toContain("1.3.0");
+      await banner.findAll("button").find(node => node.text() === "查看更新")!.trigger("click");
+      expect(view.emitted("settings-update")).toHaveLength(1);
+      expect(view.emitted("check-update")).toBeUndefined();
+    } finally { view.unmount(); }
+  });
+
+  it("reports a pairing request waiting on this window", async () => {
+    const store = storeStub();
+    store.state.devices = [{ id: "peer", paired: false, pairing_status: "pending", archived: false }];
+    vi.mocked(bridge.overview).mockResolvedValue(overview());
+    const view = mountView(store);
+    try {
+      await flushPromises();
+      expect(view.get(".overview-attention").text()).toContain("1 个配对请求等待确认");
+      await view.get(".overview-attention").findAll("button")[0].trigger("click");
+      expect(view.emitted("devices")).toHaveLength(1);
+    } finally { view.unmount(); }
+  });
+
+  it("does not repeat the offline-device count in the banner", async () => {
+    // The status line already says how many paired devices are away; a second
+    // sentence saying it would be the same reading twice.
+    vi.mocked(bridge.overview).mockResolvedValue(overview({ connected_count: 0, paired_count: 2 }));
+    const view = mountView();
+    try {
+      await flushPromises();
+      expect(view.get(".overview-status").text()).toContain("已配对 2 台 · 当前离线");
+      expect(view.find(".overview-attention").exists()).toBe(false);
+    } finally { view.unmount(); }
+  });
+
+  /* ── The pages that are gone ──────────────────────────────────────── */
+
+  it("no longer draws the counters, the network map, the device list or the clip feed", async () => {
+    vi.mocked(bridge.overview).mockResolvedValue(overview({
+      connected_count: 2, paired_count: 2, history_count: 33, history_today: 12,
+      history_images: 4, active_transfers: 1, transfer_completed: 3,
+      connected_names: ["Phone"], recent_items: [],
+    }));
+    const view = mountView();
+    try {
+      await flushPromises();
+      for (const selector of [".overview-stat", ".overview-stats", ".overview-ring", ".overview-feed"]) {
+        expect(view.find(selector).exists(), `${selector} should be gone`).toBe(false);
+      }
+      for (const words of ["网络地图", "最近活动", "已连接设备", "共 2 台已配对", "历史记录"]) {
+        expect(view.text()).not.toContain(words);
+      }
+    } finally { view.unmount(); }
+  });
+
+  /* ── Loading, failure and polling ──────────────────────────────────── */
+
+  it("keeps the page's shape while loading, and offers a retry when the read fails", async () => {
+    vi.mocked(bridge.overview).mockRejectedValueOnce(new Error("sidecar is not answering"));
+    const view = mountView();
+    try {
+      await flushPromises();
+      // The failure is a sentence with a way out, not a blank page.
+      expect(view.text()).toContain("sidecar is not answering");
+      expect(view.find(".overview-skeleton").exists()).toBe(true);
+      vi.mocked(bridge.overview).mockResolvedValue(overview());
+      await button(view, "重试").trigger("click");
+      await flushPromises();
+      expect(view.find(".overview-status").exists()).toBe(true);
+      expect(view.find(".overview-skeleton").exists()).toBe(false);
+    } finally { view.unmount(); }
+  });
+
+  it("stops reading once the page is off screen, and while the window is hidden", async () => {
+    vi.useFakeTimers();
+    vi.mocked(bridge.overview).mockClear().mockResolvedValue(overview());
+    const view = mountView();
+    try {
+      await flushPromises();
+      expect(bridge.overview).toHaveBeenCalledTimes(1);
+      Object.defineProperty(document, "hidden", { value: true, configurable: true });
+      vi.advanceTimersByTime(20000);
+      await flushPromises();
+      expect(bridge.overview).toHaveBeenCalledTimes(1);
+      Object.defineProperty(document, "hidden", { value: false, configurable: true });
+      vi.advanceTimersByTime(5000);
+      await flushPromises();
+      expect(bridge.overview).toHaveBeenCalledTimes(2);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("says the page is unavailable rather than pretending it read something", async () => {
+    vi.mocked(bridge.overview).mockClear();
+    const off = mountView(storeStub(), { enabled: false });
+    try {
+      await flushPromises();
+      expect(off.text()).toContain("同步引擎未运行");
+      expect(bridge.overview).not.toHaveBeenCalled();
+    } finally { off.unmount(); }
+
+    vi.mocked(bridge.overview).mockRejectedValue(new Error("sidecar is not answering"));
+    const failed = mountView();
+    try {
+      await flushPromises();
+      expect(failed.text()).toContain("sidecar is not answering");
+    } finally { failed.unmount(); }
+  });
+
+  it("tells a booting window where it is rather than claiming a verdict", async () => {
+    const booting = storeStub();
+    delete (booting.state as { status?: unknown }).status;
+    const view = mountView(booting, { enabled: false });
+    try {
+      await flushPromises();
+      expect(view.text()).toContain("正在读取概览");
+      expect(view.text()).not.toContain("同步引擎未运行");
+    } finally { view.unmount(); }
+  });
+
+  it("does not run a whole diagnostics report for one word more often than it must", async () => {
     vi.useFakeTimers();
     vi.mocked(bridge.diagnosticsReport).mockClear().mockResolvedValue({ summary: "ok" } as any);
     const view = mountView();
@@ -293,101 +463,5 @@ describe("the overview", () => {
       view.unmount();
       vi.useRealTimers();
     }
-  });
-
-  it("stops reading once the page is off screen, and while the window is hidden", async () => {
-    vi.useFakeTimers();
-    vi.mocked(bridge.overview).mockClear().mockResolvedValue(overview());
-    const view = mountView();
-    try {
-      await flushPromises();
-      expect(bridge.overview).toHaveBeenCalledTimes(1);
-      // A report nobody is looking at is a read run for nobody.
-      Object.defineProperty(document, "hidden", { value: true, configurable: true });
-      vi.advanceTimersByTime(20000);
-      await flushPromises();
-      expect(bridge.overview).toHaveBeenCalledTimes(1);
-      Object.defineProperty(document, "hidden", { value: false, configurable: true });
-      vi.advanceTimersByTime(5000);
-      await flushPromises();
-      expect(bridge.overview).toHaveBeenCalledTimes(2);
-      view.unmount();
-      // A read that resolves after the page is gone has nowhere to go.
-      vi.advanceTimersByTime(20000);
-      await flushPromises();
-      expect(bridge.overview).toHaveBeenCalledTimes(2);
-    } finally {
-      view.unmount();
-      vi.useRealTimers();
-    }
-  });
-
-  it("says the page is unavailable rather than pretending it read something", async () => {
-    vi.mocked(bridge.overview).mockClear().mockResolvedValue(overview());
-    const off = mountView(storeStub(), { enabled: false });
-    try {
-      await flushPromises();
-      expect(off.text()).toContain("同步引擎未运行");
-      expect(bridge.overview).not.toHaveBeenCalled();
-    } finally { off.unmount(); }
-
-    vi.mocked(bridge.overview).mockRejectedValue(new Error("sidecar is not answering"));
-    const failed = mountView();
-    try {
-      await flushPromises();
-      expect(failed.text()).toContain("概览暂不可用");
-      expect(failed.text()).toContain("sidecar is not answering");
-    } finally { failed.unmount(); }
-  });
-
-  it("tells the reader where it is rather than claiming a verdict it does not have", async () => {
-    // A window that has just opened has no status at all, and the shell calls
-    // that 正在启动.  Reporting "同步引擎未运行" for it is a verdict the page does
-    // not have — and it is wrong: the engine is coming up.
-    vi.mocked(bridge.overview).mockClear();
-    const booting = storeStub();
-    delete (booting.state as { status?: unknown }).status;
-    const view = mountView(booting, { enabled: false });
-    try {
-      await flushPromises();
-      expect(view.text()).toContain("正在读取概览");
-      expect(view.text()).not.toContain("同步引擎未运行");
-    } finally { view.unmount(); }
-
-    // A sidecar that died leaves no status either, but the shell's own chip
-    // already says it cannot connect: a spinner under it that never resolves is
-    // the one thing a reader cannot act on, so the error ends the claim.
-    const down = storeStub();
-    delete (down.state as { status?: unknown }).status;
-    down.state.error = { code: "NATIVE_HOST_REQUIRED", message: "请在 ClipSync 桌面窗口中打开", retryable: false };
-    const failed = mountView(down, { enabled: false });
-    try {
-      await flushPromises();
-      expect(failed.text()).toContain("概览暂不可用");
-      expect(failed.text()).not.toContain("正在读取概览");
-    } finally { failed.unmount(); }
-  });
-
-  it("leaves the first-run tutorial to the welcome flow", async () => {
-    // The three-step explanation belongs to onboarding now; an empty overview
-    // is just empty, not a second manual that appears again on every fresh
-    // install and every cleared history.
-    vi.mocked(bridge.overview).mockResolvedValue(overview());
-    const view = mountView();
-    try {
-      await flushPromises();
-      expect(view.find(".overview-start").exists()).toBe(false);
-      expect(view.text()).not.toContain("三步开始");
-      expect(view.text()).not.toContain("这台设备还没有配对的机器");
-    } finally { view.unmount(); }
-
-    vi.mocked(bridge.overview).mockResolvedValue(overview({
-      paired_count: 1, connected_count: 1, connected_names: ["Phone"],
-    }));
-    const paired = mountView();
-    try {
-      await flushPromises();
-      expect(paired.find(".overview-start").exists()).toBe(false);
-    } finally { paired.unmount(); }
   });
 });

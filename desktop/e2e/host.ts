@@ -97,6 +97,9 @@ export const fixtures: Record<string, unknown> = {
       "transfers.list", "transfers.send", "transfers.action",
       "transfers.cancel_all", "transfers.speed_test", "transfers.clear_history",
       "transfers.request_entry_files",
+      // 1.3.1: the remote-file paste fetch, in the order the sidecar appends
+      // them — the e2e fixture is held to that list item by item.
+      "transfers.prepare_paste", "transfers.cancel_paste",
       "chat.devices", "chat.sessions", "chat.messages", "chat.invite",
       "chat.action", "chat.file", "chat.typing", "chat.mute", "chat.open_file",
       "chat.reveal_file",

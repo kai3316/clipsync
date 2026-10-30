@@ -69,6 +69,14 @@ If the computers are on different networks, turn on internet sync on both and fo
 
 Copy text, pictures, links or files and paste them on another computer. Search and filter the history, pin it, save it as a favourite or delete it. Copying back and forth between two machines does not create duplicates.
 
+Press `Ctrl+Shift+V` for the **quick-paste window**: type to search, pick with ↑/↓, press Enter to paste straight into the current app, `Shift+Enter` pastes plain text, `Esc` closes. `Ctrl+1`…`Ctrl+9` paste the 1st–9th recent clip directly; turn off auto-paste in Settings → Paste & Recording if you only want the clipboard filled.
+
+Settings → Paste & Recording also lets you: skip clips marked "do not record" by password managers (1Password, Bitwarden, …); exclude source applications by substring; skip whatever was already on the clipboard at launch; and cap a single non-file clip (8 MB by default). History can be imported and exported as JSON/CSV/Markdown.
+
+### Keyboard shortcuts
+
+`Ctrl+Shift+V` quick-paste window; `Ctrl+1`…`Ctrl+9` paste the Nth recent clip; `Ctrl+Alt+V` copy the latest clip as plain text; `Ctrl+Shift+Space` show the main window; `Ctrl+Shift+M` pause/resume sync. All of them can be rebound in Settings → General → Global hotkeys.
+
 ### Library
 
 Keep the things you reuse in one place: groups, editing, ordering and Markdown export. Picture favourites show a thumbnail, and right-click gives edit, copy and delete.
@@ -76,6 +84,8 @@ Keep the things you reuse in one place: groups, editing, ordering and Markdown e
 ### File transfer
 
 Drop files or folders on the window, choose a computer and send. No cloud drive, and computers on the same network do not need to be connected first.
+
+Copying a file on another computer in the same network does not download it up front: the file is fetched on demand only when you paste it — from the quick-paste window or the history — with a progress panel you can cancel. The single-file limit is adjustable in Settings → Files (2 GB by default, protocol ceiling about 5.4 GB), a confirmation appears above the threshold (512 MB by default), and relay fetches over the internet are capped at 50 MB by default. When the fetch completes the file lands in the receive folder and is copied to the clipboard.
 
 ### Nearby chat
 
@@ -103,6 +113,7 @@ Choose Simplified Chinese, Traditional Chinese or English, and a theme that foll
 - on different networks it is encrypted before a relay forwards it;
 - the first time you connect, check the 8-digit number; if the other device changes later, you are asked to confirm;
 - you can set a password for local data in Settings;
+- content a password manager marks as "do not record" is never captured or synced;
 - card numbers, ID numbers, phone numbers and passwords can be replaced with `[FILTERED]` before sending.
 
 ## Updates
@@ -114,6 +125,21 @@ ClipSync checks for a new version in Settings → Software update and asks befor
 <details>
 <summary>Do both computers need to be on the same Wi-Fi?</summary>
 <p>No. It is easiest on the same Wi-Fi; on different networks, turn on internet sync and keep going.</p>
+</details>
+
+<details>
+<summary>Why does Ctrl+1 paste immediately?</summary>
+<p>Since 1.3 auto-paste is on by default: a shortcut puts the clip on the clipboard and pastes it into the current app. Turn off "Paste into the current app" in Settings → Paste & Recording if you only want the copy.</p>
+</details>
+
+<details>
+<summary>How do I use the quick-paste window?</summary>
+<p>Press Ctrl+Shift+V (rebindable in Settings → Global hotkeys), type to search, pick with ↑/↓ and press Enter to paste; Shift+Enter pastes plain text, Esc or a click elsewhere closes it.</p>
+</details>
+
+<details>
+<summary>Why does a file copied on the other computer take a moment to paste here?</summary>
+<p>Files are not downloaded when they are copied — that would use your disk and bandwidth for something you may not need. The file is fetched when you paste it, with progress and a cancel button. A confirmation appears above the threshold (512 MB by default), the per-file limit (2 GB by default) is adjustable in Settings → Files, and once fetched the file is saved in the receive folder and copied to the clipboard, so the next paste is instant.</p>
 </details>
 
 <details>

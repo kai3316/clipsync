@@ -1714,10 +1714,16 @@ export function createApplicationStore() {
      * looking past by the time it lands, or on a feed that has already been
      * scrolled. So it says so in words as well, and names what was copied when
      * the clip is short enough to read at a glance.
+     *
+     * Answers whether the clipboard now holds the clip, because one caller
+     * copies *for* something else: the row menu's 「粘贴到当前应用」 may only
+     * hand the OS the paste chord once the write landed, and copying being
+     * refused is the one outcome where pressing on would paste the previous
+     * clipboard's contents into the reader's document.
      */
     async copy(item: HistoryItem, announce = true) {
       state.copiedId = null;
-      if (!(await action(() => bridge.copyHistory(item.id)))) return;
+      if (!(await action(() => bridge.copyHistory(item.id)))) return false;
       state.copiedId = item.id;
       // The tick replacing the row's copy icon is the whole answer when the row
       // is on screen, and the row's own button is exactly that case — a notice
@@ -1725,6 +1731,7 @@ export function createApplicationStore() {
       // over the list.  The notice stays for the paths whose row the reader
       // cannot see: the context menu, the keyboard, another page.
       if (announce) toast("ui.history", t("已复制"));
+      return true;
     },
     /** Copy the words out of a clip that also carries formatting.
      *

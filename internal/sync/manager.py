@@ -133,6 +133,18 @@ class SyncManager:
         # Set via set_app_filter(); used to drop clipboard content that
         # originates from disallowed applications.
         self._app_filter_fn: Callable[[dict | None], bool] | None = None
+        # The live Config object, handed over by the runtime that owns it (see
+        # set_config).  The recording rules below are settings, so every capture
+        # reads them from this object rather than keeping a snapshot taken when
+        # the manager was built -- the same way `_app_filter_fn` closes over the
+        # runtime's Config, and the reason a settings save takes effect on the
+        # next copy instead of on the next launch.
+        self._config = None
+        # Hash of what was already on the clipboard when start() ran, for the
+        # "skip what was copied before launch" rule.  One-shot: the first
+        # capture consumes it (see `_do_read_and_send_locked`), so a later copy
+        # of the same content is recorded normally.
+        self._prelaunch_hash: str | None = None
         # Optional callback invoked when writing remote content to the local
         # clipboard fails.  Set via set_on_write_error().
         self._on_write_error: Callable[[], None] | None = None
@@ -190,6 +202,63 @@ class SyncManager:
         the filter (everything allowed)."""
         self._app_filter_fn = fn
 
+    def set_config(self, cfg):
+        """Hand the manager the live Config its recording rules read.
+
+        A reference, not a copy: the settings API mutates this object in place,
+        so a rule changed in the UI is in force on the very next capture.
+        Passing ``None`` detaches it and leaves the rules at their documented
+        defaults.  Callers that never wire a Config (the integration doubles)
+        therefore behave exactly as before these rules existed.
+        """
+        self._config = cfg
+
+    def _recording_setting(self, name: str, default):
+        """One recording-rule setting, read live from the Config; *default*
+        when no Config is wired."""
+        cfg = self._config
+        if cfg is None:
+            return default
+        return getattr(cfg, name, default)
+
+    def _prelaunch_baseline(self) -> str | None:
+        """Hash what is already on the clipboard, or None when the rule is off.
+
+        Read *before* the monitor starts.  Once the monitor is listening, the
+        clipboard it reports and the clipboard read here are the same object,
+        and a capture could win the race: the content the user copied before
+        launching would then look like a fresh copy and be recorded.  A read
+        failure answers None — a baseline this process cannot take is not a
+        reason to fail startup, and the rule simply does not fire.
+        """
+        if not self._recording_setting("skip_prelaunch_clipboard", True):
+            return None
+        try:
+            content = self._reader.read()
+        except Exception:
+            logger.debug(
+                "Could not read the clipboard for the pre-launch baseline", exc_info=True
+            )
+            return None
+        if not content or content.is_empty():
+            return None
+        return content.hash_key()
+
+    def _non_file_paste_bytes(self, content) -> int:
+        """Total payload size of a capture, counting every non-file format.
+
+        A FILE / FILE_REMOTE payload is a list of paths or an offer, not the
+        content itself: a directory of a thousand files is a few kilobytes of
+        paths and must not count as one huge paste.  Everything else is the
+        bytes that would travel to peers and into history, which is what the
+        size cap exists to bound.
+        """
+        return sum(
+            len(data)
+            for fmt, data in content.types.items()
+            if fmt not in (ContentType.FILE, ContentType.FILE_REMOTE)
+        )
+
     def set_on_write_error(self, callback: Callable[[], None] | None):
         """Set a callback invoked when writing remote clipboard content to
         the local clipboard fails.
@@ -239,6 +308,21 @@ class SyncManager:
         except Exception:
             logger.debug("History change callback failed", exc_info=True)
 
+    def suppress_for_own_write(self) -> None:
+        """Suppress the monitor across a clipboard write this app makes.
+
+        A write the app performs for the user (a pulled remote file handed over
+        as if it had been copied here) is not a local copy: without this the
+        monitor would report it as one and broadcast it straight back to the
+        machine it came from.  The window is the receive path's own — its
+        debounce plus the monitor's longest poll gap — so a re-encoded read-back
+        cannot land after it expires either.
+
+        Public because the paste completion in the runtime needs it too, and the
+        two paths writing that window by hand is how they would drift apart.
+        """
+        self._monitor.suppress_for(self._sync_debounce + self._max_poll_interval + 0.2)
+
     def reset_dedup_for_restore(self):
         """Clear dedup state so a history-restore write is not suppressed.
 
@@ -253,6 +337,11 @@ class SyncManager:
             self._monitor.suppress_until = 0.0
 
     def start(self):
+        # Read the pre-launch clipboard before the monitor is listening: this
+        # is the content that was copied before the app started, and the rule
+        # exists so that content is not re-recorded as a fresh copy.  One-shot;
+        # the first capture consumes it.
+        self._prelaunch_hash = self._prelaunch_baseline()
         self._monitor.start(self._on_clipboard_change)
         logger.info("SyncManager started on %s", self._device_name)
 
@@ -722,15 +811,71 @@ class SyncManager:
         # callback fired) for both app filtering and history attribution.
         source_app = getattr(self._monitor, "last_source_app", None)
 
-        # App filter: drop content from disallowed source applications.
+        # App filter: drop content from disallowed source applications.  The
+        # predicate is the runtime's `is_app_allowed`, which also applies the
+        # source-exclusion substrings, so both rules land here as one decision.
         if self._app_filter_fn is not None and not self._app_filter_fn(source_app):
             logger.debug("Clipboard from disallowed app filtered out: %s", source_app)
+            self._reset_dedup_hashes()
+            return
+
+        # Password-manager "do not record" marker: the application that produced
+        # this copy asked the OS/clipboard manager not to keep it, and the user
+        # has not turned that request off.  Dropped before history and before
+        # the network, so a secret never reaches either.  Read live: a switch
+        # saved in the settings page applies to the very next copy.
+        if getattr(self._monitor, "last_concealed", False) and self._recording_setting(
+            "skip_password_manager_clips", True
+        ):
+            logger.debug(
+                "Clipboard was marked concealed by its source application — "
+                "not recorded or synced"
+            )
             self._reset_dedup_hashes()
             return
 
         # Content-based dedup — a single canonical hash for all loop-prevention
         # state (_last_local_hash, dedup ring).
         content_hash = content.hash_key()
+
+        # Pre-launch content: the first capture after start() is compared with
+        # what the clipboard held before the monitor was listening; when they
+        # are the same this is not a copy the user just made, so it is not
+        # recorded.  One-shot — the baseline is consumed here whether it matched
+        # or not, and a later copy of the same content is recorded normally.
+        # The setting is read again at capture time so turning it off between
+        # start and the first copy still takes effect.
+        if self._prelaunch_hash is not None:
+            started_with = self._prelaunch_hash
+            self._prelaunch_hash = None
+            if started_with == content_hash and self._recording_setting(
+                "skip_prelaunch_clipboard", True
+            ):
+                logger.debug(
+                    "Clipboard content predates this launch — not recorded or synced"
+                )
+                self._reset_dedup_hashes()
+                return
+
+        # Size cap for a single non-file capture.  File lists are path lists
+        # rather than payloads and are not counted; 0 disables the cap.  Read
+        # live like the rules above.
+        limit_mb = self._recording_setting("max_non_file_paste_mb", 8.0)
+        try:
+            limit_bytes = max(0.0, float(limit_mb)) * 1024 * 1024
+        except (TypeError, ValueError):
+            limit_bytes = 0.0
+        if limit_bytes:
+            paste_bytes = self._non_file_paste_bytes(content)
+            if paste_bytes > limit_bytes:
+                logger.debug(
+                    "Clipboard capture holds %d non-file bytes, over the %.1f MB "
+                    "cap — not recorded or synced",
+                    paste_bytes,
+                    limit_bytes / 1024**2,
+                )
+                self._reset_dedup_hashes()
+                return
 
         with self._lock:
             # A pause requested mid-capture takes effect here: nothing below

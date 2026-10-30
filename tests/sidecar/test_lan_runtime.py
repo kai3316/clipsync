@@ -5093,3 +5093,530 @@ def test_a_chat_the_lan_carried_arms_no_relay_receipt(rig):
     assert runtime._chat_send_fn("remote")(frame) is True
     assert runtime.relay_delivery_status() == {"pending": 0, "items": []}
 
+
+# ── on-demand paste: a remote file is fetched only when it is pasted (1.3.1) ──
+#
+# A file copied on another device arrives here as a *pointer*: a history row
+# holding the names, sizes and that device's entry id.  Nothing is downloaded
+# when the offer arrives.  The pull starts on the user's paste action, and ends
+# with the file on this clipboard, the row rewritten into a local file, and an
+# event the window acts on.  Everything below runs against a real history store
+# and a receive directory inside tmp_path, so no test side effect lands anywhere
+# a user would see it.
+
+
+def _wire(msg_type, **payload):
+    """One decoded frame, by payload dict.
+
+    ``frame`` cannot carry a ``kind`` keyword (its own first parameter is named
+    that), and the file family's payloads are exactly the ones that use it.
+    """
+    return decode_message(encode_frame({"msg_type": msg_type, **payload}))
+
+
+def _offer_row(store, files, remote_entry="h-1", source="remote"):
+    """A history row holding one remote-file offer, added directly to the store."""
+    from internal.clipboard import file_ref
+
+    content = ClipboardContent(
+        types={ContentType.FILE_REMOTE: file_ref.offer(remote_entry, files)},
+        source_device=source,
+    )
+    return str(store.add(content))
+
+
+def _offer_files(*names, size=3, kind="file"):
+    return [{"name": name, "size": size, "kind": kind} for name in names]
+
+
+def _serve_file(transport, transfer_id, entry, name, data, *, chunk_size=0, file_size=None):
+    """A peer answering the pull: one offer, then the whole file in one chunk."""
+    payload = {
+        "transfer_id": transfer_id,
+        "file_name": name,
+        "file_size": len(data) if file_size is None else file_size,
+        "kind": "clip_file",
+        "entry": entry,
+    }
+    if chunk_size:
+        payload["chunk_size"] = chunk_size
+    transport.message(_wire("file_request", **payload), "remote")
+    transport.message(
+        _wire(
+            "file_chunk",
+            transfer_id=transfer_id,
+            chunk_index=0,
+            total_chunks=1,
+            data=base64.b64encode(data).decode("ascii"),
+        ),
+        "remote",
+    )
+
+
+def _clip_file_requests(transport):
+    return [
+        msg._raw_payload
+        for _, msg in transport.sent
+        if getattr(msg, "msg_type", "") == "clip_file_request"
+    ]
+
+
+@pytest.fixture
+def paste_rig(rig, tmp_path, monkeypatch):
+    """The LAN rig, plus a real history store and a tmp receive directory."""
+    runtime, pairing, transport = rig[0], rig[1], rig[2]
+    clipboard, events = rig[4], rig[6]
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=True)
+    transport.connected.add("remote")
+    receive_dir = tmp_path / "received"
+    receive_dir.mkdir()
+    # The rig builds its transfer manager with the product's default receive
+    # directory; a test must never write there.
+    monkeypatch.setattr(runtime.file_transfer, "_output_dir", receive_dir)
+    store = HistoryDB(storage_path=str(tmp_path / "paste-history.db"))
+    runtime.set_paste_history(store.remote_file_offer, store.replace_file_remote_with_local)
+    yield {
+        "runtime": runtime,
+        "pairing": pairing,
+        "transport": transport,
+        "clipboard": clipboard,
+        "events": events,
+        "store": store,
+        "receive_dir": receive_dir,
+    }
+    store.close()
+
+
+def test_an_arriving_file_offer_is_not_fetched(paste_rig):
+    """The offer is recorded and nothing else: no request, no disk, no transfer."""
+    from internal.protocol.codec import encode_message
+
+    state = paste_rig
+    runtime, transport = state["runtime"], state["transport"]
+    from internal.clipboard import file_ref
+
+    offer = file_ref.offer("h-1", _offer_files("a.txt"))
+    content = ClipboardContent(
+        types={ContentType.FILE_REMOTE: offer}, source_device="remote"
+    )
+    transport.message(
+        decode_message(encode_message(SyncMessage(content, "m-1", "remote"))), "remote"
+    )
+
+    assert _clip_file_requests(transport) == []
+    assert runtime._pending_pastes == {}
+    assert list(state["receive_dir"].iterdir()) == []
+
+
+def test_preparing_a_paste_asks_the_publisher_for_the_files(paste_rig):
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    entry = _offer_row(store, _offer_files("a.txt"))
+
+    result = runtime.prepare_paste_entry(entry)
+
+    assert result == {"requested": True, "entry_id": entry}
+    assert [payload["entry"] for payload in _clip_file_requests(transport)] == ["h-1"]
+    assert entry in runtime._pending_pastes
+    # Still a pointer until the file arrives.
+    assert store.remote_file_offer(entry) is not None
+    assert events_named(state["events"], "clip_files.paste_ready") == []
+    runtime.cancel_paste_entry(entry)
+
+
+def test_the_complete_paste_writes_the_clipboard_and_rewrites_the_row(paste_rig):
+    from internal.clipboard.format import decode_paths
+
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    clipboard, events = state["clipboard"], state["events"]
+    entry = _offer_row(store, _offer_files("a.txt"))
+    runtime.prepare_paste_entry(entry)
+
+    _serve_file(transport, "t1", "h-1", "a.txt", b"hello")
+
+    saved = state["receive_dir"] / "a.txt"
+    assert saved.read_bytes() == b"hello"
+    written = clipboard.writes[-1]
+    assert decode_paths(written.types[ContentType.FILE]) == [str(saved)]
+    row = store.find_by_id(entry)[1]
+    assert row["content_type"] == "FILE"
+    assert row["source_device"] == "remote"
+    assert runtime._pending_pastes == {}
+    assert runtime._paste_transfers == {}
+    assert events_named(events, "clip_files.paste_ready") == [
+        {"entry_id": entry, "paths": [str(saved)]}
+    ]
+    assert {"id": entry} in events_named(events, "history.changed")
+    # The row is local before the window is told to paste from it, and the
+    # clipboard write was ours, not a local copy: the monitor is suppressed.
+    names = [event["name"] for event in events.since(0)[0]]
+    assert names.index("history.changed") < names.index("clip_files.paste_ready")
+    assert runtime.sync._monitor.suppress_until > time.time()
+    # A second paste pastes the row as a local file: nothing to ask for.
+    with pytest.raises(ApplicationError) as refused:
+        runtime.prepare_paste_entry(entry)
+    assert refused.value.code == "PASTE_NOT_AVAILABLE"
+    assert [payload["entry"] for payload in _clip_file_requests(transport)] == ["h-1"]
+
+
+def test_progress_reports_the_paste_entry_and_the_transfer_list_too(paste_rig):
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    entry = _offer_row(store, _offer_files("a.txt", "b.txt"))
+    runtime.prepare_paste_entry(entry)
+
+    transport.message(
+        _wire(
+            "file_request",
+            transfer_id="t1",
+            file_name="a.txt",
+            file_size=3,
+            kind="clip_file",
+            entry="h-1",
+        ),
+        "remote",
+    )
+
+    active = runtime.transfers()["active"]
+    assert [row["paste_entry"] for row in active] == [entry]
+    progress = events_named(state["events"], "transfer.progress")
+    assert progress == []  # nothing has arrived yet
+    transport.message(
+        _wire(
+            "file_chunk",
+            transfer_id="t1",
+            chunk_index=0,
+            total_chunks=1,
+            data=base64.b64encode(b"aaa").decode("ascii"),
+        ),
+        "remote",
+    )
+    progress = events_named(state["events"], "transfer.progress")
+    assert progress, "the paste transfer produced no progress event"
+    assert progress[-1]["paste_entry"] == entry
+    runtime.cancel_paste_entry(entry)
+
+
+def test_cancelling_removes_the_pending_paste_its_files_and_the_transfer(paste_rig):
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    entry = _offer_row(store, _offer_files("a.txt", "b.txt"))
+    runtime.prepare_paste_entry(entry)
+    _serve_file(transport, "t1", "h-1", "a.txt", b"aaa")
+    saved = state["receive_dir"] / "a.txt"
+    assert saved.exists()
+    # The second file's transfer has been accepted but has sent nothing yet.
+    transport.message(
+        _wire(
+            "file_request",
+            transfer_id="t2",
+            file_name="b.txt",
+            file_size=3,
+            kind="clip_file",
+            entry="h-1",
+        ),
+        "remote",
+    )
+    assert set(runtime._pending_pastes[entry]["transfer_ids"]) == {"t1", "t2"}
+
+    result = runtime.cancel_paste_entry(entry)
+
+    assert result == {"cancelled": 1, "entry_id": entry}
+    assert not saved.exists(), "a cancelled paste must not leave files behind"
+    assert not list(state["receive_dir"].glob(".*.part"))
+    assert runtime._pending_pastes == {}
+    assert runtime._paste_transfers == {}
+    assert events_named(state["events"], "clip_files.paste_failed")[-1] == {
+        "entry_id": entry,
+        "reason": "cancelled",
+    }
+    assert any(
+        getattr(msg, "msg_type", "") == "file_complete"
+        and msg._raw_payload.get("status") == "cancelled"
+        for _, msg in transport.sent
+    ), "the peer was never told the transfer was cancelled"
+
+
+def test_a_peer_refusal_fails_the_paste_with_its_reason(paste_rig):
+    state = paste_rig
+    runtime, store = state["runtime"], state["store"]
+    entry = _offer_row(store, _offer_files("a.txt"))
+    runtime.prepare_paste_entry(entry)
+
+    runtime._receive(_wire("clip_file_denied", entry="h-1", reason="gone"), "remote")
+
+    assert runtime._pending_pastes == {}
+    assert events_named(state["events"], "clip_files.paste_failed") == [
+        {"entry_id": entry, "reason": "gone"}
+    ]
+    # The plain 下载 listener keeps its own event shape.
+    assert {"device_id": "remote", "entry_id": "h-1", "reason": "gone"} in events_named(
+        state["events"], "clip.file.denied"
+    )
+
+
+def test_a_failed_transfer_fails_the_paste_with_the_transfer_status(paste_rig):
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    entry = _offer_row(store, _offer_files("a.txt"))
+    runtime.prepare_paste_entry(entry)
+
+    # The offer promised 3 bytes and one chunk arrives carrying 1: the receive
+    # side refuses it as a size mismatch and the paste must not wait for the
+    # stall timer.
+    _serve_file(transport, "t1", "h-1", "a.txt", b"x", file_size=3)
+
+    assert runtime._pending_pastes == {}
+    assert events_named(state["events"], "clip_files.paste_failed") == [
+        {"entry_id": entry, "reason": "error_size_mismatch"}
+    ]
+    assert events_named(state["events"], "clip_files.paste_ready") == []
+
+
+def test_a_peer_cancelling_the_transfer_fails_the_paste(paste_rig):
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    entry = _offer_row(store, _offer_files("a.txt", "b.txt"))
+    runtime.prepare_paste_entry(entry)
+    transport.message(
+        _wire(
+            "file_request",
+            transfer_id="t1",
+            file_name="a.txt",
+            file_size=3,
+            kind="clip_file",
+            entry="h-1",
+        ),
+        "remote",
+    )
+
+    transport.message(_wire("file_complete", transfer_id="t1", status="cancelled"), "remote")
+
+    assert runtime._pending_pastes == {}
+    assert events_named(state["events"], "clip_files.paste_failed") == [
+        {"entry_id": entry, "reason": "cancelled"}
+    ]
+
+
+def test_a_paste_over_the_confirmation_threshold_asks_first(paste_rig):
+    state = paste_rig
+    runtime, store = state["runtime"], state["store"]
+    runtime.config.confirm_large_file_mb = 1
+    entry = _offer_row(store, _offer_files("big.bin", size=2 * 1024 * 1024))
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.prepare_paste_entry(entry)
+
+    assert refused.value.code == "PASTE_CONFIRM_REQUIRED"
+    assert refused.value.details["total_bytes"] == 2 * 1024 * 1024
+    assert refused.value.details["threshold_bytes"] == 1024 * 1024
+    assert runtime._pending_pastes == {}
+    # The reader's "yes" is what lets it through, and the pull then starts.
+    assert runtime.prepare_paste_entry(entry, confirmed=True)["requested"] is True
+    assert _clip_file_requests(state["transport"]) != []
+    runtime.cancel_paste_entry(entry)
+
+
+def test_a_paste_over_the_configured_file_limit_is_refused(paste_rig):
+    state = paste_rig
+    runtime, store = state["runtime"], state["store"]
+    runtime.config.max_file_mb = 1
+    runtime.file_transfer.set_file_size_policy(1)
+    entry = _offer_row(store, _offer_files("big.bin", size=2 * 1024 * 1024))
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.prepare_paste_entry(entry)
+
+    assert refused.value.code == "PASTE_TOO_LARGE"
+    assert runtime._pending_pastes == {}
+
+
+def test_a_relay_paste_over_its_own_cap_is_refused(paste_rig):
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    transport.connected.discard("remote")  # only the relay route is left
+    runtime.config.relay_paste_max_mb = 1
+    entry = _offer_row(store, _offer_files("big.bin", size=2 * 1024 * 1024))
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.prepare_paste_entry(entry)
+
+    assert refused.value.code == "PASTE_RELAY_TOO_LARGE"
+    assert runtime._pending_pastes == {}
+
+
+def test_an_offer_whose_size_was_unknown_is_checked_when_the_file_arrives(paste_rig):
+    """A folder carries size 0 in the offer; its archive size is only known on
+    the transfer that carries it, so that is where the limit is applied."""
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    runtime.config.max_file_mb = 1
+    runtime.file_transfer.set_file_size_policy(1)
+    entry = _offer_row(store, [{"name": "quarterly", "size": 0, "kind": "dir"}])
+    runtime.prepare_paste_entry(entry)
+
+    transport.message(
+        _wire(
+            "file_request",
+            transfer_id="t1",
+            file_name="quarterly.zip",
+            file_size=2 * 1024 * 1024,
+            kind="clip_file",
+            entry="h-1",
+        ),
+        "remote",
+    )
+
+    rejects = [
+        msg._raw_payload
+        for _, msg in transport.sent
+        if getattr(msg, "msg_type", "") == "file_reject"
+    ]
+    assert rejects and rejects[-1]["reason"] == "too_large"
+    assert runtime._pending_pastes == {}
+    assert events_named(state["events"], "clip_files.paste_failed")[-1] == {
+        "entry_id": entry,
+        "reason": "too_large",
+    }
+
+
+def test_a_relayed_archive_over_the_relay_cap_is_refused_on_arrival(paste_rig):
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    runtime.config.relay_paste_max_mb = 1
+    entry = _offer_row(store, [{"name": "quarterly", "size": 0, "kind": "dir"}])
+    runtime.prepare_paste_entry(entry)
+
+    transport.message(
+        _wire(
+            "file_request",
+            transfer_id="t1",
+            file_name="quarterly.zip",
+            file_size=2 * 1024 * 1024,
+            kind="clip_file",
+            entry="h-1",
+            chunk_size=1000,  # a relay-sized cut is how the route is named
+        ),
+        "remote",
+    )
+
+    rejects = [
+        msg._raw_payload
+        for _, msg in transport.sent
+        if getattr(msg, "msg_type", "") == "file_reject"
+    ]
+    assert rejects and rejects[-1]["reason"] == "relay_too_large"
+    assert runtime._pending_pastes == {}
+    assert events_named(state["events"], "clip_files.paste_failed")[-1] == {
+        "entry_id": entry,
+        "reason": "relay_too_large",
+    }
+
+
+def test_a_paste_to_a_device_that_is_gone_is_refused_at_once(paste_rig):
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    transport.connected.discard("remote")
+    entry = _offer_row(store, _offer_files("a.txt"))
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.prepare_paste_entry(entry)
+
+    assert refused.value.code == "NOT_CONNECTED"
+    assert runtime._pending_pastes == {}, "a failed ask must not leave a pending paste"
+
+
+def test_a_paste_from_a_device_that_is_no_longer_paired_is_refused(paste_rig):
+    state = paste_rig
+    runtime, pairing, store = state["runtime"], state["pairing"], state["store"]
+    pairing.add_peer("remote", "Remote", pairing.get_peer_certificate("remote"), paired=False)
+    entry = _offer_row(store, _offer_files("a.txt"))
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.prepare_paste_entry(entry)
+
+    assert refused.value.code == "NOT_PAIRED"
+    assert runtime._pending_pastes == {}
+
+
+def test_a_paste_without_a_store_behind_it_is_refused(paste_rig):
+    state = paste_rig
+    runtime = state["runtime"]
+    runtime.set_paste_history(None, None)
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.prepare_paste_entry("12")
+
+    assert refused.value.code == "PASTE_NOT_AVAILABLE"
+
+
+def test_a_clipboard_write_failure_does_not_announce_a_ready_paste(paste_rig):
+    """The files are here but the paste cannot be completed: say so, no ready."""
+    state = paste_rig
+    runtime, transport = state["runtime"], state["transport"]
+    store, clipboard, events = state["store"], state["clipboard"], state["events"]
+    entry = _offer_row(store, _offer_files("a.txt"))
+    runtime.prepare_paste_entry(entry)
+    clipboard.success = False
+
+    _serve_file(transport, "t1", "h-1", "a.txt", b"hello")
+
+    assert events_named(events, "clip_files.paste_ready") == []
+    assert events_named(events, "clip_files.paste_failed") == [
+        {"entry_id": entry, "reason": "clipboard_write_failed"}
+    ]
+    # The row is still the pointer it was: there is nothing local to paste yet.
+    assert store.remote_file_offer(entry) is not None
+    assert not (state["receive_dir"] / "a.txt").exists()
+
+
+def test_a_row_that_cannot_be_rewritten_is_reported_rather_than_announced(paste_rig):
+    """The clipboard is right but the row still points at the peer: no ready.
+
+    A window told "ready" here would copy a remote row and inject a paste that
+    has nothing local to hand the target application.
+    """
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    events = state["events"]
+    entry = _offer_row(store, _offer_files("a.txt"))
+    runtime.set_paste_history(store.remote_file_offer, lambda _entry, _paths: None)
+    runtime.prepare_paste_entry(entry)
+
+    _serve_file(transport, "t1", "h-1", "a.txt", b"hello")
+
+    assert events_named(events, "clip_files.paste_ready") == []
+    assert events_named(events, "clip_files.paste_failed") == [
+        {"entry_id": entry, "reason": "history_update_failed"}
+    ]
+    assert (state["receive_dir"] / "a.txt").exists(), "the downloaded file stays for a manual paste"
+
+
+def test_zero_relay_cap_means_no_extra_relay_limit(paste_rig):
+    """0 follows the same convention as the other two limits: no cap."""
+    state = paste_rig
+    runtime, transport, store = state["runtime"], state["transport"], state["store"]
+    transport.connected.discard("remote")
+    runtime.config.relay_paste_max_mb = 0
+    entry = _offer_row(store, _offer_files("big.bin", size=2 * 1024 * 1024))
+
+    with pytest.raises(ApplicationError) as refused:
+        runtime.prepare_paste_entry(entry)
+
+    # The refusal is the missing route, not the relay ceiling.
+    assert refused.value.code == "NOT_CONNECTED"
+    assert runtime._pending_pastes == {}
+
+
+def test_a_lowered_file_limit_applies_to_the_next_transfer(paste_rig):
+    state = paste_rig
+    runtime = state["runtime"]
+    assert runtime.file_transfer.max_file_bytes() > 1024 * 1024
+    # The settings path mirrors the new value into the live config before the
+    # appliers run (see Application._on_settings_change), so this test does the
+    # same rather than calling the applier with a config that disagrees.
+    runtime.config.max_file_mb = 1
+    runtime.apply_settings({"max_file_mb": 1})
+    assert runtime.file_transfer.max_file_bytes() == 1024 * 1024
+

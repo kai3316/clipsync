@@ -78,7 +78,34 @@ def is_app_allowed(app_info: dict | None, cfg) -> bool:
       - ``app_filter_enabled`` (bool)
       - ``app_filter_mode`` ("blacklist" | "whitelist")
       - ``app_filter_list`` (list[str] of process-name patterns)
+      - ``source_exclusion_patterns`` (list[str] of substrings; optional)
+
+    The two rules are separate on purpose and both run: the app filter is a
+    blacklist/whitelist over process names, while the source-exclusion list is
+    a quick "never record anything from an application whose name/title says
+    this" rule.  An application named by an exclusion substring is refused even
+    when the whitelist would admit it — the exclusion is the stricter of the
+    two, and a defense that a second switch can turn back off is not one.
+
+    The exclusion matches anywhere in the process name, display name or window
+    title, case-insensitively: a password manager's window title is often the
+    only place its name appears (the process may be a generic helper), which is
+    why the whole label is searched and not just the executable name.
     """
+    if app_info:
+        patterns = [
+            pattern.lower()
+            for pattern in (getattr(cfg, "source_exclusion_patterns", None) or [])
+            if isinstance(pattern, str) and pattern
+        ]
+        if patterns:
+            labels = [
+                str(app_info.get(key) or "").lower()
+                for key in ("process", "name", "title")
+            ]
+            if any(pattern in label for pattern in patterns for label in labels):
+                return False
+
     if not cfg.app_filter_enabled:
         return True
 

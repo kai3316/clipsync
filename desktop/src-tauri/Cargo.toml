@@ -49,6 +49,9 @@ windows = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    # Paste injection (src/paste.rs): SendInput + foreground-window hand-off.
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 winreg = "0.10"
 

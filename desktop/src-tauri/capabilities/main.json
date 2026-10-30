@@ -143,6 +143,11 @@
     "allow-internet-pairing-test",
     "allow-internet-pairing-enter",
     "allow-internet-pairing-rename",
-    "allow-internet-pairing-unpair"
+    "allow-internet-pairing-unpair",
+    "allow-inject-paste",
+    "allow-hide-main-and-paste",
+    "allow-open-quick-paste",
+    "allow-prepare-paste-entry",
+    "allow-cancel-paste-entry"
   ]
 }

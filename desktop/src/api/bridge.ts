@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { t } from "../i18n";
-import type { AppStatus, ChatMessagesPage, ChatSessionsPage, Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticsReport, Favorite, FavoritesPage, HistoryPage, HistoryPreview, InternetPairingStatus, Overview, RelayTestResult, Settings, SidecarEvent, TransfersPage, UpdateCheckResult, UpdateDownloadResult, UpdateInstallResult, UpdateOpenFolderResult, UpdateStatusResult } from "./types";
+import type { AppStatus, ChatMessagesPage, ChatSessionsPage, Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticsReport, Favorite, FavoritesPage, HistoryPage, HistoryPreview, InternetPairingStatus, Overview, QuickPasteChooseResult, QuickPasteSettings, RelayTestResult, Settings, SidecarEvent, TransfersPage, UpdateCheckResult, UpdateDownloadResult, UpdateInstallResult, UpdateOpenFolderResult, UpdateStatusResult } from "./types";
 
 export function inDesktop(): boolean {
   return isTauri();
@@ -352,6 +352,66 @@ export const bridge = {
   // Local clipboard only.  Different from pushText, which also sends the text
   // to every paired device: the context menu copies things that are not clips.
   copyText: (text: string) => command<{ copied: boolean }>("copy_text", { text }),
+  /**
+   * Type the system paste chord into whatever application has the focus.
+   *
+   * The second half of a hotkey that pastes: the sidecar has already put the
+   * clip on the clipboard, and the host waits for the keypress that took the
+   * shortcut to finish (~90 ms) before it types Ctrl/Cmd+V.  It rejects with
+   * `PASTE_FAILED` when the OS refused the injection, and the clipboard still
+   * holds the clip — that is what makes "copied, press it yourself" the honest
+   * answer there rather than an error.
+   */
+  injectPaste: (options: { delayMs?: number } = {}) =>
+    command<{ ok: true }>("inject_paste", options.delayMs === undefined ? {} : { delayMs: options.delayMs }),
+  /**
+   * Hide the main window first, then paste into the application behind it.
+   *
+   * The history row's 「粘贴到当前应用」: a paste aimed at the window itself
+   * would land in the window, so the host steps out of the way and only then
+   * types the chord.  Rejects with `PASTE_FAILED` after re-showing this window,
+   * so the fallback sentence is visible.
+   */
+  hideMainAndPaste: () => command<{ ok: true }>("hide_main_and_paste"),
+  // ── Quick paste: the overlay window's own commands (label `quick-paste`) ──
+  /** Ask the host to open the quick-paste overlay.  Main window only; the
+   *  tray and the hotkey reach the same window through the host itself. */
+  openQuickPaste: () => command<{ ok: true }>("open_quick_paste"),
+  /** The overlay's search.  Same page shape as `list_history`, and the same
+   *  `kind` vocabulary (`all`/`text`/`image`/`file`/`link`). */
+  quickPasteList: (query: string, kind: string, limit: number) =>
+    command<HistoryPage>("quick_paste_list", { query, kind, limit }),
+  /** Take one row: the host writes the clipboard, hides the overlay and pastes
+   *  into the application that had the focus.  `plain` is the same text-only
+   *  form `copyHistory`'s flag asks for.  A paste failure comes back as a value
+   *  rather than a rejection — the clipboard write did land, and the overlay is
+   *  re-shown to say why — so the caller has to read `ok`. */
+  quickPasteChoose: (entryId: string, plain: boolean) =>
+    command<QuickPasteChooseResult>("quick_paste_choose", { entryId, plain }),
+  /** Hide the overlay without choosing anything (Esc, or the focus leaving). */
+  quickPasteClose: () => command<{ ok: true }>("quick_paste_close"),
+  /** The overlay's bootstrap: the language to render in and the stored theme
+   *  (the window is a second document with no `App.vue` to have received
+   *  either), plus the auto-paste switch for callers that need to word what a
+   *  hotkey will do. */
+  quickPasteSettings: () => command<QuickPasteSettings>("quick_paste_settings"),
+  // ── On-demand paste of a remote-file row (1.3.1) ──────────────────────
+  /** Start fetching the files behind a remote-file history row, ready to paste.
+   *
+   *  The user's paste action is the only thing that starts a transfer; the
+   *  answer is only "the fetch started" — `clip_files.paste_ready` /
+   *  `clip_files.paste_failed` are the outcomes.  Rejects with
+   *  `PASTE_CONFIRM_REQUIRED` for a paste over the confirm threshold, which the
+   *  caller answers by asking and calling again with `confirmed: true`; the
+   *  other refusals (`PASTE_TOO_LARGE`, `PASTE_RELAY_TOO_LARGE`,
+   *  `PASTE_NOT_AVAILABLE`, `NOT_CONNECTED`, `NOT_PAIRED`) end it before any
+   *  transfer leaves.  Authorised for both the main window and the overlay. */
+  preparePasteEntry: (entryId: string, confirmed = false) =>
+    command<Record<string, unknown>>("prepare_paste_entry", { entryId, confirmed }),
+  /** Abandon a started paste: cancels whatever it had moving and reports
+   *  `clip_files.paste_failed` with reason `cancelled`. */
+  cancelPasteEntry: (entryId: string) =>
+    command<{ cancelled?: number; entry_id?: string }>("cancel_paste_entry", { entryId }),
   overview: () => command<Overview>("get_overview"),
   readHistoryText: (entryId: string) =>
     command<{ id: string; text: string; truncated: boolean }>("read_history_text", { entryId }),
@@ -445,6 +505,15 @@ export const bridge = {
   onHotkey: async (handler: (action: string) => void): Promise<UnlistenFn> => {
     if (!inDesktop()) return () => {};
     return listen<string>("hotkey", ({ payload }) => handler(payload));
+  },
+  // The sidecar's own event stream, without the state channel `subscribe` also
+  // needs: the quick-paste overlay is a second window and only a handful of
+  // events are forwarded to it (transfer progress and paste outcomes), so it
+  // listens to this one name rather than subscribing to a lifecycle it does not
+  // have a bar for.
+  onSidecarEvent: async (handler: (event: SidecarEvent) => void): Promise<UnlistenFn> => {
+    if (!inDesktop()) return () => {};
+    return listen<SidecarEvent>("sidecar:event", ({ payload }) => handler(payload));
   },
   restartApp: () => command("restart_app"),
   // Relaunches only the background process; the window and its state survive.

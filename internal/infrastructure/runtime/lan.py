@@ -23,7 +23,12 @@ from internal.clipboard.clipboard import strip_rich_formats
 from internal.clipboard.file_ref import MAX_OFFER_ENTRIES
 from internal.clipboard.file_ref import summary as file_summary
 from internal.clipboard.filter import ContentFilter
-from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
+from internal.clipboard.format import (
+    ClipboardContent,
+    ContentType,
+    SyncMessage,
+    encode_paths,
+)
 from internal.clipboard.platform import create_monitor, create_reader, create_writer
 from internal.clipboard.source_tracker import is_app_allowed
 from internal.config.config import (
@@ -38,6 +43,7 @@ from internal.data.logs import (
     stage_collected_log,
     write_share_copy,
 )
+from internal.fsutil import mask_path as _mask_path
 from internal.infrastructure.persistence.relay_delivery import RelayDeliveryQueue
 from internal.infrastructure.runtime.internet_pairing import (
     InternetPairingService,
@@ -60,9 +66,17 @@ from internal.protocol.codec import (
 from internal.security.fingerprint import sas_code
 from internal.security.pairing import PAIRING_STATUS_PAIRED, PAIRING_TIMEOUT, fingerprint_short
 from internal.sync.ai_config import AIConfigManager
-from internal.sync.file_transfer import MAX_FILE_SIZE, FileTransferManager
+from internal.sync.file_transfer import (
+    FileTooLargeError,
+    FileTransferManager,
+)
 from internal.sync.manager import SyncManager
-from internal.sync.nearby_chat import CHAT_MSG_TYPES, ChatFileTooLargeError, ChatManager
+from internal.sync.nearby_chat import (
+    CHAT_MAX_FILE_SIZE,
+    CHAT_MSG_TYPES,
+    ChatFileTooLargeError,
+    ChatManager,
+)
 from internal.system import updater
 from internal.system.archive import ArchiveEmptyError, create_archive
 from internal.system.update_service import _verdict_is_rejection
@@ -101,6 +115,15 @@ logger = logging.getLogger(__name__)
 # peer preparing a folder archive is still inside it, short enough that a
 # request abandoned by a crash stops being an open door.
 CLIP_FILE_WINDOW = 300.0
+
+# How long an on-demand paste may go without any progress at all before it is
+# reported failed.  Refreshed by every transfer it starts and every file that
+# lands, so a large paste over a slow relay is not cut off while it is moving —
+# what this bounds is a request that was dropped on the floor (a peer that
+# accepted the connection and then never answered).  Bounded for the same reason
+# every ledger here is: a paste abandoned by a crash must not pin a timer and a
+# progress panel forever.
+PASTE_STALL_TIMEOUT = 240.0
 
 # How long an update request licenses the answering peer to send the blob.  The
 # same idea one step tighter: an update asset is tens of megabytes, so the
@@ -611,6 +634,10 @@ class LanRuntime:
         )
         self.sync.set_enabled(False)
         self.sync.set_app_filter(lambda app: is_app_allowed(app, self.config))
+        # The recording rules (password-manager marker, pre-launch content, the
+        # non-file size cap) read the live Config on every capture, the same way
+        # the filter above does; hand the manager the object they read.
+        self.sync.set_config(config)
         self.sync.on_send = lambda msg: self._background(self._on_local_sync, msg)
         # Asked about a copy identical to a recent one: the manager drops those,
         # which is right for the two loop cases it exists for and wrong for the
@@ -623,6 +650,7 @@ class LanRuntime:
             config.device_id,
             output_dir=getattr(config, "file_receive_dir", "") or None,
             transfer_timeout=config.transfer_timeout,
+            max_file_mb=getattr(config, "max_file_mb", 0),
         )
         # Control frames (file_request/file_ack/complete/...) have to name this
         # machine when they cross the relay: unlike a LAN frame they arrive with
@@ -668,6 +696,11 @@ class LanRuntime:
         # A `log` blob is the same bargain: this machine asked that peer for its
         # log, and the asking is the only thing that lets the answer in.
         self.file_transfer.set_log_guard(self._log_outstanding_for)
+        # The on-demand paste's two hooks: one vetoes a `clip_file` offer the
+        # paste cannot accept (its own relay or size ceiling), one ties an
+        # accepted transfer id to the paste waiting on it.
+        self.file_transfer.set_on_incoming_filter(self._paste_incoming_filter)
+        self.file_transfer.set_on_clip_file_accepted(self._note_clip_file_transfer)
         # An ordinary file is the one kind with nothing written down on this
         # side to license it, so the setting decides: on, it is taken on arrival
         # like a chat attachment; off, it raises the accept prompt and the
@@ -736,6 +769,21 @@ class LanRuntime:
         # `clip_file` label on its own frames — see
         # `FileTransferManager.set_clip_file_guard`.
         self._clip_file_outstanding: dict[str, tuple[str, float, str]] = {}
+        # On-demand paste (1.3.1): local history row id -> the fetch in flight
+        # for it.  A remote file row is only a pointer until the user pastes it;
+        # calling `prepare_paste_entry` opens one of these, asks the peer for the
+        # files, and closes it when every file has arrived (handed to the
+        # clipboard + the row rewritten) or the paste fails/cancels.  Set by the
+        # application layer, which owns the history store: one callback reads a
+        # row's offer, one rewrites the row once the files are local.
+        self._pending_pastes: dict[str, dict] = {}
+        # transfer_id -> the local entry id of the paste that started it.  The
+        # transfer manager tells us the id when it accepts an offer (see
+        # `set_on_clip_file_accepted`), and this is how a failed/cancelled
+        # transfer is traced back to the paste waiting on it.
+        self._paste_transfers: dict[str, str] = {}
+        self._paste_offer_lookup = None
+        self._paste_row_replace = None
         # Peers whose log is currently being read and sent, so one peer cannot
         # start a thread per frame.  See `_on_log_request`.
         self._log_serving: set[str] = set()
@@ -944,6 +992,11 @@ class LanRuntime:
                 "eta": format_eta(item.get("eta_seconds", 0)),
                 "path": item.get("saved_path") or item.get("source_path") or "",
                 "reason": item.get("status", "") if not success else "",
+                # Additive: which on-demand paste this transfer belongs to (its
+                # local entry id), "" for every ordinary transfer.  The paste's
+                # progress panel filters the live list on it instead of guessing
+                # which downloads are its own.
+                "paste_entry": self._paste_transfers.get(item.get("transfer_id", ""), ""),
             }
         raw_speed = self.file_transfer.get_speed_test() or {}
         sent = int(raw_speed.get("chunks_sent", 0) or 0)
@@ -1055,47 +1108,53 @@ class LanRuntime:
         # is its source, so the row can be sent again from it as it stands, and
         # the call stays exactly what every caller already made.
         extra = {"origin_paths": picked} if archive else {}
-        if not device_id:
-            transfer_id = self.file_transfer.send_file(
-                subject, self.transport.broadcast, **extra
-            )
-        else:
-            pid = self._resolve(device_id)
-            if pid in (self.transport.get_connected_peers() or []):
-                # The LAN path: this build's chunk size and no relay pacing.
-                send_fn = lambda data, pid=pid: self.transport.send_to_peer(pid, data)  # noqa: E731
-                chunk_size = 0
-            elif self._peer_is_internet_reachable(pid):
-                # Files to an internet-paired device cross the relay, cut to the
-                # broker's size.  The protocol already supports this -- the
-                # receiver slices by the `chunk_size` in the offer and its own
-                # replies ride the route-aware closure -- but the transfers page
-                # used to hide these devices (and this call raised NOT_CONNECTED
-                # for them), so a user with only a code pairing had to send the
-                # file as a chat attachment instead.
-                send_fn = lambda data, pid=pid: self._relay_publish_to_peer(data, pid)  # noqa: E731
-                chunk_size = ChatManager.relay_chunk_for(
-                    self.config.relay_max_message_bytes
-                )
-                # The chunk itself has to fit one relay message beside its
-                # binary header; the same narrowing the chat chunk sender does.
-                chunk_size = min(
-                    chunk_size, max(1, self._relay_frame_limit() - BINARY_HEADER_SIZE)
+        try:
+            if not device_id:
+                transfer_id = self._send_file_or_refuse(
+                    subject, self.transport.broadcast, **extra
                 )
             else:
-                if archive:
-                    Path(archive).unlink(missing_ok=True)
-                raise ApplicationError("NOT_CONNECTED", "Device is not connected")
-            send_kwargs = dict(extra)
-            if chunk_size:
-                # Only when the offer is cut for the relay: a fake/older
-                # send_file (and the LAN path) keeps the exact call it had.
-                send_kwargs["chunk_size"] = chunk_size
-            transfer_id = self.file_transfer.send_file(
-                subject,
-                send_fn,
-                **send_kwargs,
-            )
+                pid = self._resolve(device_id)
+                if pid in (self.transport.get_connected_peers() or []):
+                    # The LAN path: this build's chunk size and no relay pacing.
+                    send_fn = lambda data, pid=pid: self.transport.send_to_peer(pid, data)  # noqa: E731
+                    chunk_size = 0
+                elif self._peer_is_internet_reachable(pid):
+                    # Files to an internet-paired device cross the relay, cut to the
+                    # broker's size.  The protocol already supports this -- the
+                    # receiver slices by the `chunk_size` in the offer and its own
+                    # replies ride the route-aware closure -- but the transfers page
+                    # used to hide these devices (and this call raised NOT_CONNECTED
+                    # for them), so a user with only a code pairing had to send the
+                    # file as a chat attachment instead.
+                    send_fn = lambda data, pid=pid: self._relay_publish_to_peer(data, pid)  # noqa: E731
+                    chunk_size = ChatManager.relay_chunk_for(
+                        self.config.relay_max_message_bytes
+                    )
+                    # The chunk itself has to fit one relay message beside its
+                    # binary header; the same narrowing the chat chunk sender does.
+                    chunk_size = min(
+                        chunk_size, max(1, self._relay_frame_limit() - BINARY_HEADER_SIZE)
+                    )
+                else:
+                    raise ApplicationError("NOT_CONNECTED", "Device is not connected")
+                send_kwargs = dict(extra)
+                if chunk_size:
+                    # Only when the offer is cut for the relay: a fake/older
+                    # send_file (and the LAN path) keeps the exact call it had.
+                    send_kwargs["chunk_size"] = chunk_size
+                transfer_id = self._send_file_or_refuse(
+                    subject,
+                    send_fn,
+                    **send_kwargs,
+                )
+        except Exception:
+            # A send refused before it started (a size mistake, a peer that is
+            # already gone) must not leak the temporary archive this call built:
+            # nothing will ever reclaim it, because no transfer exists to end.
+            if archive:
+                Path(archive).unlink(missing_ok=True)
+            raise
         if archive:
             if transfer_id:
                 with self._archive_lock:
@@ -1105,6 +1164,20 @@ class LanRuntime:
                 # to reclaim it: the panel dropped the archive here too.
                 Path(archive).unlink(missing_ok=True)
         return transfer_id
+
+    def _send_file_or_refuse(self, subject, send_fn, **kwargs):
+        """``send_file`` with a size refusal the caller can actually show.
+
+        The transfer manager raises :class:`FileTooLargeError` before an offer
+        goes out, naming the file and the ceiling.  ``_command`` folds every
+        other exception into one "LAN operation failed" sentence, which names
+        neither the file nor the limit -- so the translation happens here, right
+        where the send is started, and the code travels to the window.
+        """
+        try:
+            return self.file_transfer.send_file(subject, send_fn, **kwargs)
+        except FileTooLargeError as error:
+            raise ApplicationError("FILE_TOO_LARGE", str(error)) from None
 
     def transfer_action(self, action, transfer_id):
         def run():
@@ -1145,7 +1218,7 @@ class LanRuntime:
                     (lambda data: self.transport.send_to_peer(peer_id, data))
                     if peer_id else self.transport.broadcast
                 )
-                return self.file_transfer.send_file(entry["source_path"], send_fn)
+                return self._send_file_or_refuse(entry["source_path"], send_fn)
             raise ApplicationError("INVALID_ARGUMENT", "Unknown transfer action")
         # Blocking: a retry re-archives its selection, and that is the slow half
         # of this callback -- the other actions answer immediately.
@@ -1375,6 +1448,19 @@ class LanRuntime:
         """
         self._clip_file_source = source
 
+    def set_paste_history(self, offer_lookup, row_replace) -> None:
+        """Set the two history callbacks an on-demand paste needs.
+
+        *offer_lookup(entry_id)* answers the remote-file offer a local row holds
+        (or ``None``), and *row_replace(entry_id, paths)* rewrites that row from
+        "a file on another device" into "these local files" once the fetch has
+        landed.  Both are the store's business — the runtime never touches a
+        row's payloads — and both are optional: a runtime with no store wired
+        answers every paste as unavailable instead of guessing at a row.
+        """
+        self._paste_offer_lookup = offer_lookup
+        self._paste_row_replace = row_replace
+
     def _clip_file_outstanding_for(
         self, device_id: str, entry_id: str, request_id: str = ""
     ) -> bool:
@@ -1530,6 +1616,431 @@ class LanRuntime:
 
         return self._command(run)
 
+    # ── on-demand paste (1.3.1) ──────────────────────────────────────────
+    def prepare_paste_entry(self, entry_id, confirmed=False):
+        """Fetch the files behind a remote-file history row, ready to paste.
+
+        The user's paste action, and the only thing that starts a pull: an
+        arriving file offer is recorded as a row and nothing more.  This asks
+        the device that published it for the files (the same request a 下载
+        makes), collects them as they land, and — once the whole selection is
+        here — puts them on the clipboard and rewrites the row into a local
+        file.  The answer is only "the fetch started": success and failure
+        arrive as ``clip_files.paste_ready`` / ``clip_files.paste_failed``.
+
+        *confirmed* carries the reader's answer to the large-paste question the
+        host asked after a ``PASTE_CONFIRM_REQUIRED`` refusal; it is not a
+        licence to skip the size limits, only to skip that question.
+        """
+        return self._command(lambda: self._prepare_paste_entry(entry_id, confirmed))
+
+    def cancel_paste_entry(self, entry_id):
+        """Abandon an on-demand paste, cleaning up whatever it had started."""
+        return self._command(lambda: self._cancel_paste_entry(entry_id))
+
+    def _prepare_paste_entry(self, entry_id, confirmed):
+        entry_key = str(entry_id or "")
+        if not entry_key:
+            raise ApplicationError("INVALID_ARGUMENT", "No entry to paste")
+        with self._lock:
+            if entry_key in self._pending_pastes:
+                # The same row pressed twice is one fetch.  A second ask would
+                # put a second transfer for every file on the wire, and the
+                # later one to land would collide with the file the first paste
+                # is about to hand to the clipboard.
+                return {"requested": True, "entry_id": entry_key}
+        offer = self._paste_offer_lookup(entry_key) if self._paste_offer_lookup else None
+        if not offer:
+            raise ApplicationError(
+                "PASTE_NOT_AVAILABLE",
+                "This entry is not a file on another device",
+            )
+        device = str(offer.get("source_device") or "")
+        remote_entry = str(offer.get("offer_entry") or "")
+        files = offer.get("files") or []
+        if not device or not remote_entry or not files:
+            raise ApplicationError(
+                "PASTE_NOT_AVAILABLE",
+                "This entry is not a readable file offer",
+            )
+        total_bytes = sum(int(item.get("size") or 0) for item in files)
+
+        # Two policy checks that can answer before anything leaves this machine.
+        # Both are per-file/size facts the offer already names, so a refusal here
+        # costs a click instead of a transfer that would be refused on arrival.
+        max_bytes = self.file_transfer.max_file_bytes()
+        oversized = next(
+            (item for item in files if int(item.get("size") or 0) > max_bytes), None
+        )
+        if oversized is not None:
+            raise ApplicationError(
+                "PASTE_TOO_LARGE",
+                f"{oversized.get('name') or 'A file'} exceeds the "
+                f"{max_bytes // (1024 ** 2)} MB file size limit",
+            )
+        try:
+            lan_route = (self._resolve(device) or device) in (
+                self.transport.get_connected_peers() or []
+            )
+        except Exception:
+            lan_route = False
+        relay_mb = int(getattr(self.config, "relay_paste_max_mb", 0) or 0)
+        if not lan_route and relay_mb > 0 and total_bytes > relay_mb * 1024 * 1024:
+            raise ApplicationError(
+                "PASTE_RELAY_TOO_LARGE",
+                f"This paste is {total_bytes // (1024 ** 2)} MB, over the "
+                f"{relay_mb} MB limit for pasting over the internet relay",
+            )
+        confirm_mb = int(getattr(self.config, "confirm_large_file_mb", 0) or 0)
+        if confirm_mb > 0 and not confirmed and total_bytes > confirm_mb * 1024 * 1024:
+            # The size rides along as a machine-readable fact: the window has to
+            # put a number in its question, and a sentence it would have to parse
+            # is not a contract.
+            raise ApplicationError(
+                "PASTE_CONFIRM_REQUIRED",
+                f"This paste is {total_bytes // (1024 ** 2)} MB and needs confirmation",
+                details={
+                    "total_bytes": total_bytes,
+                    "threshold_bytes": confirm_mb * 1024 * 1024,
+                },
+            )
+
+        pending = {
+            "entry_id": entry_key,
+            "device": self._resolve(device) or device,
+            "remote_entry": remote_entry,
+            "expected": len(files),
+            "paths": [],
+            "transfer_ids": [],
+            "timer": None,
+            "relay": not lan_route,
+            "total_bytes": total_bytes,
+            "deadline": time.monotonic() + PASTE_STALL_TIMEOUT,
+        }
+        # Registered *before* the ask leaves: the answer can arrive on the same
+        # connection and be accepted before this method gets another line.
+        with self._lock:
+            self._pending_pastes[entry_key] = pending
+            self._arm_paste_timer_locked(entry_key)
+        try:
+            requested = self.request_entry_files(device, remote_entry)
+        except Exception:
+            with self._lock:
+                self._pending_pastes.pop(entry_key, None)
+                timer = pending.get("timer")
+                pending["timer"] = None
+            if timer is not None:
+                timer.cancel()
+            raise
+        return {
+            "requested": bool(requested.get("requested", True)),
+            "entry_id": entry_key,
+        }
+
+    def _cancel_paste_entry(self, entry_id):
+        entry_key = str(entry_id or "")
+        with self._lock:
+            pending = self._pending_pastes.pop(entry_key, None)
+            timer = pending.get("timer") if pending is not None else None
+            if pending is not None:
+                pending["timer"] = None
+        if pending is None:
+            return {"cancelled": 0, "entry_id": entry_key}
+        if timer is not None:
+            timer.cancel()
+        cancelled = self._cancel_pending_transfers(pending)
+        self._discard_pasted_files(pending)
+        logger.info("On-demand paste cancelled: entry %s", entry_key[:8])
+        self._publish("clip_files.paste_failed", {"entry_id": entry_key, "reason": "cancelled"})
+        return {"cancelled": cancelled, "entry_id": entry_key}
+
+    def _arm_paste_timer_locked(self, entry_key: str) -> None:
+        """(Re)arm the stall timer for one pending paste.  Caller holds _lock."""
+        pending = self._pending_pastes.get(entry_key)
+        if pending is None:
+            return
+        previous = pending.get("timer")
+        if previous is not None:
+            previous.cancel()
+        pending["deadline"] = time.monotonic() + PASTE_STALL_TIMEOUT
+        timer = threading.Timer(PASTE_STALL_TIMEOUT, self._paste_timeout, args=(entry_key,))
+        timer.daemon = True
+        timer.name = f"paste-timeout-{entry_key[:8]}"
+        pending["timer"] = timer
+        timer.start()
+
+    def _paste_timeout(self, entry_key: str) -> None:
+        with self._lock:
+            pending = self._pending_pastes.get(entry_key)
+            if pending is None:
+                return
+            if time.monotonic() < float(pending.get("deadline") or 0.0):
+                # A newer timer was armed after this one was left to expire.
+                return
+            self._pending_pastes.pop(entry_key, None)
+            pending["timer"] = None
+            for transfer_id in list(pending.get("transfer_ids") or []):
+                self._paste_transfers.pop(transfer_id, None)
+        logger.info("On-demand paste timed out waiting for progress: entry %s", entry_key[:8])
+        self._fail_pending_paste(pending, "timeout")
+
+    def _paste_pending_for_locked(self, sender: str, remote_entry: str):
+        """The local entry id of the pending paste *sender*'s answer belongs to.
+
+        Matched on the offer's entry id and the device, compared across the id
+        forms one device answers to (see `_clip_file_id_forms`): an answer can
+        arrive under the hashed mDNS id on the link and the real id over the
+        relay, and the request was stored under the resolved id.  Caller holds
+        `_lock`.
+        """
+        if not remote_entry:
+            return None
+        sender_forms = None
+        for entry_key, pending in self._pending_pastes.items():
+            if pending.get("remote_entry") != remote_entry:
+                continue
+            if not sender:
+                return entry_key
+            if sender_forms is None:
+                sender_forms = self._clip_file_id_forms(sender)
+            if self._clip_file_id_forms(str(pending.get("device") or "")) & sender_forms:
+                return entry_key
+        return None
+
+    def _paste_incoming_filter(self, kind, entry, file_size, relay, sender) -> str | None:
+        """Refuse a `clip_file` offer one of this machine's pastes cannot accept.
+
+        Called by the transfer manager before the offer is registered, so a
+        refusal here also fails the waiting paste with the same reason instead of
+        leaving its progress panel to wait for the stall timer.  Two limits can
+        only be enforced against the *actual* file size: a folder offer carries
+        size 0 (its archive is built later), and the relay cap applies to what
+        actually crosses the broker.
+        """
+        if kind != "clip_file":
+            return None
+        pid = self._resolve(sender) if sender else ""
+        with self._lock:
+            entry_key = self._paste_pending_for_locked(pid, entry)
+            pending = self._pending_pastes.get(entry_key) if entry_key else None
+        if pending is None:
+            return None
+        reason = None
+        if file_size > self.file_transfer.max_file_bytes():
+            reason = "too_large"
+        else:
+            relay_mb = int(getattr(self.config, "relay_paste_max_mb", 0) or 0)
+            if relay and relay_mb > 0 and file_size > relay_mb * 1024 * 1024:
+                reason = "relay_too_large"
+        if reason is None:
+            return None
+        with self._lock:
+            removed = self._pending_pastes.pop(entry_key, None)
+            if removed is not None:
+                removed["timer"] = None
+                for transfer_id in list(removed.get("transfer_ids") or []):
+                    self._paste_transfers.pop(transfer_id, None)
+        if removed is not None:
+            logger.info("On-demand paste refused (%s): entry %s", reason, entry_key[:8])
+            # The refused offer itself is answered by the manager with a
+            # `file_reject` carrying this same reason (the caller sends that).
+            self._fail_pending_paste(removed, reason)
+        return reason
+
+    def _note_clip_file_transfer(self, transfer_id, entry, sender) -> None:
+        """Tie an accepted `clip_file` transfer to the paste waiting on it."""
+        pid = self._resolve(sender) if sender else ""
+        with self._lock:
+            entry_key = self._paste_pending_for_locked(pid, entry)
+            pending = self._pending_pastes.get(entry_key) if entry_key else None
+            if pending is None:
+                return
+            if transfer_id not in pending["transfer_ids"]:
+                pending["transfer_ids"].append(transfer_id)
+            self._paste_transfers[transfer_id] = entry_key
+            self._arm_paste_timer_locked(entry_key)
+
+    def _paste_received(self, transfer_id, entry, sender, saved_path) -> bool:
+        """Collect one landed file; the last one completes the paste."""
+        pid = self._resolve(sender) if sender else ""
+        with self._lock:
+            entry_key = self._paste_transfers.pop(transfer_id, None)
+            if entry_key is None:
+                entry_key = self._paste_pending_for_locked(pid, entry)
+            pending = self._pending_pastes.get(entry_key) if entry_key else None
+            if pending is None:
+                return False
+            if saved_path and saved_path not in pending["paths"]:
+                pending["paths"].append(saved_path)
+            complete = len(pending["paths"]) >= max(int(pending.get("expected") or 0), 1)
+            timer = pending.get("timer")
+            if complete:
+                self._pending_pastes.pop(entry_key, None)
+                pending["timer"] = None
+                for other_id in list(pending.get("transfer_ids") or []):
+                    self._paste_transfers.pop(other_id, None)
+                if timer is not None:
+                    timer.cancel()
+            else:
+                self._arm_paste_timer_locked(entry_key)
+        if complete:
+            self._finish_pending_paste(pending)
+        return True
+
+    def _finish_pending_paste(self, pending) -> None:
+        """All files are here: put them on the clipboard and make the row local."""
+        entry_key = pending["entry_id"]
+        paths = list(pending["paths"])
+        content = ClipboardContent(
+            types={ContentType.FILE: encode_paths(paths)},
+            timestamp=time.time(),
+        )
+        # Suppressed before the write, and the write is ours: this content came
+        # from another device, and without the window the monitor would report
+        # it as a local copy and sync it straight back to that device.
+        wrote = False
+        try:
+            self.sync.suppress_for_own_write()
+            wrote = bool(self._clipboard.write(content))
+        except Exception:
+            logger.warning("Could not put the pasted files on the clipboard", exc_info=True)
+            wrote = False
+        if not wrote:
+            self._discard_pasted_files(pending)
+            self._publish(
+                "clip_files.paste_failed",
+                {"entry_id": entry_key, "reason": "clipboard_write_failed"},
+            )
+            return
+        replaced = False
+        if self._paste_row_replace is not None:
+            try:
+                replaced = bool(self._paste_row_replace(entry_key, paths))
+            except Exception:
+                logger.warning("Could not turn the remote-file row into a local one", exc_info=True)
+        if self._paste_row_replace is not None and not replaced:
+            # The clipboard is right, but the row still says "on another
+            # device": the window would ask that peer to copy a file it is
+            # already holding.  Reported rather than announcing a ready paste,
+            # and the files stay where they landed so a manual paste still works.
+            logger.warning(
+                "Pasted files are on the clipboard but entry %s could not be rewritten",
+                entry_key[:8],
+            )
+            self._publish(
+                "clip_files.paste_failed",
+                {"entry_id": entry_key, "reason": "history_update_failed"},
+            )
+            return
+        logger.info(
+            "On-demand paste ready: %d file(s) for entry %s",
+            len(paths),
+            entry_key[:8],
+        )
+        if replaced:
+            self._publish("history.changed", {"id": entry_key})
+        # Last, and after both side effects: the window copies the row and
+        # injects the paste when it sees this, and by then the row IS the local
+        # file and the clipboard already holds it.
+        self._publish("clip_files.paste_ready", {"entry_id": entry_key, "paths": paths})
+
+    def _paste_transfer_failed(self, transfer_id, status) -> None:
+        """A transfer of a pending paste failed: fail the paste with its reason."""
+        with self._lock:
+            entry_key = self._paste_transfers.pop(transfer_id, None)
+            if entry_key is None:
+                return
+            pending = self._pending_pastes.pop(entry_key, None)
+            if pending is None:
+                return
+            timer = pending.get("timer")
+            pending["timer"] = None
+            for other_id in list(pending.get("transfer_ids") or []):
+                self._paste_transfers.pop(other_id, None)
+        if timer is not None:
+            timer.cancel()
+        logger.info(
+            "On-demand paste transfer failed (%s): entry %s", status, entry_key[:8]
+        )
+        self._fail_pending_paste(pending, status or "failed")
+
+    def _fail_pending_paste(self, pending, reason: str) -> None:
+        """Cancel what is left of a paste, remove its residue, report the reason."""
+        entry_key = pending.get("entry_id", "")
+        with self._lock:
+            for transfer_id in list(pending.get("transfer_ids") or []):
+                self._paste_transfers.pop(transfer_id, None)
+        self._cancel_pending_transfers(pending)
+        self._discard_pasted_files(pending)
+        self._publish("clip_files.paste_failed", {"entry_id": entry_key, "reason": reason})
+
+    def _cancel_pending_transfers(self, pending) -> int:
+        """Cancel every live transfer of one paste; returns how many were."""
+
+        def run() -> int:
+            with self._lock:
+                transfer_ids = list(pending.get("transfer_ids") or [])
+                pending["transfer_ids"] = []
+                for transfer_id in transfer_ids:
+                    self._paste_transfers.pop(transfer_id, None)
+            cancelled = 0
+            for transfer_id in transfer_ids:
+                try:
+                    send_fn = self.file_transfer.get_transfer_send_fn(transfer_id)
+                    if self.file_transfer.cancel_transfer(transfer_id, send_fn):
+                        cancelled += 1
+                except Exception:
+                    logger.debug(
+                        "Could not cancel paste transfer %s", transfer_id[:8], exc_info=True
+                    )
+            return cancelled
+
+        # The runtime's command lock is not taken here: this runs from the
+        # receive/monitor threads and from inside callbacks the transfer manager
+        # is invoking, and cancelling a transfer is a manager operation, not a
+        # runtime command.
+        return run()
+
+    def _discard_pasted_files(self, pending) -> None:
+        """Delete the files a failed/cancelled paste had already saved.
+
+        A failed paste is not a download: leaving five of eight files in the
+        receive folder is residue the user did not ask for and cannot tell apart
+        from a real one, and a retry would save the same names again as
+        ``file (1).pdf``.  Never raises — the reason has already been reported.
+        """
+        paths = list(pending.get("paths") or [])
+        pending["paths"] = []
+        for path in paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                logger.warning("Could not remove a partially pasted file: %s", _mask_path(path))
+
+    def _close_pending_pastes(self) -> None:
+        """Drop every pending paste as the runtime shuts down.
+
+        No event is published: the runtime is stopping, so a ``paste_failed``
+        would either be dropped by the publish gate or arrive on a window that
+        is about to lose its backend.  What this must do is the local cleanup —
+        timers disarmed, transfers cancelled (which removes their ``.part``),
+        and the files a paste had already collected removed.
+        """
+        with self._lock:
+            pendings = list(self._pending_pastes.values())
+            self._pending_pastes.clear()
+            self._paste_transfers.clear()
+        for pending in pendings:
+            timer = pending.get("timer")
+            pending["timer"] = None
+            if timer is not None:
+                timer.cancel()
+            try:
+                self._cancel_pending_transfers(pending)
+            except Exception:
+                logger.debug("Could not cancel a paste transfer on shutdown", exc_info=True)
+            self._discard_pasted_files(pending)
+
     def _file_route_for(self, pid: str) -> tuple:
         """How to send a file's frames to *pid*, and at what chunk size.
 
@@ -1603,11 +2114,15 @@ class LanRuntime:
         # send loop would mean a selection whose fourth file is too large leaves
         # three transfers already running behind a refusal — the requester would
         # see files arrive *and* an error, which is worse than either alone.
+        # The ceiling is this machine's effective one (its configured policy
+        # inside the protocol's), because the sending side is where the bytes
+        # come from: a requester's own limit is enforced on its receive side.
+        max_file_bytes = self.file_transfer.max_file_bytes()
         prepared: list[tuple[str, str]] = []
         for path in paths:
             try:
                 subject, archive = self._clip_file_subject(path)
-                if os.path.getsize(subject) > MAX_FILE_SIZE:
+                if os.path.getsize(subject) > max_file_bytes:
                     self._discard_archives(prepared)
                     self._deny_clip_file(pid, entry_id, "too_large")
                     return
@@ -1651,7 +2166,10 @@ class LanRuntime:
                     # 等待对方接受, as if the user here had started a send.
                     visible=False,
                 )
-            except OSError as error:
+            except (OSError, FileTooLargeError) as error:
+                # A file that grew between the pre-check above and this send is
+                # refused as the same policy answer; every other I/O failure is
+                # the file having gone or become unreadable.
                 logger.info("Could not send a file to a peer: %s", error)
                 transfer_id = ""
             if transfer_id:
@@ -1728,13 +2246,37 @@ class LanRuntime:
             logger.debug("Could not send a clip file refusal", exc_info=True)
 
     def _on_clip_file_denied(self, pid: str, payload: dict) -> None:
-        """Surface a peer's refusal to this machine's window."""
+        """Surface a peer's refusal to this machine's window.
+
+        A refusal that answers an on-demand paste also ends that paste with the
+        peer's reason: the progress panel would otherwise wait out its stall
+        timer for a transfer the other machine has already said it will not
+        send.  The plain 下载 listener keeps its own event either way.
+        """
+        entry = str(payload.get("entry") or "")
+        reason = str(payload.get("reason") or "failed")
+        pasted_entry = None
+        timer = None
+        with self._lock:
+            entry_key = self._paste_pending_for_locked(pid, entry)
+            if entry_key is not None:
+                pending = self._pending_pastes.pop(entry_key, None)
+                if pending is not None:
+                    timer = pending.get("timer")
+                    pending["timer"] = None
+                    for transfer_id in list(pending.get("transfer_ids") or []):
+                        self._paste_transfers.pop(transfer_id, None)
+                    pasted_entry = pending
+        if timer is not None:
+            timer.cancel()
+        if pasted_entry is not None:
+            self._fail_pending_paste(pasted_entry, reason)
         self._publish(
             "clip.file.denied",
             {
                 "device_id": pid,
-                "entry_id": str(payload.get("entry") or ""),
-                "reason": str(payload.get("reason") or "failed"),
+                "entry_id": entry,
+                "reason": reason,
             },
         )
 
@@ -2898,7 +3440,17 @@ class LanRuntime:
         )
 
     def _on_file_received(self, transfer_id, saved_path, _file_name):
-        kind, sender, sha256, signature = self.file_transfer.take_received_info(transfer_id)
+        kind, sender, sha256, signature, entry = self.file_transfer.take_received_info(
+            transfer_id
+        )
+        if kind == "clip_file":
+            # One file of a paste pulled on demand (or of a plain 下载).  A paste
+            # collects it and reports only when the whole selection is here; a
+            # plain download keeps the old behaviour (the sound).
+            if self._paste_received(transfer_id, entry, sender, saved_path):
+                return
+            self._play_transfer_sound()
+            return
         if kind == "log":
             # A log this machine asked a peer for.  It is filed rather than
             # handed to the received-files flow, and filing it means a move on
@@ -3202,11 +3754,12 @@ class LanRuntime:
             # anything past MAX_RELAY_FRAME (``pack_envelope``), failing a
             # transfer that had already delivered most of itself.
             #
-            # Only the *message* has a relay limit; the file's total size is
-            # the app's own MAX_FILE_SIZE and nothing narrower, and the
-            # configured relay limit picks the chunk, since a broker that
-            # carries less than this app assumes needs smaller chunks rather
-            # than dropped ones.
+            # Only the *message* has a relay limit; a file's total size is
+            # bounded by the transfer protocol's own ceiling (derived from the
+            # chunk count) plus the configured user policy, and nothing
+            # narrower -- the configured relay limit picks the chunk, since a
+            # broker that carries less than this app assumes needs smaller
+            # chunks rather than dropped ones.
             #
             # This does not narrow what a peer may be: the condition is
             # ``_peer_is_internet_reachable``, which needs a netpair or an
@@ -3461,7 +4014,8 @@ class LanRuntime:
                     # language rather than this one's.
                     raise ApplicationError(
                         "CHAT_FILE_TOO_LARGE",
-                        f"File exceeds the {MAX_FILE_SIZE // (1024 ** 3)} GiB chat file limit",
+                        "File exceeds the "
+                        f"{CHAT_MAX_FILE_SIZE // (1024 ** 3)} GiB chat file limit",
                     ) from None
             if action == "accept":
                 return self.chat.accept_file(session_id, transfer_id, send_fn)
@@ -3549,9 +4103,15 @@ class LanRuntime:
         """Progress for a row the user can see; silent for a served download."""
         if not self.file_transfer.was_visible(transfer_id):
             return
-        self._publish_progress(
-            "transfer.progress", {"transfer_id": transfer_id, "progress": progress}, progress
-        )
+        with self._lock:
+            paste_entry = self._paste_transfers.get(transfer_id, "")
+        data = {"transfer_id": transfer_id, "progress": progress}
+        if paste_entry:
+            # Additive: a progress panel showing an on-demand paste filters on
+            # this instead of guessing which downloads belong to its fetch.  The
+            # payload for every other transfer is unchanged.
+            data["paste_entry"] = paste_entry
+        self._publish_progress("transfer.progress", data, progress)
 
     def _on_transfer_complete(self, transfer_id, success, cancelled, status):
         """Report a finished transfer, then reclaim its archive if it had one.
@@ -3567,7 +4127,14 @@ class LanRuntime:
         that peer's transfer, and reporting it here would put a completion on a
         screen whose user did not start anything.  The archive still has to be
         reclaimed, which is why this is not simply skipped.
+
+        A transfer that belongs to an on-demand paste is more than a row: its
+        failure is the paste's failure, and it is reported through
+        ``clip_files.paste_failed`` (after the transfers' own events) so the
+        progress panel can stop waiting on a fetch that already ended.
         """
+        if not success:
+            self._paste_transfer_failed(transfer_id, status)
         if self.file_transfer.was_visible(transfer_id):
             self._publish(
                 "transfer.complete",
@@ -3991,6 +4558,10 @@ class LanRuntime:
         ok = True
         # Disable first, so a capture already reading cannot record or send.
         self.sync.set_enabled(False)
+        # A paste waiting on files is part of the work being torn down: it would
+        # otherwise keep a timer armed and a transfer writing into the receive
+        # directory after the runtime has stopped answering for it.
+        self._close_pending_pastes()
         try:
             self.chat.shutdown()
         except Exception:
@@ -6909,6 +7480,11 @@ class LanRuntime:
             # request rather than per session, so it takes effect on the next
             # file that arrives.
             self.file_transfer.set_file_open_to_all(bool(self.config.file_open_to_all))
+        if "max_file_mb" in updated:
+            # Read at send/receive time by the transfer manager, so the next
+            # transfer obeys the new ceiling; nothing already running is
+            # stopped by a lowered limit (its bytes are already in flight).
+            self.file_transfer.set_file_size_policy(self.config.max_file_mb)
         if "internet_sync_enabled" in updated:
             self._apply_internet_sync_enabled(bool(self.config.internet_sync_enabled))
         relay_transport_fields = (

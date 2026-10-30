@@ -247,6 +247,30 @@ fn hides_main_window(value: &Value) -> bool {
     value["type"] == "event" && value["name"] == "app.window_close_requested"
 }
 
+/// Whether a sidecar frame belongs on the quick-paste overlay's own channel.
+///
+/// The overlay starts a remote-file fetch and draws its progress; those are the
+/// four announcements that describe it — the transfer's progress and the paste
+/// fetch's ready/failed outcomes — plus `history.changed`, because the row it
+/// pasted from turns into a local file row and the overlay re-reads it before
+/// handing the paste to `quick_paste_choose`.  A narrow allow-list rather than
+/// a blanket forward: the overlay has no business receiving every event the
+/// main window gets (chat messages, device state, update phases), and the
+/// capability file grants it only its own commands.
+fn forward_to_quick_paste(value: &Value) -> bool {
+    value["type"] == "event"
+        && matches!(
+            value["name"].as_str(),
+            Some(
+                "transfer.progress"
+                    | "transfers.changed"
+                    | "clip_files.paste_ready"
+                    | "clip_files.paste_failed"
+                    | "history.changed"
+            )
+        )
+}
+
 /// Whether a sidecar frame asks this host to ring for an incoming chat message.
 ///
 /// The sidecar has already decided the user wants the sound (enabled, not a
@@ -714,7 +738,15 @@ impl Bridge {
                         let _ = crate::install_staged_update(&handle, &bridge).await;
                     });
                 }
-                let _ = app.emit_to("main", "sidecar:event", value);
+                let _ = app.emit_to("main", "sidecar:event", value.clone());
+                // The quick-paste overlay is a second window of this app and
+                // gets its own copy of the few events its transfer progress
+                // pane reads.  Everything else stays on the main channel: the
+                // overlay needs to know how its own fetch is doing, not what
+                // the rest of the application is announcing.
+                if forward_to_quick_paste(&value) {
+                    let _ = app.emit_to("quick-paste", "sidecar:event", value);
+                }
             }
             Some("fatal") => return Err(Self::remote_error(&value["error"])),
             _ => return Err(BridgeError::new("PROTOCOL_ERROR", "Unknown sidecar frame")),

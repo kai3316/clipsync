@@ -183,6 +183,58 @@ describe("browser isolation", () => {
     unlisten();
     expect(off).toHaveBeenCalledOnce();
   });
+  it("uses the paste and quick-paste host commands with the frozen names and arguments", async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(invoke).mockClear();
+    await bridge.injectPaste();
+    await bridge.injectPaste({ delayMs: 120 });
+    await bridge.hideMainAndPaste();
+    await bridge.openQuickPaste();
+    await bridge.quickPasteList("会议", "text", 20);
+    await bridge.quickPasteChoose("h1", true);
+    await bridge.quickPasteClose();
+    await bridge.quickPasteSettings();
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      // No delay means the host's own (~90 ms) wait; a caller that names one
+      // (the row menu hiding a window first) has it put on the wire.
+      ["inject_paste", {}],
+      ["inject_paste", { delayMs: 120 }],
+      ["hide_main_and_paste", undefined],
+      ["open_quick_paste", undefined],
+      ["quick_paste_list", { query: "会议", kind: "text", limit: 20 }],
+      ["quick_paste_choose", { entryId: "h1", plain: true }],
+      ["quick_paste_close", undefined],
+      ["quick_paste_settings", undefined],
+    ]);
+  });
+  it("uses the on-demand paste commands and the overlay's event channel", async () => {
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(invoke).mockClear();
+    await bridge.preparePasteEntry("h1");
+    await bridge.preparePasteEntry("h1", true);
+    await bridge.cancelPasteEntry("h1");
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      // The confirmation flag always travels: the sidecar asks first and the
+      // second call carries the reader's answer.
+      ["prepare_paste_entry", { entryId: "h1", confirmed: false }],
+      ["prepare_paste_entry", { entryId: "h1", confirmed: true }],
+      ["cancel_paste_entry", { entryId: "h1" }],
+    ]);
+
+    // The overlay's own listen: one event name, and the returned unlisten is
+    // what its teardown calls.
+    const off = vi.fn();
+    vi.mocked(listen).mockResolvedValueOnce(off as any);
+    const handler = vi.fn();
+    const unlisten = await bridge.onSidecarEvent(handler);
+    expect(listen).toHaveBeenLastCalledWith("sidecar:event", expect.any(Function));
+    const onEvent = vi.mocked(listen).mock.calls.at(-1)![1] as unknown as (event: { payload: unknown }) => void;
+    const payload = { type: "event", name: "clip_files.paste_ready", session_id: "s" };
+    onEvent({ payload });
+    expect(handler).toHaveBeenCalledWith(payload);
+    unlisten();
+    expect(off).toHaveBeenCalledOnce();
+  });
   // Last, because it is the one case here that is not a desktop window: the
   // `isTauri` mock is module-wide, and a case after this one would find it false.
   it("subscribes to no drop target outside the desktop", async () => {

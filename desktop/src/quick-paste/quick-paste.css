@@ -1,0 +1,244 @@
+/* The quick-paste overlay's own layout.
+ *
+ * It is one column in a window the host sizes (480–560 px high, frameless and
+ * always on top): a search box, a row of kind chips, the list that takes the
+ * rest of the height, and the key hints pinned to the bottom.  Colours are
+ * tokens from `../styles.css` and nothing here paints a colour of its own, so
+ * the overlay follows the same light/dark theme as the main window.
+ */
+
+.quick-paste {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Search.  The base `.search` box supplies the fill, the border and the input;
+ * the overlay only keeps it off the window's edges and gives it the air a
+ * floating palette needs. */
+.quick-paste-search {
+  margin: 12px 14px 10px;
+  max-width: none;
+  width: auto;
+  flex-shrink: 0;
+  background: var(--raised);
+}
+
+/* Kind chips: the same control as the history page's, a size down, because the
+ * overlay is a palette and the list under them is what the height is for. */
+.quick-paste-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 10px;
+  flex-shrink: 0;
+}
+
+.quick-paste-chip {
+  min-height: 26px;
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+/* The list scrolls on its own, so the box and the hints stay put. */
+.quick-paste-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0 6px 6px;
+  list-style: none;
+}
+
+.quick-paste-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.quick-paste-row:hover {
+  background: var(--surface);
+}
+
+/* The row the keyboard or the pointer is on.  Same accent as a selected row in
+ * the history list: the two windows put the same meaning on the same colour. */
+.quick-paste-row--selected,
+.quick-paste-row--selected:hover {
+  background: var(--accent-soft);
+}
+
+.quick-paste-glyph {
+  flex-shrink: 0;
+  width: 18px;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: center;
+}
+
+.quick-paste-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.quick-paste-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 20px;
+}
+
+.quick-paste-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.quick-paste-note {
+  margin: 0;
+  padding: 6px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Load and paste failures.  The overlay keeps the list under the sentence for a
+ * paste failure (the clipboard already holds the clip) and drops it for a read
+ * failure (there is nothing to show), so this is only a colour rule. */
+.quick-paste-error {
+  color: var(--danger-text);
+}
+
+/* The state that is not a list: no history, no match, or a query in flight. */
+.quick-paste-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 24px 24px;
+  text-align: center;
+}
+
+.quick-paste-empty-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* The key hints, and the one row that says what the overlay will do when the
+ * host has auto-paste switched off. */
+.quick-paste-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* A paste is one host round trip; the list stays readable but stops taking
+ * clicks and Enter presses until it answers. */
+.quick-paste--busy .quick-paste-list,
+.quick-paste--busy .quick-paste-kinds {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* A row whose file still lives on the other machine: pasting it starts the
+ * fetch, so the row says so before the key is pressed. */
+.quick-paste-remote {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent-text);
+  font-size: 11px;
+}
+
+/* ── The on-demand paste panel (1.3.1) ──────────────────────────────────
+ * Entering a remote file turns the list into this panel: the fetch's name, its
+ * bar, the rate and the estimate, one action (cancel, or retry after a
+ * failure), and the key hint.  It fills the window so the panel is the whole
+ * surface the reader is looking at, not a strip over a list they can no longer
+ * use. */
+.quick-paste-transfer {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px 28px;
+}
+
+.quick-paste-transfer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.quick-paste-transfer-name {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.quick-paste-progress {
+  width: 100%;
+  height: 10px;
+  accent-color: var(--accent);
+}
+
+.quick-paste-transfer-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.quick-paste-transfer-percent {
+  color: var(--accent-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.quick-paste-transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quick-paste-transfer-hint {
+  padding: 0;
+}
+
+.quick-paste-confirm {
+  gap: 10px;
+}
+
+/* The confirmation question takes the whole window too: the row is already
+ * chosen, so the list behind it would be a list the reader cannot use until
+ * they answer. */
+.quick-paste-confirm .quick-paste-transfer-name {
+  font-weight: 600;
+}
+

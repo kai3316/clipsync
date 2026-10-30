@@ -97,7 +97,6 @@ MAX_HISTORY = 50  # max completed transfers to remember
 # and the log notice).  Listed in the transfers panel they read as an ordinary
 # send stuck on "等待对方接受…", inviting a click that has nothing to act on.
 UI_HIDDEN_KINDS = ("update", "log")
-MAX_FILE_SIZE = 2 * 1024**3  # 2 GiB -- maximum accepted file size
 # A receiver under the open-to-all default used to accept every legal-size file
 # a reachable peer pushed, with no bound on how many landed at once or whether
 # the volume had room.  A flood of 2 GiB sends therefore filled the disk until
@@ -123,10 +122,52 @@ DISK_HEADROOM_RATIO = 0.10
 # the accept prompt could not prevent, because the set already existed.
 #
 # The cap is set where a genuine sender can still fit: the smallest chunk this
-# application advertises is ~22 KiB (a 32 KiB relay, see
-# ``ChatManager.relay_chunk_for``), and 2 GiB at that size is ~98k chunks.
-# 2^18 leaves room above that and bounds the bitmap below at 32 KB.
+# application advertises is ~24 KiB (a 32 KiB relay, narrowed to one broker
+# message; see ``ChatManager.relay_chunk_for`` and the frame limit), and the
+# protocol's own size ceiling is derived from this number below rather than
+# written down as a second magic value.
 MAX_TOTAL_CHUNKS = 262_144
+# The narrowest relay this build accepts, from
+# ``config.FIELD_RULES["relay_max_message_bytes"]``'s floor.  One definition,
+# because the derivation below and the config schema both describe the same
+# limit and a second spelling of it would drift.
+MIN_RELAY_MESSAGE_BYTES = 32 * 1024
+
+
+def protocol_max_file_size() -> int:
+    """The largest single file the chunk protocol can carry at all.
+
+    Derived from two limits instead of being written down: a receiver refuses an
+    offer cut into more than :data:`MAX_TOTAL_CHUNKS` chunks (that is the
+    bookkeeping bound above), and this build's *smallest advertised* chunk is
+    what a sender can be forced to use — a relay of the narrowest configurable
+    size (``MIN_RELAY_MESSAGE_BYTES``) narrowed again so one chunk plus its
+    binary header fits one broker message.  Their product is the largest file
+    that can be sliced within both limits, so raising either limit raises the
+    ceiling automatically.
+
+    The imports are local because ``nearby_chat`` imports this module for its
+    own attachment cap; a module-level import would be a cycle.
+    """
+    from internal.protocol.codec import BINARY_HEADER_SIZE
+    from internal.sync.nearby_chat import ChatManager
+    from internal.transport.relay import frame_limit_for
+
+    chunk = min(
+        ChatManager.relay_chunk_for(MIN_RELAY_MESSAGE_BYTES),
+        frame_limit_for(MIN_RELAY_MESSAGE_BYTES) - BINARY_HEADER_SIZE,
+    )
+    return MAX_TOTAL_CHUNKS * max(1, chunk)
+
+
+class FileTooLargeError(Exception):
+    """A send refused because the file exceeds a size limit, and why.
+
+    Raised by :meth:`FileTransferManager.send_file` so the caller can name the
+    ceiling in the reader's language instead of reporting a transfer that never
+    started for no stated reason (the same shape ``ChatFileTooLargeError`` has
+    for chat attachments).
+    """
 
 
 class _MissingChunks:
@@ -353,8 +394,16 @@ class FileTransferManager:
         device_id: str,
         output_dir: str | None = None,
         transfer_timeout: float = TRANSFER_TIMEOUT,
+        max_file_mb: int = 0,
     ):
         self._device_id = device_id
+        # User policy ceiling in MB; 0 = the protocol ceiling.  Set from the
+        # configuration by whoever owns this manager (see
+        # ``set_file_size_policy``) and re-applied live when the setting changes.
+        # The protocol ceiling is always enforced on top of it (see
+        # ``protocol_max_file_size``), so a policy number larger than the
+        # protocol can carry is clamped rather than believed.
+        self._max_file_mb = max(0, int(max_file_mb or 0))
 
         if output_dir is None:
             output_dir = str(Path.home() / "Downloads" / "ClipSync")
@@ -375,13 +424,15 @@ class FileTransferManager:
 
         # transfer_id -> dict (active transfers)
         self._transfers: dict[str, dict[str, Any]] = {}
-        # transfer_id -> (kind, sender_device_id, sha256, signature), set just
-        # before the received callback fires so the caller can tell a received
-        # file from the transfers that take a different route ("update",
+        # transfer_id -> (kind, sender_device_id, sha256, signature, entry_id),
+        # set just before the received callback fires so the caller can tell a
+        # received file from the transfers that take a different route ("update",
         # "clip_file", "log").  The digest is the sender's own declaration, and
         # both it and the signature are carried only by an update -- see
-        # `take_received_info`.
-        self._received_kinds: dict[str, tuple[str, str, str, str]] = {}
+        # `take_received_info`.  The entry id is what a `clip_file` answer names:
+        # the runtime matches it back to the paste that asked, so a file pulled
+        # on demand can be collected without guessing from the file name.
+        self._received_kinds: dict[str, tuple[str, str, str, str, str]] = {}
         # Completed transfers history: list of dicts (newest first)
         self._history: list[dict[str, Any]] = []
         # Speed test state
@@ -410,6 +461,16 @@ class FileTransferManager:
         self._clip_file_guard: Callable[[str, str], bool] | None = None
         self._update_guard: Callable[[str], bool] | None = None
         self._log_guard: Callable[[str], bool] | None = None
+        # Asked about one inbound `clip_file` offer *before* it is registered:
+        # the runtime checks it against the paste that asked (relay ceiling,
+        # configured size limit) and returns a reason to refuse, or None.  The
+        # point is the answer: a transfer refused only by this manager's own
+        # checks would leave a paste progress panel waiting on the stall timer,
+        # while this callback is how the paste fails with a reason at once.
+        self._incoming_filter: Callable[[str, str, int, bool, str], str | None] | None = None
+        # Told about an accepted `clip_file` offer so the runtime can tie its
+        # transfer id to the paste it belongs to.  (transfer_id, entry, sender)
+        self._on_clip_file_accepted: Callable[[str, str, str], None] | None = None
         # Whether an unpaired peer may send a file at all.  Off by default here
         # and turned on by the runtime from the configuration, which is where
         # the setting lives; a manager nobody configured keeps the strict rule.
@@ -441,6 +502,58 @@ class FileTransferManager:
         frames were being discarded in transit.
         """
         self._source_device = str(device_id or "")
+
+    def set_file_size_policy(self, max_file_mb) -> None:
+        """Set the user policy ceiling on one file, in MB (0 = protocol ceiling).
+
+        Called from the configuration at startup and again whenever the setting
+        changes, so a lowered limit refuses the next send instead of at the next
+        launch.  The protocol ceiling still applies on top: a policy number past
+        what the chunk protocol can slice is clamped by :meth:`max_file_bytes`.
+        """
+        try:
+            value = int(max_file_mb or 0)
+        except (TypeError, ValueError):
+            value = 0
+        self._max_file_mb = max(0, value)
+
+    def protocol_limit_bytes(self) -> int:
+        """The largest file the chunk protocol can carry at all."""
+        return protocol_max_file_size()
+
+    def max_file_bytes(self) -> int:
+        """The effective per-file ceiling: the user policy within the protocol."""
+        hard = self.protocol_limit_bytes()
+        if self._max_file_mb <= 0:
+            return hard
+        return min(hard, self._max_file_mb * 1024 * 1024)
+
+    def set_on_incoming_filter(
+        self, callback: Callable[[str, str, int, bool, str], str | None] | None
+    ) -> None:
+        """*callback(kind, entry, file_size, relay, sender) -> reason* or None.
+
+        Consulted for an inbound file offer before anything is registered, so a
+        caller can refuse it with a reason of its own.  Returns the refusal
+        reason (a stable code the sender is told and the local surface can show)
+        or None to let the offer proceed.  Registered by the runtime for its
+        on-demand paste; a manager nobody wired keeps the old behaviour.
+        """
+        self._incoming_filter = callback
+
+    def set_on_clip_file_accepted(
+        self, callback: Callable[[str, str, str], None] | None
+    ) -> None:
+        """*callback(transfer_id, entry, sender)* -- an inbound `clip_file`
+        offer this side asked for has been accepted.
+
+        Fired before the accept itself, so a transfer that fails to start (the
+        clipboard or the disk refusing the temp file) is still attributable to
+        the request that produced it.  This is how the runtime ties a transfer id
+        to the paste waiting on it; the once-guarded completion callback then
+        reports success/failure for that same id.
+        """
+        self._on_clip_file_accepted = callback
 
     def was_visible(self, transfer_id: str) -> bool:
         """Whether *transfer_id* is a row this machine's user should see.
@@ -677,17 +790,17 @@ class FileTransferManager:
         required = size + int(size * DISK_HEADROOM_RATIO)
         return free >= required
 
-    def take_received_info(self, transfer_id: str) -> tuple[str, str, str, str]:
-        """Pop ``(kind, sender_device_id, sha256, signature)`` for a received transfer.
+    def take_received_info(self, transfer_id: str) -> tuple[str, str, str, str, str]:
+        """Pop ``(kind, sender_device_id, sha256, signature, entry)`` for a received transfer.
 
-        All four, because the routes that treat a blob as something other than a
-        file need them: what it is, whose it is, and -- for an update -- the
-        digest and the release signature the sender declared for it.  The digest
-        is what the bytes are checked against when the release endpoint cannot
-        be reached; the signature is what the host verifies offline against the
-        embedded release key.  Both are empty for every kind that carries none.
+        All five, because the routes that treat a blob as something other than a
+        file need them: what it is, whose it is, -- for an update -- the digest
+        and the release signature the sender declared for it, and, for a
+        ``clip_file``, the entry the answer names (which is how the runtime ties
+        one pulled file back to the paste that asked).  Everything but the kind
+        and the sender is empty for a kind that carries none.
         """
-        return self._received_kinds.pop(transfer_id, ("file", "", "", ""))
+        return self._received_kinds.pop(transfer_id, ("file", "", "", "", ""))
 
     def set_on_transfer_request(
         self,
@@ -798,6 +911,25 @@ class FileTransferManager:
         transfer_id = uuid.uuid4().hex
         file_size = file_path.stat().st_size
         file_name = file_path.name
+        # Two ceilings, and the order matters only for the message: the protocol
+        # one applies to every kind (an update asset or a log is chunked the same
+        # way), while the user policy is a preference about *files the user
+        # moves*.  Refused here, before an offer is put on the wire, so the
+        # caller can name the limit instead of the sender watching a transfer
+        # that never starts.
+        protocol_limit = self.protocol_limit_bytes()
+        if file_size > protocol_limit:
+            raise FileTooLargeError(
+                f"{file_name}: {file_size} bytes exceeds the protocol ceiling "
+                f"of {protocol_limit // (1024 ** 2)} MB"
+            )
+        if kind in ("file", "clip_file"):
+            policy_limit = self.max_file_bytes()
+            if file_size > policy_limit:
+                raise FileTooLargeError(
+                    f"{file_name}: {file_size} bytes exceeds the {policy_limit // (1024 ** 2)} MB "
+                    "file size limit"
+                )
         mime_type = _guess_mime_type(file_name)
         # One number per transfer, not the class constant read at send time: the
         # receiver is told it in the offer and slices the file with the value it
@@ -1276,13 +1408,19 @@ class FileTransferManager:
             self._send_as_frame({"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn)
             return
         file_size = raw_size
-        if file_size < 0 or file_size > MAX_FILE_SIZE:
+        # Every kind, not just user files: the protocol ceiling is what the chunk
+        # cut can carry at all (see `protocol_max_file_size`), and a receiver that
+        # accepted a larger offer would fail late instead of refusing up front.
+        if file_size < 0 or file_size > self.protocol_limit_bytes():
             logger.warning(
-                "Rejecting transfer %s: file_size %r outside allowed range",
+                "Rejecting transfer %s: file_size %r outside the protocol range",
                 transfer_id[:8],
                 file_size,
             )
-            self._send_as_frame({"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn)
+            self._send_as_frame(
+                {"msg_type": "file_reject", "transfer_id": transfer_id, "reason": "too_large"},
+                send_fn,
+            )
             return
 
         logger.info(
@@ -1330,6 +1468,60 @@ class FileTransferManager:
                 {"msg_type": "file_reject", "transfer_id": transfer_id}, send_fn
             )
             return
+
+        # A `clip_file` offer the runtime is waiting for gets one more check
+        # before it is registered: the paste that asked has its own ceilings
+        # (a relay cap, a configured file limit), and a refusal here can name the
+        # reason to the paste at once instead of leaving a progress panel to wait
+        # for the stall timer.  The callback answers a reason string to refuse.
+        if self._incoming_filter is not None:
+            try:
+                veto = self._incoming_filter(
+                    kind,
+                    str(payload.get("entry") or ""),
+                    file_size,
+                    relay,
+                    sender_device_id,
+                )
+            except Exception:
+                logger.debug("Incoming file filter failed", exc_info=True)
+                veto = None
+            if veto:
+                logger.warning(
+                    "Refusing %s transfer %s from %s: %s",
+                    kind,
+                    transfer_id[:8],
+                    str(sender_device_id)[:12],
+                    veto,
+                )
+                self._send_as_frame(
+                    {"msg_type": "file_reject", "transfer_id": transfer_id, "reason": veto},
+                    send_fn,
+                )
+                return
+
+        # The user policy ceiling, for the kinds that are files a user moves.  An
+        # update blob or a log is background exchange and is bounded by the
+        # protocol alone: a small max_file_mb must not stop the app updating
+        # itself.
+        if kind in ("file", "clip_file"):
+            policy_limit = self.max_file_bytes()
+            if file_size > policy_limit:
+                logger.warning(
+                    "Rejecting transfer %s: %d bytes over the %d MB file size limit",
+                    transfer_id[:8],
+                    file_size,
+                    policy_limit // (1024 ** 2),
+                )
+                self._send_as_frame(
+                    {
+                        "msg_type": "file_reject",
+                        "transfer_id": transfer_id,
+                        "reason": "too_large",
+                    },
+                    send_fn,
+                )
+                return
 
         now = time.time()
         with self._lock:
@@ -1383,6 +1575,10 @@ class FileTransferManager:
                 # the embedded release key before an offline install can run.
                 "signature": _clean_signature(payload.get("signature")),
                 "peer_id": sender_device_id,
+                # The entry a `clip_file` answers, kept so the received callback
+                # can hand it back to the paste that asked (see
+                # `take_received_info`).  Empty for every other kind.
+                "entry": str(payload.get("entry") or ""),
                 "file_name": file_name,
                 "file_size": file_size,
                 "mime_type": mime_type,
@@ -1474,6 +1670,19 @@ class FileTransferManager:
             # An update blob is one the app asked for on its own, and a log blob
             # one the app asked *this peer* for -- both are checked against this
             # machine's own ledger above, so neither needs a second check.
+            if kind == "clip_file" and self._on_clip_file_accepted is not None:
+                # Told before the accept so a transfer that cannot start (an
+                # open clipboard, a full disk) is still attributable to the paste
+                # that asked for it -- the completion callback for that same id
+                # then fails the paste with a reason.
+                try:
+                    self._on_clip_file_accepted(
+                        transfer_id,
+                        str(payload.get("entry") or ""),
+                        sender_device_id,
+                    )
+                except Exception:
+                    logger.debug("clip_file accepted callback failed", exc_info=True)
             logger.info("Auto-accepting %s transfer %s", kind, transfer_id[:8])
             self.accept_transfer(transfer_id, send_fn)
         elif self._file_open_to_all:
@@ -2003,6 +2212,8 @@ class FileTransferManager:
                     str(transfer.get("peer_id") or ""),
                     str(transfer.get("sha256") or ""),
                     str(transfer.get("signature") or ""),
+                    # The entry a `clip_file` answers; empty for every other kind.
+                    str(transfer.get("entry") or ""),
                 )
                 self._on_file_received(transfer_id, saved, file_name)
             self._fire_complete_once(transfer_id, True, False, "success")
@@ -2135,6 +2346,21 @@ class FileTransferManager:
                 with contextlib.suppress(Exception):
                     temp_fh.close()
             _safe_remove(self._temp_path(transfer_id))
+            # Reported as a terminal outcome like any other.  A transfer that
+            # ended because the *sender* said so used to disappear in silence:
+            # the panel row stayed until the stale sweep, and a paste waiting on
+            # this file waited out its stall timer for an answer that had already
+            # arrived.  The transfer is removed, so the once-guard still reports
+            # it at most once.
+            cancelled = status == "cancelled"
+            failure = "cancelled" if cancelled else (status or "peer_offline")
+            logger.info(
+                "Incoming transfer %s ended by the sender: %s (%s)",
+                transfer_id[:8],
+                _mask_file_name(transfer.get("file_name", "?")),
+                failure,
+            )
+            self._fire_complete_once(transfer_id, False, cancelled, failure)
 
         if transfer is not None and transfer.get("type") == "outgoing":
             success = status == "success"

@@ -358,6 +358,15 @@ class SidecarApplication:
         set_source = getattr(self.runtime, "set_clip_file_source", None)
         if set_source is not None:
             set_source(self._repository.file_entry_paths)
+        # The on-demand paste's two store questions: what offer does this row
+        # hold, and rewrite the row once its files are local.  Both are the
+        # store's to answer (it owns the payloads); the runtime only orchestrates.
+        set_paste_history = getattr(self.runtime, "set_paste_history", None)
+        if set_paste_history is not None:
+            set_paste_history(
+                self._repository.remote_file_offer,
+                self._repository.replace_file_remote_with_local,
+            )
         # A failed start must leave the runtime reachable: _stop_runtime() is
         # what the lifecycle rollback calls to release whatever the start had
         # already acquired, and a reference dropped here is a half-built
@@ -999,6 +1008,10 @@ class SidecarApplication:
                 "transfers.list", "transfers.send", "transfers.action",
                 "transfers.cancel_all", "transfers.speed_test", "transfers.clear_history",
                 "transfers.request_entry_files",
+                # The on-demand paste verbs: both need the engine (the fetch
+                # travels the LAN/relay it owns), and the paste's events are
+                # published by the runtime.
+                "transfers.prepare_paste", "transfers.cancel_paste",
                 "chat.devices", "chat.sessions", "chat.messages", "chat.invite",
                 "chat.action", "chat.file", "chat.typing", "chat.mute", "chat.open_file",
                 "chat.reveal_file",

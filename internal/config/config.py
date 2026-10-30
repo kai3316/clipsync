@@ -64,9 +64,28 @@ DEFAULT_HOTKEYS: dict[str, str] = {
     "paste_7": "Ctrl+7",
     "paste_8": "Ctrl+8",
     "paste_9": "Ctrl+9",
-    "paste_plain": "Ctrl+Shift+V",
+    # Plain-text paste.  Ctrl+Shift+V is the quick-paste overlay's binding as
+    # of 1.3.0 (`show_quick_paste` below), so this action moved to the
+    # combination beside it; the v4 migration in `load` rewrites a config that
+    # still carries the old default.
+    "paste_plain": "Ctrl+Alt+V",
     "toggle_monitor": "Ctrl+Shift+M",
     "show_window": "Ctrl+Shift+Space",
+    # Open the quick-paste overlay — the global search window that pastes the
+    # chosen history entry into the application in front.  This is the
+    # combination the plain-text paste used before 1.3.0; giving it to the
+    # overlay instead makes the action users reach for most the one they can
+    # reach with the shortcut that is already in their fingers.
+    "show_quick_paste": "Ctrl+Shift+V",
+    # Paste the newest clip that arrived from another device.
+    #
+    # Deliberately unbound (""): a default would take a system-wide combination
+    # away from whatever the user was already using it for, and this action is
+    # an extra on top of paste_1..9 rather than a primary one.  The empty string
+    # is a real value in this map — "this action is not bound" — and the
+    # settings form filters it out before saving, so an unbound action is
+    # simply absent from the host's registration list.
+    "paste_remote_last": "",
 }
 
 
@@ -87,8 +106,10 @@ DEFAULT_COMPANION_REMOTE_BROKERS = (
 class Config:
     # Schema version for one-way migrations on load. v1 configs stored
     # filter_enabled_categories=[] to mean "all enabled"; v2 uses None=all;
-    # v3 turns the phone companion (远程访问) on by default.
-    config_version: int = 3
+    # v3 turns the phone companion (远程访问) on by default; v4 adds the paste
+    # behaviour / recording rules below and moves the default paste_plain
+    # binding off Ctrl+Shift+V, which the quick-paste overlay owns now.
+    config_version: int = 4
     device_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     device_name: str = field(default_factory=platform.node)
     port: int = 19990
@@ -168,6 +189,53 @@ class Config:
     # remote receives and pastes land as plain text only.  Images and file
     # lists are content, not formatting, and are kept.
     plain_text_only: bool = False
+
+    # ---- paste behaviour and recording rules (1.3.0) ----
+    #
+    # Read live by the capture path on every clipboard change (see
+    # ``SyncManager._do_read_and_send_locked`` and the platform monitors), so a
+    # settings save takes effect on the very next copy — none of these is a
+    # startup snapshot.
+    #
+    # Paste the retrieved history entry into the application that has focus
+    # after a hotkey copy, instead of only putting it on the clipboard.  The
+    # host performs the key injection; this is the preference it reads.
+    auto_paste_enabled: bool = True
+    # A password manager publishes an OS "do not record me" marker on a copy it
+    # does not want kept (see the platform monitors).  ON drops such a capture
+    # before it reaches history or a peer.
+    skip_password_manager_clips: bool = True
+    # What was already on the clipboard before this launch is not a new copy:
+    # skip the first capture when it matches the content the clipboard held at
+    # start.  One-shot — a later copy of the same content is recorded normally.
+    skip_prelaunch_clipboard: bool = True
+    # Largest single non-file capture, in megabytes (a file list is a path list,
+    # not a payload, and is not counted).  0 disables the cap; 8 MB keeps a
+    # huge bitmap or a pasted document from occupying the clipboard pipeline
+    # and every peer's history.
+    max_non_file_paste_mb: float = 8.0
+    # Source applications whose process name / display name / window title
+    # contains any of these substrings are not recorded (case-insensitive).
+    # Independent of, and applied in addition to, the app_filter_* rules.
+    source_exclusion_patterns: list[str] = field(default_factory=list)
+
+    # ---- file transfer limits (1.3.1) ----
+    #
+    # A user policy ceiling on a single file, in MB, applied to both sending and
+    # receiving (and to files pulled on demand for a paste).  0 means "the
+    # protocol ceiling" — the largest file the chunk protocol can carry at all,
+    # derived from MAX_TOTAL_CHUNKS and the smallest chunk this build
+    # advertises (see ``file_transfer.protocol_max_file_size``).  The default
+    # stays at 2 GiB: past that no transfer survives a restart, so the
+    # conservative figure is the one a user can rely on today.
+    max_file_mb: int = 2048
+    # Ask before pulling a paste payload larger than this (MB).  0 = never ask;
+    # the host reads this threshold and confirms with the reader.
+    confirm_large_file_mb: int = 512
+    # Ceiling for a file pulled on demand for a paste over the internet relay
+    # (MB), where every chunk pays the broker's rate.  0 = no extra cap beyond
+    # ``max_file_mb``.
+    relay_paste_max_mb: int = 50
 
     # Periodic silent update check against GitHub releases (~every 6h).  OFF
     # means the background loop never contacts the network for update checks;
@@ -657,6 +725,15 @@ FIELD_RULES: dict[str, tuple] = {
     "retry_capture_enabled": ("bool",),
     "dedup_method": ("str",),
     "plain_text_only": ("bool",),
+    # -- paste behaviour and recording rules (1.3.0) --
+    "auto_paste_enabled": ("bool",),
+    "skip_password_manager_clips": ("bool",),
+    "skip_prelaunch_clipboard": ("bool",),
+    # Non-file single-capture ceiling in MB.  0 = unlimited; 1024 MB is a typo
+    # guard rather than a meaningful ceiling (no clipboard holds a file that
+    # size without going through the file path).
+    "max_non_file_paste_mb": ("float", 0, 1024),
+    "source_exclusion_patterns": ("strlist_nonnull",),
     "auto_update_check": ("bool",),
     "app_filter_enabled": ("bool",),
     "app_filter_mode": ("str",),
@@ -721,6 +798,17 @@ FIELD_RULES: dict[str, tuple] = {
     # shipped brokers carries, so a value in between is a preference rather than
     # a typo (see the field comment for the measured rate this default clears).
     "relay_max_bytes_per_second": ("int", 4 * 1024, 2 * 1024 * 1024),
+    # -- file transfer limits (1.3.1) --
+    # A policy ceiling on one file, in MB.  0 = the protocol ceiling, so 0 is a
+    # real value rather than "unset"; the upper bound is a typo guard past the
+    # protocol ceiling (a value above it is simply clamped by the effective
+    # limit instead of being refused, so a user may keep a number that means
+    # "as large as you can").
+    "max_file_mb": ("int", 0, 65536),
+    # The same shape: a threshold and a 0 that turns the ask off.
+    "confirm_large_file_mb": ("int", 0, 65536),
+    # A relay-specific ceiling, 0 = no extra cap.
+    "relay_paste_max_mb": ("int", 0, 65536),
 }
 
 # The numeric subset, for the callers that only need the bounds (the settings
@@ -1008,6 +1096,16 @@ def load() -> Config:
                 "retry_capture_enabled",
                 "dedup_method",
                 "plain_text_only",
+                # 1.3.0 paste behaviour / recording rules.
+                "auto_paste_enabled",
+                "skip_password_manager_clips",
+                "skip_prelaunch_clipboard",
+                "max_non_file_paste_mb",
+                "source_exclusion_patterns",
+                # 1.3.1 file transfer limits.
+                "max_file_mb",
+                "confirm_large_file_mb",
+                "relay_paste_max_mb",
                 "auto_update_check",
                 "app_filter_enabled",
                 "app_filter_mode",
@@ -1096,14 +1194,34 @@ def load() -> Config:
             # not be a default, it would be opening the port to the network.
             #
             # Every other config is flipped once, and only once — the save that
-            # follows writes version 3, so a user who turns it back off keeps it
-            # off.  A token in the config is not evidence of use and is
+            # follows writes version 3 or later, so a user who turns it back off
+            # keeps it off.  A token in the config is not evidence of use and is
             # deliberately not consulted: the webview front end mints one
             # whether or not the companion was ever enabled
             # (``src/main.py``), so most configs carry one.
             if (data.get("config_version", 1) < 3 and not cfg.web_enabled
                     and not cfg.web_token_disabled):
                 cfg.web_enabled = True
+            # v4 (1.3.0): Ctrl+Shift+V now opens the quick-paste overlay, and
+            # the plain-text paste moved to Ctrl+Alt+V.  Only the *old default*
+            # is rewritten: a config that never touched the binding still
+            # carries the default, and it would otherwise keep plain-text paste
+            # on the combination the overlay is about to claim.  A binding the
+            # user chose is indistinguishable from the old default when it is
+            # spelled the same, so that one case does move — the alternative is
+            # two actions fighting over one shortcut.
+            #
+            # The overlay action did not exist before this version, so no config
+            # can name it: it is added when missing.  Existing actions are
+            # deliberately not merged back in — the settings page submits the
+            # whole map, and refilling a row the user deleted would undo it.
+            if data.get("config_version", 1) < 4:
+                if cfg.hotkeys.get("paste_plain") == "Ctrl+Shift+V":
+                    cfg.hotkeys["paste_plain"] = DEFAULT_HOTKEYS["paste_plain"]
+                cfg.hotkeys.setdefault(
+                    "show_quick_paste", DEFAULT_HOTKEYS["show_quick_paste"]
+                )
+                cfg.config_version = 4
             # Migrate from legacy dict-format peers (pre-list) to list format:
             #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
             cfg.peers = _parse_peer_list(data, "peers")
@@ -1122,7 +1240,7 @@ def load() -> Config:
 
 def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
     with config_lock:
-        cfg.config_version = 3
+        cfg.config_version = 4
         config_dir = _config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = _config_path()
@@ -1196,6 +1314,14 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "retry_capture_enabled": cfg.retry_capture_enabled,
             "dedup_method": cfg.dedup_method,
             "plain_text_only": cfg.plain_text_only,
+            "auto_paste_enabled": cfg.auto_paste_enabled,
+            "skip_password_manager_clips": cfg.skip_password_manager_clips,
+            "skip_prelaunch_clipboard": cfg.skip_prelaunch_clipboard,
+            "max_non_file_paste_mb": cfg.max_non_file_paste_mb,
+            "source_exclusion_patterns": cfg.source_exclusion_patterns,
+            "max_file_mb": cfg.max_file_mb,
+            "confirm_large_file_mb": cfg.confirm_large_file_mb,
+            "relay_paste_max_mb": cfg.relay_paste_max_mb,
             "auto_update_check": cfg.auto_update_check,
             "app_filter_enabled": cfg.app_filter_enabled,
             "app_filter_mode": cfg.app_filter_mode,

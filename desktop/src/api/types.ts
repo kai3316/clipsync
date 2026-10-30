@@ -44,6 +44,41 @@ export interface Settings {
   settings: Record<string, unknown>;
 }
 
+/**
+ * What the quick-paste overlay reads about the window it belongs to.
+ *
+ * `language` is the sidecar's stored language — the overlay is a window of its
+ * own and has no `App.vue` to have pushed a locale into it — and
+ * `appearance_mode` is the same store's theme: the overlay is a second document,
+ * so it applies the choice itself rather than inheriting the main window's
+ * `data-theme`.  `auto_paste_enabled` is carried along for surfaces that need to
+ * say what a hotkey will do; the overlay itself does not gate on it, because
+ * opening the overlay is asking for a paste and Enter always pastes there.
+ *
+ * Both optional fields exist for a host older than them: a missing theme reads
+ * as `system`, which is what such a build could have shown anyway.
+ */
+export interface QuickPasteSettings {
+  language: string;
+  auto_paste_enabled: boolean;
+  /** One of `APPEARANCE_MODES` (`src/lib/theme.ts`). */
+  appearance_mode?: string;
+}
+
+/**
+ * What choosing a row in the overlay answered.
+ *
+ * `ok: false` is not "nothing happened": the clipboard write already landed and
+ * the host re-shows the overlay, so `copied` says the clip is there and
+ * `message` is the sentence to show beside the row the reader can try again.
+ */
+export interface QuickPasteChooseResult {
+  ok: boolean;
+  copied?: boolean;
+  code?: string;
+  message?: string;
+}
+
 export interface BackupItem {
   path: string;
   filename?: string;
@@ -68,12 +103,35 @@ export interface Transfer {
    *  the LAN.  Read off the offer's own chunk size by the sidecar, and what
    *  lets the pending row warn the reader before they accept. */
   relay?: boolean;
+  /**
+   * The remote-file history entry this transfer is fetching, when it is one
+   * half of an on-demand paste; empty for every ordinary transfer.
+   *
+   * The progress panel filters the live list on it rather than guessing which
+   * of several downloads are its own.  Optional because a sidecar older than
+   * 1.3.1 sends no key.
+   */
+  paste_entry?: string;
 }
 
 export interface TransfersPage {
   active: Transfer[];
   history: Transfer[];
   speed_test?: Record<string, unknown>;
+}
+
+/** The payload of a `clip_files.paste_ready` event: the on-demand paste's files
+ *  are here, on the clipboard, and the row has become a local file. */
+export interface PasteReadyEvent {
+  entry_id: string;
+  paths: string[];
+}
+
+/** The payload of a `clip_files.paste_failed` event.  `reason` is the sidecar's
+ *  word for it — see `pasteFailureText` for the sentences. */
+export interface PasteFailedEvent {
+  entry_id: string;
+  reason: string;
 }
 
 /**
@@ -120,9 +178,15 @@ export interface HistoryItem {
   /** Name of the device the clip synced from — this one, a peer, or the phone. */
   source_name: string;
   /**
-   * The device id that name stands for, which is what a download request has to
-   * name.  Empty for a clip captured on this machine.  Optional because the
-   * sidecar only started sending it alongside `FILE_REMOTE` rows.
+   * The device id that name stands for.  It is what a download request has to
+   * name, and — for every kind of clip, not only files — what tells a row that
+   * arrived from another machine apart from one captured here: the sidecar
+   * stamps it on any clip that came off the wire (`handle_remote_message_ex`)
+   * and leaves it empty for a local capture.
+   *
+   * Optional in this type only because a window may be running against a
+   * sidecar older than the field, which sends no key at all; the current
+   * sidecar puts it on every row.
    */
   source_device?: string;
   /**

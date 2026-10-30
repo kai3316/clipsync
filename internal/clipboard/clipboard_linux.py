@@ -70,6 +70,47 @@ def _detect_display_backend() -> str:
 _BACKEND = _detect_display_backend()
 logger.info("Detected display backend: %s", _BACKEND)
 
+# The atom KDE applications (KeePassXC, KWallet's password fields) add to a copy
+# they do not want clipboard managers to record.  It travels in the TARGETS
+# list, which is how an X11/Wayland clipboard names the types it currently
+# offers; the marker has no content of its own worth reading.
+PASSWORD_MANAGER_HINT = b"x-kde-passwordManagerHint"
+
+
+def _clipboard_targets() -> set[bytes]:
+    """The format names the clipboard currently offers, as bytes.
+
+    X11 spells them as atoms in the ``TARGETS`` list; ``wl-paste --list-types``
+    is the Wayland equivalent.  Both are tried, primary backend first, because
+    a session can move between the two under the same app (an XWayland client
+    on a Wayland desktop still answers X11 calls).  An unavailable tool or a
+    failed call yields an empty set, never an exception: this runs on the poll
+    thread and a marker that cannot be read must not stop capture.
+    """
+    x11 = ["xclip", "-selection", "clipboard", "-o", "-t", "TARGETS"]
+    wayland = ["wl-paste", "--list-types"]
+    tools = (wayland, x11) if _BACKEND == "wayland" else (x11, wayland)
+    for args in tools:
+        try:
+            result = subprocess.run(args, capture_output=True, timeout=2)
+        except Exception:
+            continue
+        if result.returncode == 0 and result.stdout:
+            return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    return set()
+
+
+def _password_manager_hint() -> bool:
+    """Whether the clipboard carries KDE's password-manager "do not record" hint.
+
+    Read when a change is detected, before the callback fires, so the marker is
+    taken from the copy the capture is about to read.  The values after the
+    colon (what the copy requests: "secret" asks for the clipboard to also be
+    cleared after pasting) do not matter here — carrying the atom at all is
+    the "do not record" signal.
+    """
+    return PASSWORD_MANAGER_HINT in _clipboard_targets()
+
 
 _xclip_warned = False
 
@@ -631,8 +672,12 @@ class LinuxClipboardMonitor(ClipboardMonitor):
                     continue
                 if self._callback:
                     try:
-                        # Capture source app info before the callback fires.
+                        # Capture source app info and the "do not record" marker
+                        # before the callback fires, so the capture knows which
+                        # app produced the content and whether it asked to be
+                        # left out of history.  Both read this clipboard event.
                         self.last_source_app = self.get_active_app()
+                        self.last_concealed = _password_manager_hint()
                         self._callback()
                     except Exception:
                         pass

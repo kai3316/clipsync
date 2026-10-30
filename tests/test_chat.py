@@ -31,8 +31,11 @@ from internal.protocol.codec import (
     encode_frame,
 )
 from internal.security.pairing import PairingManager
-from internal.sync.file_transfer import MAX_FILE_SIZE
-from internal.sync.nearby_chat import ChatFileTooLargeError, ChatManager
+from internal.sync.nearby_chat import (
+    CHAT_MAX_FILE_SIZE,
+    ChatFileTooLargeError,
+    ChatManager,
+)
 from internal.transport.connection import PeerConnection, TransportManager
 from internal.transport.relay import MAX_RELAY_PAYLOAD
 from internal.web.api import chat as chat_api
@@ -666,7 +669,7 @@ class TestInternetRelayFileTransfers:
         assert (self._b_entry(tid) or {}).get("status") != "done"
 
     def test_an_oversize_file_is_refused_before_any_offer(self):
-        """Only ``MAX_FILE_SIZE`` refuses now — the relay's 5 MiB file cap is gone.
+        """Only ``CHAT_MAX_FILE_SIZE`` refuses now — the relay's 5 MiB file cap is gone.
 
         The relay limits one *message*, not the file, and ``send_file`` already
         cuts chunks to that limit — so a file far past any single envelope still
@@ -677,7 +680,7 @@ class TestInternetRelayFileTransfers:
         """
         src = self.dir_a / "huge.bin"
         with open(src, "wb") as fh:
-            fh.truncate(MAX_FILE_SIZE + 1)
+            fh.truncate(CHAT_MAX_FILE_SIZE + 1)
         with pytest.raises(ChatFileTooLargeError):
             self.pair.a.send_file(self.sid, str(src), self._relay_fn())
         # No offer frame should have left the sender.

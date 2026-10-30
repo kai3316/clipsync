@@ -87,6 +87,17 @@ class ClipboardMonitor(ABC):
     # Set by platform-specific monitors before calling the callback.
     last_source_app: dict | None = None
 
+    # Whether the application that produced the last clipboard change asked not
+    # to be recorded (a password manager's "concealed"/"transient" marker).
+    #
+    # Set by the platform adapters at the same moment as ``last_source_app``,
+    # because both describe that one clipboard event and have to be read
+    # together; ``SyncManager`` drops the capture when the
+    # ``skip_password_manager_clips`` setting is on.  False is the honest answer
+    # for a platform that cannot say, and is also what a monitor that has not
+    # seen a marked copy reports.
+    last_concealed: bool = False
+
     # Whether source-app tracking is enabled.  When False, get_active_app()
     # returns None and no OS query is made.
     source_tracking_enabled: bool = True

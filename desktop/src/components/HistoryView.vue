@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import {
-  Check, ChevronLeft, ChevronRight, Copy, Download, ExternalLink, Globe,
+  Check, ChevronLeft, ChevronRight, ClipboardPaste, Copy, ExternalLink, Globe,
   History, Pin, PinOff, Plug, RefreshCw, Search, SendHorizontal, Smartphone, Star,
   Trash2, X,
 } from "@lucide/vue";
@@ -60,8 +60,7 @@ const state = store.state;
 // The row actions the menu also uses.  Shared rather than copied: see
 // `lib/history-actions.ts` for why they are neither here nor in `App.vue`.
 const {
-  isWebLink, openHistoryLink, isRemoteFile, remoteFileBusy,
-  remoteFileActionable, remoteFileTitle, downloadRemoteFile,
+  isWebLink, openHistoryLink, isRemoteFile, remoteFileActionable,
 } = createHistoryActions(store);
 
 /** What this page asks the window to do, and all it should have to ask for.
@@ -72,7 +71,18 @@ const emit = defineEmits<{
   translate: [item: HistoryItem];
   delete: [item: HistoryItem];
   "batch-delete": [ids: string[]];
+  /** 取回并粘贴: the row's own button on a file that lives on another device.
+   *  The window owns the fetch (the progress bar and the paste that follows), so
+   *  the page only names the row. */
+  "paste-to-app": [item: HistoryItem];
 }>();
+
+/** The button's tooltip on a remote-file row: what the click does, and which
+ *  machine it fetches from.  The same wording as the menu entry, because it is
+ *  the same action. */
+function pasteRemoteTitle(item: HistoryItem): string {
+  return t("从 {name} 取回这个文件并粘贴", { name: item.source_name || t("未知") });
+}
 
 /** The search box, so Ctrl+F has something to focus and Esc something to empty. */
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -494,6 +504,29 @@ async function refreshHistoryNow() {
   await store.refreshHistory();
   store.toast("ui.history", t("已刷新 · {count} 条记录", { count: state.total }));
 }
+/** Open the host's quick-paste overlay from the page that holds the rows.
+ *
+ * The overlay is the OS-wide gesture's window (`Ctrl+Shift+V` by default): the
+ * host creates it over whichever application has the focus, which is why the
+ * sidebar — a control the main window draws about itself — is not where it can
+ * live.  A reader with the history page in front of them has this button
+ * instead, and it is one command: the window, the focus bookkeeping and the
+ * paste are the host's.
+ */
+const quickPasteBusy = ref(false);
+async function openQuickPasteWindow() {
+  if (quickPasteBusy.value) return;
+  quickPasteBusy.value = true;
+  try {
+    await bridge.openQuickPaste();
+  } catch (error) {
+    // The failure band, because the host refusing to open a window is a broken
+    // window rather than an ordinary answer beside a key press.
+    store.setError(error);
+  } finally {
+    quickPasteBusy.value = false;
+  }
+}
 /* The search box: what it holds, and when it asks.
  *
  * Out of a search without touching the keyboard works the same way — the × is
@@ -758,6 +791,12 @@ defineExpose({ focusSearch, search, releasePinned, clearSearchIfFocused, pinKbdR
       :disabled="!ready" @input="typeSearch(($event.target as HTMLInputElement).value)"
     /><button v-if="searchText" type="button" class="search-clear" :aria-label="t('清除搜索')" :title="t('清除搜索')" @click.prevent="clearHistorySearch"><X :size="14" /></button></label>
     <button class="icon-button" :title="t('刷新')" :aria-label="t('刷新')" :disabled="historyBusy" @click="refreshHistoryNow"><RefreshCw :size="18" :class="{ spinning: state.loading }" /></button>
+    <!-- The overlay's door from the page that holds the rows.  Labelled rather
+         than a bare glyph, because it opens a window rather than acting on this
+         list, and there is no icon in the window that already means "paste
+         elsewhere". -->
+    <button class="icon-button icon-button--labelled" :aria-label="t('快速粘贴')" :title="t('快速粘贴')"
+      :disabled="!ready || quickPasteBusy" @click="openQuickPasteWindow"><ClipboardPaste :size="17" /><span class="icon-button-label">{{ t("快速粘贴") }}</span></button>
   </div>
   <div v-if="state.hasHistory" class="history-filters" role="group" :aria-label="t('按类型筛选历史记录')">
     <!-- The same line as the search box above: a filter is a read, and
@@ -885,10 +924,12 @@ defineExpose({ focusSearch, search, releasePinned, clearSearchIfFocused, pinKbdR
       <div class="row-actions">
         <button v-if="!isRemoteFile(item)" class="icon-button" :aria-label="t('复制记录')" :title="t('复制记录')" :disabled="historyWritable" @click="store.copy(item, false)"><Check v-if="state.copiedId === item.id" :size="17" /><Copy v-else :size="17" /></button>
         <!-- The one row whose action is not 复制: the file is not on this
-             machine, so what the row offers is the ask.  It replaces
-             rather than sits beside the copy button — two buttons on one
-             row where only one of them can work is worse than one. -->
-        <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('下载文件')" :title="remoteFileTitle(item)" :disabled="historyWritable || !remoteFileActionable(item)" @click="downloadRemoteFile(item)"><RefreshCw v-if="remoteFileBusy(item)" class="spinning" :size="17" /><Download v-else :size="17" /></button>
+             machine, so the row's button starts the fetch-and-paste (1.3.1).
+             It replaces rather than sits beside the copy button — two buttons
+             on one row where only one of them can work is worse than one.  The
+             explicit download (取回但不粘贴) stays in the row's menu, where the
+             action for a file wanted on disk belongs. -->
+        <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('取回并粘贴')" :title="pasteRemoteTitle(item)" :disabled="historyWritable || !remoteFileActionable(item)" @click="emit('paste-to-app', item)"><ClipboardPaste :size="17" /></button>
         <button class="icon-button" :class="{ pinned: item.pinned }" :aria-label="item.pinned ? t('取消置顶') : t('置顶')" :title="item.pinned ? t('取消置顶') : t('置顶')" :disabled="historyWritable" @click="store.pin(item)"><Pin :size="17" /></button>
         <button class="icon-button" :aria-label="t('翻译记录')" :title="t('翻译记录')" :disabled="historyWritable || translating" @click="emit('translate', item)"><Globe :size="17" /></button>
         <button v-if="isWebLink(item)" class="icon-button" :aria-label="t('在浏览器打开')" :title="t('在浏览器打开')" :disabled="historyWritable" @click="openHistoryLink(item)"><ExternalLink :size="17" /></button>

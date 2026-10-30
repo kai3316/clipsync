@@ -32,6 +32,25 @@ _SAFE_FIELDS = {
     "appearance_mode",
     "sync_enabled",
     "plain_text_only",
+    # Paste behaviour and recording rules (1.3.0): whether a retrieved history
+    # entry is pasted into the focused application, whether the OS/clipboard
+    # "do not record" marker is honoured, whether the pre-launch clipboard is
+    # skipped, the non-file size cap in MB (0 = unlimited), and the source
+    # substrings excluded from recording.  All of them are preferences the
+    # recording path reads live, so they belong on both the read and the write
+    # side of this API.
+    "auto_paste_enabled",
+    "skip_password_manager_clips",
+    "skip_prelaunch_clipboard",
+    "max_non_file_paste_mb",
+    "source_exclusion_patterns",
+    # File transfer limits (1.3.1): the per-file policy ceiling in MB (0 = the
+    # protocol ceiling), the large-paste confirmation threshold (0 = never
+    # ask), and the relay-specific cap for a paste pulled on demand (0 = no
+    # extra cap).  Read live by the transfer manager / paste flow.
+    "max_file_mb",
+    "confirm_large_file_mb",
+    "relay_paste_max_mb",
     "encryption_enabled",
     "notifications_enabled",
     "notify_device_connect",
@@ -180,6 +199,21 @@ _MUTABLE_FIELDS = {
     "appearance_mode",
     "sync_enabled",
     "plain_text_only",
+    # Paste behaviour and recording rules (1.3.0).  Writable here as well as
+    # readable: the desktop settings page saves them through the sidecar's
+    # settings.update, which ends in this table, and the live recording path
+    # reads the same Config fields.
+    "auto_paste_enabled",
+    "skip_password_manager_clips",
+    "skip_prelaunch_clipboard",
+    "max_non_file_paste_mb",
+    "source_exclusion_patterns",
+    # File transfer limits (1.3.1).  Writable here for the same reason: the
+    # desktop settings page saves the whole form through settings.update, and
+    # the transfer manager / paste flow read these Config fields live.
+    "max_file_mb",
+    "confirm_large_file_mb",
+    "relay_paste_max_mb",
     "encryption_enabled",
     "notifications_enabled",
     "notify_device_connect",

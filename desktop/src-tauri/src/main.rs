@@ -4,6 +4,7 @@ mod bridge;
 mod confine;
 mod error;
 mod i18n;
+mod paste;
 mod protocol;
 mod tray;
 
@@ -56,6 +57,27 @@ fn hotkey_map(state: &Hotkeys) -> std::sync::MutexGuard<'_, HashMap<Shortcut, St
         .actions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The application that had the focus when the quick-paste window opened.
+///
+/// Stored by the host, never read by the window: choosing a clip hides the
+/// overlay, hands the focus back here, and only then injects the keystroke.
+/// `None` when the platform cannot say who was in front (Wayland), in which
+/// case hiding the overlay is expected to re-activate the previous application
+/// on its own.
+struct PasteOrigin(std::sync::Mutex<Option<paste::Foreground>>);
+
+/// Take the recorded foreground application, leaving the slot empty for the
+/// next open.
+fn take_paste_origin(app: &tauri::AppHandle) -> Option<paste::Foreground> {
+    app.try_state::<PasteOrigin>().and_then(|state| {
+        state
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    })
 }
 
 /// Whether the window itself owns the key the shortcut was bound to.
@@ -265,6 +287,22 @@ fn authorize(window: &WebviewWindow) -> Result<(), BridgeError> {
         return Err(BridgeError::new(
             "PERMISSION_DENIED",
             "Command is restricted to the main window",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the caller is the quick-paste overlay.
+///
+/// The overlay gets a command family of its own rather than a broader
+/// `authorize`: it may search history and paste one row, and nothing else, so
+/// the capability file and this check agree instead of the overlay inheriting
+/// the main window's full surface.
+fn authorize_quick_paste(window: &WebviewWindow) -> Result<(), BridgeError> {
+    if window.label() != "quick-paste" {
+        return Err(BridgeError::new(
+            "PERMISSION_DENIED",
+            "Command is restricted to the quick-paste window",
         ));
     }
     Ok(())
@@ -636,7 +674,10 @@ fn ai_local_params(action: &str, tool: String, root: String, rel_path: String, c
 
 #[tauri::command]
 async fn list_transfers(window: WebviewWindow, host: State<'_, Host>) -> Result<Value, BridgeError> {
-    authorize(&window)?;
+    // The quick-paste overlay reads the live transfers while it fetches a
+    // remote file for a paste; it starts that fetch itself (see
+    // `prepare_paste_entry`), so it may read the progress of its own transfer.
+    authorize_main_or_quick_paste(&window)?;
     host.bridge().await?.call("transfers.list", json!({})).await
 }
 
@@ -1710,7 +1751,10 @@ async fn preview_history_entry(
     host: State<'_, Host>,
     entry_id: String,
 ) -> Result<Value, BridgeError> {
-    authorize(&window)?;
+    // The quick-paste overlay reads the same card to size a large-file confirm
+    // prompt for a remote-file row it is about to fetch; the payload is the
+    // one the main window already gets.
+    authorize_main_or_quick_paste(&window)?;
     validate_id(&entry_id)?;
     host.bridge()
         .await?
@@ -3145,6 +3189,245 @@ async fn quit_app(
     Ok(())
 }
 
+/// Inject Ctrl/Cmd+V into the application that currently has the focus.
+///
+/// The caller has already put the clip on the clipboard through the sidecar
+/// (`history.copy`); this command only performs the keystroke, so a failure
+/// leaves the clip on the clipboard and the window can say "press it
+/// yourself" instead of losing the content.
+#[tauri::command]
+async fn inject_paste(window: WebviewWindow) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    // Long enough for the sidecar's clipboard write to settle before the
+    // keystroke asks the target application to read it; the window is not
+    // painting during this call.
+    let delay = Duration::from_millis(90);
+    tauri::async_runtime::spawn_blocking(move || paste::inject_paste(delay))
+        .await
+        .map_err(|error| BridgeError::new("PASTE_FAILED", &error.to_string()))?
+        .map_err(|error| BridgeError::new("PASTE_FAILED", &error))?;
+    Ok(json!({"ok": true}))
+}
+
+/// Hide the main window and paste into the application the window manager
+/// activates next.
+///
+/// The main window's "paste to the current app" menu entry: the clip is on the
+/// clipboard already, the window hides itself, and the keystroke goes to
+/// whatever was behind it.  A failure shows the window again — a toast about a
+/// paste nobody saw would be worse than the clip staying on the clipboard.
+#[tauri::command]
+async fn hide_main_and_paste(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.hide();
+    }
+    let pasted = tauri::async_runtime::spawn_blocking(|| {
+        std::thread::sleep(Duration::from_millis(120));
+        paste::inject_paste(Duration::from_millis(0))
+    })
+    .await
+    .map_err(|error| BridgeError::new("PASTE_FAILED", &error.to_string()))?;
+    match pasted {
+        Ok(()) => Ok(json!({"ok": true})),
+        Err(message) => {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.show();
+                let _ = main.set_focus();
+            }
+            Err(BridgeError::new("PASTE_FAILED", &message))
+        }
+    }
+}
+
+/// Show the quick-paste overlay from the main window (button, tray entry).
+#[tauri::command]
+fn open_quick_paste(window: WebviewWindow, app: tauri::AppHandle) -> Result<Value, BridgeError> {
+    authorize(&window)?;
+    open_quick_paste_for(app);
+    Ok(json!({"ok": true}))
+}
+
+/// The settings the overlay needs to draw itself in the user's language.
+#[tauri::command]
+async fn quick_paste_settings(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+) -> Result<Value, BridgeError> {
+    authorize_quick_paste(&window)?;
+    let settings = host.bridge().await?.call("settings.get", json!({})).await?;
+    Ok(json!({
+        "language": settings.get("language").and_then(Value::as_str).unwrap_or("zh-CN"),
+        // The overlay is its own window and owns its own `data-theme`: without
+        // this it could only follow the OS, so a user on the sepia/contrast
+        // theme would get a differently coloured overlay.  `system` is the
+        // fallback, which is what the shell itself uses for an unknown value.
+        "appearance_mode": settings
+            .get("appearance_mode")
+            .and_then(Value::as_str)
+            .unwrap_or("system"),
+        "auto_paste_enabled": settings
+            .get("auto_paste_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    }))
+}
+
+/// Search history for the overlay through the same `history.list` the main
+/// window uses, so the two result sets cannot drift.
+#[tauri::command]
+async fn quick_paste_list(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    query: String,
+    kind: String,
+    limit: u32,
+) -> Result<Value, BridgeError> {
+    authorize_quick_paste(&window)?;
+    let query: String = query.chars().take(512).collect();
+    let kind = match kind.as_str() {
+        "text" | "image" | "file" | "link" | "all" => kind,
+        _ => "all".to_string(),
+    };
+    let limit = limit.clamp(1, 100);
+    host.bridge()
+        .await?
+        .call(
+            "history.list",
+            json!({"query": query, "offset": 0, "limit": limit, "kind": kind, "sort": "newest"}),
+        )
+        .await
+}
+
+/// Copy the chosen clip, hide the overlay, hand the focus back and paste.
+///
+/// The overlay is an explicit paste surface: it is opened to paste, so the
+/// `auto_paste_enabled` preference (which gates the direct `paste_N` shortcuts)
+/// does not turn this into a "just copy" window.  When the keystroke fails the
+/// overlay is shown again and the answer carries `copied: true`, which is the
+/// signal that the clip is on the clipboard and the user should paste manually.
+#[tauri::command]
+async fn quick_paste_choose(
+    window: WebviewWindow,
+    app: tauri::AppHandle,
+    host: State<'_, Host>,
+    entry_id: String,
+    plain: bool,
+) -> Result<Value, BridgeError> {
+    authorize_quick_paste(&window)?;
+    if entry_id.is_empty() || entry_id.len() > 64 {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid history entry"));
+    }
+    host.bridge()
+        .await?
+        .call(
+            "history.copy",
+            json!({"entry_id": entry_id, "plain_text": plain}),
+        )
+        .await?;
+    let origin = take_paste_origin(&app);
+    let _ = window.hide();
+    let pasted = tauri::async_runtime::spawn_blocking(move || {
+        paste::restore_and_paste(origin, Duration::from_millis(0))
+    })
+    .await;
+    match pasted {
+        Ok(Ok(())) => Ok(json!({"ok": true})),
+        Ok(Err(message)) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            Ok(json!({"ok": false, "copied": true, "code": "PASTE_FAILED", "message": message}))
+        }
+        Err(error) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            Ok(json!({
+                "ok": false,
+                "copied": true,
+                "code": "PASTE_FAILED",
+                "message": error.to_string(),
+            }))
+        }
+    }
+}
+
+/// Hide the overlay (Esc, or the window asked to close).
+#[tauri::command]
+fn quick_paste_close(window: WebviewWindow) -> Result<Value, BridgeError> {
+    authorize_quick_paste(&window)?;
+    let _ = window.hide();
+    Ok(json!({"ok": true}))
+}
+
+/// Whether the caller may use the paste-fetch family.
+///
+/// Both windows may: the main window's history row starts a fetch and draws its
+/// progress, and the quick-paste overlay starts one when the chosen row is a
+/// file that lives on another device (and polls `list_transfers` for the
+/// progress panel).  This is a two-window exception for three commands, not a
+/// second main window: everything else still calls [`authorize`].
+fn authorize_main_or_quick_paste(window: &WebviewWindow) -> Result<(), BridgeError> {
+    if window.label() == "main" || window.label() == "quick-paste" {
+        return Ok(());
+    }
+    Err(BridgeError::new(
+        "PERMISSION_DENIED",
+        "Command is restricted to the ClipSync windows",
+    ))
+}
+
+/// Start fetching the files behind a remote-file history row.
+///
+/// The sidecar owns the transfer and the history rewrite; this command only
+/// starts it and returns.  Progress, completion and failure arrive as
+/// `transfer.progress` / `clip_files.paste_ready` / `clip_files.paste_failed`,
+/// and the window injects the paste itself once the row is local again
+/// (`quick_paste_choose` in the overlay, `hide_main_and_paste` from the main
+/// window) — the sidecar deliberately does not press keys.
+///
+/// `confirmed` says the user already accepted the large-file prompt; the
+/// sidecar answers `PASTE_CONFIRM_REQUIRED` when the size crossed the threshold
+/// and the flag was absent.
+#[tauri::command]
+async fn prepare_paste_entry(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    entry_id: String,
+    confirmed: Option<bool>,
+) -> Result<Value, BridgeError> {
+    authorize_main_or_quick_paste(&window)?;
+    if entry_id.is_empty() || entry_id.len() > 128 {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid history entry"));
+    }
+    host.bridge()
+        .await?
+        .call(
+            "transfers.prepare_paste",
+            json!({"entry_id": entry_id, "confirmed": confirmed.unwrap_or(false)}),
+        )
+        .await
+}
+
+/// Abandon a prepared paste and clean up its transfer.
+#[tauri::command]
+async fn cancel_paste_entry(
+    window: WebviewWindow,
+    host: State<'_, Host>,
+    entry_id: String,
+) -> Result<Value, BridgeError> {
+    authorize_main_or_quick_paste(&window)?;
+    if entry_id.is_empty() || entry_id.len() > 128 {
+        return Err(BridgeError::new("VALIDATION_ERROR", "Invalid history entry"));
+    }
+    host.bridge()
+        .await?
+        .call("transfers.cancel_paste", json!({"entry_id": entry_id}))
+        .await
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     // macOS: the Dock tile is put away while the window is (see the close
     // handler), and it has to come back before the window does — a window with
@@ -3168,6 +3451,78 @@ fn show_main_window_and(app: &tauri::AppHandle, event: &str) {
     use tauri::Emitter;
     show_main_window(app);
     let _ = app.emit_to("main", event, json!({}));
+}
+
+/// Open the quick-paste overlay, remembering who had the focus.
+///
+/// Two entry points share this: the `show_quick_paste` global shortcut (no
+/// window of ours is in front, so the foreground recorded here is the target)
+/// and the main window's own button/tray entry (the main window is in front,
+/// so it is put away first — that is what makes the focus go back to the
+/// application the user came from).
+fn open_quick_paste_for(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        if let Some(main) = app.get_webview_window("main") {
+            if main.is_focused().unwrap_or(false) {
+                let _ = main.hide();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        let origin = paste::record_foreground();
+        if let Some(state) = app.try_state::<PasteOrigin>() {
+            *state
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = origin;
+        }
+        let existing = app.get_webview_window("quick-paste").is_some();
+        match ensure_quick_paste_window(&app) {
+            Ok(window) => {
+                // A window that has already loaded is shown directly.  A
+                // freshly built one shows itself from its page-load handler
+                // instead, so the reader never sees an empty frameless frame
+                // while the overlay's bundle is still parsing.
+                if existing {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            Err(error) => eprintln!("quick-paste window unavailable: {error}"),
+        }
+    });
+}
+
+/// Build the overlay the first time it is asked for, then reuse it.
+///
+/// Frameless, always on top and out of the taskbar: a transient search surface,
+/// not a second main window.  It is built hidden and shows itself once the page
+/// has finished loading — `open_quick_paste_for` only shows an already-loaded
+/// window directly — so the first open cannot flash an empty frame.
+fn ensure_quick_paste_window(app: &tauri::AppHandle) -> tauri::Result<WebviewWindow> {
+    if let Some(window) = app.get_webview_window("quick-paste") {
+        return Ok(window);
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "quick-paste",
+        tauri::WebviewUrl::App("quick-paste.html".into()),
+    )
+    .title("ClipSync")
+    .inner_size(760.0, 520.0)
+    .decorations(false)
+    .resizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(true)
+    .visible(false)
+    .center()
+    .on_page_load(|window, payload| {
+        if payload.event() == tauri::webview::PageLoadEvent::Finished {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    })
+    .build()
 }
 
 /// Make a sound for an incoming chat message the reader asked to hear.
@@ -3391,6 +3746,10 @@ fn main() {
                         // that is busy, and neither can answer a round trip
                         // through JS.
                         Some("show_window") => show_main_window(app),
+                        // The overlay's window is created in Rust, so the
+                        // shortcut has to be answered there as well: a hidden
+                        // webview cannot open a window it does not own.
+                        Some("show_quick_paste") => open_quick_paste_for(app.clone()),
                         Some(other) => {
                             let focused = app
                                 .get_webview_window("main")
@@ -3450,6 +3809,7 @@ fn main() {
             }
             app.manage(host);
             app.manage(Hotkeys::default());
+            app.manage(PasteOrigin(std::sync::Mutex::new(None)));
             // Built in the source language; `tray::refresh` below relabels it
             // from the saved setting as soon as the sidecar can answer.
             let tray_menu = tray::TrayMenu::build(app.handle(), i18n::DEFAULT_LOCALE)?;
@@ -3491,6 +3851,7 @@ fn main() {
                     tray::ID_PAUSE_60 => tray_call(app, "sync.pause", json!({"minutes": 60})),
                     tray::ID_RESUME => tray_call(app, "sync.resume", json!({})),
                     tray::ID_SHOW => show_main_window(app),
+                    tray::ID_QUICK_PASTE => open_quick_paste_for(app.clone()),
                     tray::ID_SEND_URL => show_main_window_and(app, "ui:send-url"),
                     tray::ID_QR => show_main_window_and(app, "ui:qr"),
                     tray::ID_SETTINGS => show_main_window_and(app, "ui:settings"),
@@ -3654,6 +4015,15 @@ fn main() {
             open_about_link,
             companion_qr,
             minimize_app,
+            inject_paste,
+            hide_main_and_paste,
+            open_quick_paste,
+            quick_paste_list,
+            quick_paste_choose,
+            quick_paste_close,
+            quick_paste_settings,
+            prepare_paste_entry,
+            cancel_paste_entry,
             quit_app,
         ])
         .build(tauri::generate_context!())
@@ -4292,13 +4662,23 @@ mod tests {
     #[test]
     fn every_handler_command_is_registered_in_build_and_acl() {
         // A command is only reachable when all three sites agree: the handler
-        // list, the manifest's closed command list, and the window ACL. Checked
+        // list, the manifest's closed command list, and a window ACL. Checked
         // against each other rather than from a hand-kept list, so a new command
         // that forgets either site fails here instead of at runtime.
+        //
+        // The ACL is per window since 1.3.0: the quick-paste overlay has its own
+        // capability file with only the four commands it may call. A command
+        // therefore has to appear in *some* capability file, not necessarily the
+        // main window's — which window may actually call it is enforced by the
+        // command's own `authorize`/`authorize_quick_paste` and by each file's
+        // `windows` list.
         let commands = handler_commands();
         assert!(commands.len() > 80, "parsed only {} commands", commands.len());
         let manifest = include_str!("../build.rs");
-        let acl = include_str!("../capabilities/main.json");
+        let acls = [
+            include_str!("../capabilities/main.json"),
+            include_str!("../capabilities/quick-paste.json"),
+        ];
         for command in commands {
             assert!(
                 manifest.contains(&format!("\"{command}\"")),
@@ -4306,8 +4686,8 @@ mod tests {
             );
             let permission = format!("\"allow-{}\"", command.replace('_', "-"));
             assert!(
-                acl.contains(&permission),
-                "{permission} is missing from capabilities/main.json"
+                acls.iter().any(|acl| acl.contains(&permission)),
+                "{permission} is missing from every capabilities/*.json"
             );
         }
     }

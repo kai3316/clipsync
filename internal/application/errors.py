@@ -160,15 +160,31 @@ def error_message(code: str, fallback: str) -> str:
 
 
 class ApplicationError(Exception):
-    def __init__(self, code: str, message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: dict | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        # Machine-readable facts a front end needs to word a prompt the raiser
+        # cannot write as one sentence: the size that crossed a confirmation
+        # threshold, say.  The message stays a log line; this is what a window
+        # reads.  Absent from the wire when empty, so a plain refusal keeps
+        # exactly the shape it always had.
+        self.details = details
 
     def as_dict(self) -> dict:
-        return {
+        payload = {
             "code": self.code,
             "message": error_message(self.code, self.message),
             "retryable": self.retryable,
         }
+        if self.details:
+            payload["details"] = dict(self.details)
+        return payload

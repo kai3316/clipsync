@@ -360,6 +360,15 @@ def test_every_field_the_window_settings_form_sends_is_accepted(app):
         "sync_debounce", "clipboard_poll_interval", "file_receive_dir",
         "transfer_timeout", "max_reconnect_attempts", "log_level", "low_memory_mode",
         "retry_capture_enabled", "dedup_method", "data_dir", "auto_start",
+        # 1.3.0 paste behaviour / recording rules: saveSettings submits them with
+        # the rest of the form, so a missing table entry would refuse the whole
+        # save -- the same failure this test exists for.
+        "auto_paste_enabled", "skip_password_manager_clips",
+        "skip_prelaunch_clipboard", "max_non_file_paste_mb",
+        "source_exclusion_patterns",
+        # 1.3.1 file transfer limits: same whole-form rule, and each 0 is a real
+        # value (protocol ceiling / never ask / no extra relay cap).
+        "max_file_mb", "confirm_large_file_mb", "relay_paste_max_mb",
     }
     # Sent conditionally, when the control was touched rather than on every
     # submit, and each one goes on its own for a reason: the password is not
@@ -387,6 +396,10 @@ def test_every_field_the_window_settings_form_sends_is_accepted(app):
         "transfer_timeout": 120, "max_reconnect_attempts": 10, "log_level": "INFO",
         "low_memory_mode": False, "retry_capture_enabled": True,
         "dedup_method": "sha256", "data_dir": "", "auto_start": False,
+        "auto_paste_enabled": False, "skip_password_manager_clips": False,
+        "skip_prelaunch_clipboard": False, "max_non_file_paste_mb": 4,
+        "source_exclusion_patterns": ["keepass"],
+        "max_file_mb": 100, "confirm_large_file_mb": 0, "relay_paste_max_mb": 25,
     }
     assert set(payload) == form_fields
     assert not conditional_fields & set(payload)
@@ -396,6 +409,17 @@ def test_every_field_the_window_settings_form_sends_is_accepted(app):
     # same way its chat twin does, not merely stop being refused.
     assert app.config.file_open_to_all is False
     assert Dispatcher(app).call("settings.get", {})["settings"]["file_open_to_all"] is False
+    # The recording rules reached the live config too, and the list keeps its
+    # entries (nothing normalizes them into a string).
+    saved = Dispatcher(app).call("settings.get", {})["settings"]
+    assert saved["auto_paste_enabled"] is False
+    assert saved["skip_password_manager_clips"] is False
+    assert saved["skip_prelaunch_clipboard"] is False
+    assert saved["max_non_file_paste_mb"] == 4.0
+    assert saved["source_exclusion_patterns"] == ["keepass"]
+    assert saved["max_file_mb"] == 100
+    assert saved["confirm_large_file_mb"] == 0
+    assert saved["relay_paste_max_mb"] == 25
     # The conditional three, on their own as the window sends them.
     assert Dispatcher(app).call(
         "settings.update", {"encryption_enabled": False}
@@ -403,6 +427,87 @@ def test_every_field_the_window_settings_form_sends_is_accepted(app):
     assert Dispatcher(app).call(
         "settings.update", {"password": "Str0ng-Passw0rd!"}
     )["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_non_file_paste_mb", -1),
+        ("max_non_file_paste_mb", 1024.5),
+        ("max_non_file_paste_mb", "8"),
+        ("auto_paste_enabled", "true"),
+        ("skip_password_manager_clips", 1),
+        ("skip_prelaunch_clipboard", None),
+        ("source_exclusion_patterns", None),
+        ("source_exclusion_patterns", [1]),
+        ("source_exclusion_patterns", [" padded"]),
+        ("source_exclusion_patterns", ["multi\nline"]),
+    ],
+)
+def test_recording_rule_settings_are_refused_when_they_do_not_fit_the_schema(app, field, value):
+    """A bad value is refused at the door, not stored and then dropped on load.
+
+    The config loader validates these fields too, so a frame that slipped past
+    here would be silently reverted by the next start — which reads as "the
+    switch does nothing".
+    """
+    with pytest.raises(ApplicationError):
+        Dispatcher(app).call("settings.update", {field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_file_mb", -1),
+        ("max_file_mb", 65537),
+        ("max_file_mb", "2048"),
+        ("confirm_large_file_mb", None),
+        ("confirm_large_file_mb", 1.5),
+        ("relay_paste_max_mb", True),
+    ],
+)
+def test_file_limit_settings_are_refused_when_they_do_not_fit_the_schema(app, field, value):
+    """0 is a real value for each of these, so "missing" must not be how 0 reads.
+
+    The bounds come from ``config.FIELD_RULES`` like every other numeric setting;
+    what this pins is that all three are in the sidecar's table at all — the
+    settings page submits its whole form in one call.
+    """
+    with pytest.raises(ApplicationError):
+        Dispatcher(app).call("settings.update", {field: value})
+
+
+def test_paste_verbs_are_routed_with_their_own_parameter_checks(app):
+    """The host's two on-demand-paste commands reach methods, not METHOD_NOT_FOUND.
+
+    ``prepare_paste``/``cancel_paste`` are new in 1.3.1 and the host already
+    calls them; a dispatch table that never learned the names would answer with
+    an application error the window cannot tell apart from a refusal, and the
+    paste button would simply do nothing.  With the engine down a well-formed
+    call gets LAN_NOT_READY, which is the proof the route exists; a malformed
+    one is refused by validation before the runtime is asked.
+    """
+    rpc = Dispatcher(app)
+    with pytest.raises(ApplicationError) as routed:
+        rpc.call("transfers.prepare_paste", {"entry_id": "12"})
+    assert routed.value.code != "METHOD_NOT_FOUND"
+    with pytest.raises(ApplicationError) as cancelled:
+        rpc.call("transfers.cancel_paste", {"entry_id": "12"})
+    assert cancelled.value.code != "METHOD_NOT_FOUND"
+    for bad in (
+        {},
+        {"entry_id": ""},
+        {"entry_id": "x" * 129},
+        {"entry_id": "12", "confirmed": "yes"},
+        {"entry_id": "12", "unexpected": 1},
+    ):
+        with pytest.raises(ApplicationError) as refused:
+            rpc.call("transfers.prepare_paste", bad)
+        assert refused.value.code == "VALIDATION_ERROR"
+    for bad in ({}, {"entry_id": ""}, {"entry_id": 12}):
+        with pytest.raises(ApplicationError) as refused:
+            rpc.call("transfers.cancel_paste", bad)
+        assert refused.value.code == "VALIDATION_ERROR"
 
 
 def test_notification_switches_round_trip_but_the_unread_one_is_refused(app):

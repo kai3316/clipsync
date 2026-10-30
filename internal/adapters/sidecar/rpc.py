@@ -227,6 +227,15 @@ _NUMERIC_SETTINGS_TYPES: dict[str, object] = {
     "max_reconnect_attempts": int,
     "relay_max_message_bytes": int,
     "relay_max_bytes_per_second": int,
+    # 1.3.0 recording rule: MB, so an int from the form is fine and the bound is
+    # the one the config loader and the HTTP API enforce (0..1024, 0 = no cap).
+    "max_non_file_paste_mb": (int, float),
+    # 1.3.1 file transfer limits, all MB integers.  Bounds derived from the
+    # config schema exactly like the numbers above; 0 is a real value for each
+    # (0 = protocol ceiling / never ask / no extra relay cap).
+    "max_file_mb": int,
+    "confirm_large_file_mb": int,
+    "relay_paste_max_mb": int,
 }
 
 
@@ -737,6 +746,31 @@ class Dispatcher:
                     and item == item.strip() and not any(c in item for c in "\0\r\n")
                     for item in v
                 )),
+                # Paste behaviour and recording rules (1.3.0).  Three switches
+                # and the size cap (its numeric bound is derived from
+                # config.FIELD_RULES below, like the other numbers here).  The
+                # settings page submits its whole form, so a field missing from
+                # this table does not mean "ignored" — it means every save from
+                # that page is refused.
+                "auto_paste_enabled": (bool, lambda _: True),
+                "skip_password_manager_clips": (bool, lambda _: True),
+                "skip_prelaunch_clipboard": (bool, lambda _: True),
+                # Source substrings, one rule's worth of lines.  Same shape and
+                # same limits as the app filter's list: a substring, trimmed,
+                # no control characters, bounded in count and length.
+                "source_exclusion_patterns": (list, lambda v: len(v) <= 256 and all(
+                    isinstance(item, str) and 0 < len(item) <= 260
+                    and item == item.strip() and not any(c in item for c in "\0\r\n")
+                    for item in v
+                )),
+                # File transfer limits (1.3.1).  Integers in MB; their bounds are
+                # derived from config.FIELD_RULES below (0..65536, and 0 has a
+                # meaning for each rather than "unset").  Same whole-form rule as
+                # the switches above: absent from this table means every save
+                # from the settings page is refused.
+                "max_file_mb": (int, lambda _: True),
+                "confirm_large_file_mb": (int, lambda _: True),
+                "relay_paste_max_mb": (int, lambda _: True),
                 "filter_enabled_categories": (list, lambda v: len(v) <= 7 and all(
                     isinstance(item, str) and item in {
                         "credit_card", "ssn", "phone", "api_key",
@@ -857,6 +891,34 @@ class Dispatcher:
                 params.get("device_id", ""), params["entry_id"]
             )
             return requested
+        if method == "transfers.prepare_paste":
+            # The paste action for a file that lives on another device: unlike
+            # `transfers.request_entry_files` (a plain 下载) this one collects
+            # what arrives, writes the clipboard, rewrites the history row and
+            # answers through events — so the call itself only reports that the
+            # fetch started.  `confirmed` is the answer to the large-paste
+            # question the previous call's PASTE_CONFIRM_REQUIRED raised.
+            validate_params(
+                params,
+                {
+                    "entry_id": (str, lambda v: 0 < len(v) <= 128),
+                    "confirmed": (bool, lambda _: True),
+                },
+                ("entry_id",),
+            )
+            return self.app.require_runtime().prepare_paste_entry(
+                params["entry_id"], bool(params.get("confirmed", False))
+            )
+        if method == "transfers.cancel_paste":
+            # Abandon a prepared paste.  Its transfers are cancelled through the
+            # ordinary cancel path, so the peer is told and no `.part` is left
+            # behind; `cancelled` is how many were actually in flight.
+            validate_params(
+                params,
+                {"entry_id": (str, lambda v: 0 < len(v) <= 128)},
+                ("entry_id",),
+            )
+            return self.app.require_runtime().cancel_paste_entry(params["entry_id"])
         if method == "transfers.action":
             fields = {
                 "action": (

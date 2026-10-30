@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
   History, Monitor, Search, RefreshCw, Pin, Trash2, ChevronLeft, ChevronRight, Eraser, FileDown, Download, Upload,
-  ShieldCheck, ShieldAlert, ShieldOff, Eye, EyeOff, LockKeyhole, AlertCircle, X, Circle, Copy, Check, Link, CloudOff, Laptop, PinOff, Star, Settings as SettingsIcon, Save, FileUp, FolderOpen, MessageCircle, Plug, PlugZap, RotateCcw, Activity, ArrowUpDown, Loader2, Fingerprint, Globe, SendHorizontal, Stethoscope, Wrench, Info, QrCode, ExternalLink, Sparkles, Clock, Smartphone, Pencil, Pause, MoreHorizontal, Keyboard, Plus, Play, Square, Heart, ChevronDown, ChevronUp,
+  ShieldCheck, ShieldAlert, ShieldOff, Eye, EyeOff, LockKeyhole, AlertCircle, X, Circle, Copy, Check, Link, CloudOff, Laptop, PinOff, Star, Settings as SettingsIcon, Save, FileUp, FolderOpen, MessageCircle, Plug, PlugZap, RotateCcw, Activity, ArrowUpDown, Loader2, Fingerprint, Globe, SendHorizontal, Stethoscope, Wrench, Info, QrCode, ExternalLink, Sparkles, Clock, Smartphone, Pencil, Pause, MoreHorizontal, Keyboard, ClipboardPaste, Plus, Play, Square, Heart, ChevronDown, ChevronUp,
 } from "@lucide/vue";
 import logo from "../../assets/icon.svg";
 import { bridge, inDesktop } from "./api/bridge";
@@ -16,6 +16,11 @@ import { formatPairingCode, isPairingCodeComplete } from "./lib/pairing-code";
 import { PAIRING_LIVE_STATUSES, chatReachable, deviceLabel, deviceRank, deviceStatus, fileReachable, pairingInFlight, platformLabel, renameWritesAlias } from "./lib/device-row";
 import { openContextMenu, type ContextMenuItem } from "./lib/context-menu";
 import { copyText } from "./lib/clipboard";
+import { applyAppearanceTheme } from "./lib/theme";
+import {
+  errorCode, errorMessage, followPasteFetch, isPasteConfirmRequired, isRemoteFileRow,
+  pasteFailureText, pastePrepareErrorText, type PasteFetchProgress, type PasteFetchRun,
+} from "./lib/paste-transfer";
 import { SEARCH_DEBOUNCE_MS } from "./lib/search-box";
 import { announce, clearStatus, statusMessage } from "./lib/status";
 import { useDialog } from "./lib/use-dialog";
@@ -152,12 +157,19 @@ const LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"] as const;
 // it was the only thing on this page that *ran* on this machine, and the group
 // it anchored kept one member afterwards — the translation card, which is a
 // service this machine calls rather than one it hosts, and so belongs with what
-// it talks to.  That leaves four groups over ten cards, and no group holding
+// it talks to.  That leaves four groups over twelve cards, and no group holding
 // a single entry.
 const settingsGroups = computed<Array<{ label: string; items: Array<{ id: string; label: string }> }>>(() => [
   { label: t("通用"), items: [
     { id: "general", label: t("常规") },
     { id: "history", label: t("剪贴板历史") },
+    // 「粘贴与录制」 sits with the history card rather than in a group of its own:
+    // what is kept and what happens when a clip is taken back are the same
+    // question asked at two ends, and this group is the one about them.
+    { id: "recording", label: t("粘贴与录制") },
+    // The file limits are the third question about a clipboard: what may leave
+    // it, what may arrive, and how large either may be (1.3.1).
+    { id: "files", label: t("文件") },
   ] },
   { label: t("连接"), items: [
     { id: "sync", label: t("同步") },
@@ -478,6 +490,30 @@ const MAX_RELAY_MAX_MESSAGE_KB = 1024;
 const DEFAULT_RELAY_MAX_BYTES_PER_SECOND = 64 * 1024;
 const MIN_RELAY_RATE_KB = 4;
 const MAX_RELAY_RATE_KB = 2048;
+/** The recording rules' one number: how large a non-file clip may be before it
+ *  is dropped, in megabytes, and the bounds the sidecar's `FIELD_RULES` put on
+ *  it (0 = no limit).  Eight megabytes is the shipped default — a screenshot or
+ *  a long article fits, a mislabelled archive does not — and a config that
+ *  predates the field reads as that default rather than as "no limit", which is
+ *  a policy the form would be claiming the reader chose.  See
+ *  `buildSettingsForm` and `saveSettings`.
+ */
+const DEFAULT_MAX_NON_FILE_PASTE_MB = 8;
+const MIN_MAX_NON_FILE_PASTE_MB = 0;
+const MAX_MAX_NON_FILE_PASTE_MB = 1024;
+/** The three file-transfer limits (1.3.1), in megabytes.
+ *
+ *  `max_file_mb` is the policy ceiling on one file (`0` = whatever the protocol
+ *  allows), `confirm_large_file_mb` is the threshold above which a paste asks
+ *  before it transfers (`0` = never ask), and `relay_paste_max_mb` caps an
+ *  on-demand paste that has to travel over the internet relay (`0` = no extra
+ *  cap).  The 65536 upper bound is the sidecar's typo guard past the protocol's
+ *  own ceiling (`FIELD_RULES`), not a limit this form invents.
+ */
+const DEFAULT_MAX_FILE_MB = 2048;
+const DEFAULT_CONFIRM_LARGE_FILE_MB = 512;
+const DEFAULT_RELAY_PASTE_MAX_MB = 50;
+const MAX_FILE_MB = 65536;
 // Security: the encryption password keeps the rules the pairing passphrase had
 // (settings_window.password_rule_* in the legacy panel; the sidecar enforces
 // the same rules server-side through netpair_passphrase_error).  The password
@@ -854,6 +890,17 @@ const savedAutoStart = ref(false);
 // rebuild the live encryption manager (and re-derive the relay channels) each
 // time, so it only travels when the toggle actually changed.
 const savedEncryptionEnabled = ref(false);
+/** The stored 自动粘贴 switch, for the global hotkeys.
+ *
+ * Not `settings.value.auto_paste_enabled`: that form is only filled the first
+ * time the settings page is opened, and a shortcut has to do the same thing on
+ * a machine nobody has visited the page on.  Kept from the same read that hands
+ * the saved bindings to the host (`applySavedHotkeys`), re-read after a save and
+ * when another surface announces the field — and `null` until the first read
+ * lands, in which case the press asks for it itself (`autoPasteNow`): a paste
+ * that silently did not happen is worse than one settings read.
+ */
+const savedAutoPasteEnabled = ref<boolean | null>(null);
 const backups = ref<Array<Record<string, unknown>>>([]);
 /** A backup's age and size, the line the legacy list put under each name.
  *
@@ -995,9 +1042,227 @@ async function openTranslateItem(item: HistoryItem) {
   } finally { translateItemReading.value = false; }
 }
 const {
-  isWebLink, openHistoryLink, isRemoteFile, isRichText,
-  remoteFileBusy, remoteFileActionable, remoteFileTitle, downloadRemoteFile,
+  isWebLink, openHistoryLink, isRemoteFile, isRichText, remoteFileActionable,
+  remoteFileTitle, downloadRemoteFile,
 } = createHistoryActions(store);
+
+/** The fetch behind a remote-file paste, while the main window is drawing its
+ *  bar.  One at a time: a second paste started from the menu would put a second
+ *  set of transfers on the wire for files that are already coming. */
+interface MainPasteFetch {
+  entryId: string;
+  item: HistoryItem;
+  progress: PasteFetchProgress | null;
+}
+const pasteFetch = ref<MainPasteFetch | null>(null);
+let pasteFetchRun: PasteFetchRun | undefined;
+/** How long a headless paste shortcut waits before giving up.  The sidecar has
+ *  its own stall timer for a fetch nobody is watching; this is the window's
+ *  promise to answer the key press eventually even if that never arrives. */
+const PASTE_HOTKEY_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Copy-and-paste, or fetch-and-paste for a file that still lives elsewhere.
+ *
+ * The row menu's one action that ends outside the window.  For a local clip the
+ * copy has to land before the paste is asked for, or the window behind would
+ * receive whatever the clipboard held before.  For a remote file there is
+ * nothing local to copy yet: the fetch runs with a bar at the bottom of the
+ * window, and the paste is handed over once the files are on the clipboard. */
+async function pasteToCurrentApp(item: HistoryItem) {
+  if (isRemoteFile(item)) { await startPasteFetch(item); return; }
+  if (!(await store.copy(item, false))) return;
+  try {
+    await bridge.hideMainAndPaste();
+  } catch {
+    store.toast("ui.history", t("已复制，请手动按 {shortcut} 粘贴", { shortcut: PASTE_SHORTCUT }));
+  }
+}
+
+/** Begin an on-demand paste of a remote-file row.
+ *
+ * The sidecar's `PASTE_CONFIRM_REQUIRED` is a question, not a failure: it opens
+ * the confirmation dialog and the answer calls this again with
+ * `confirmed: true`.  The other refusals happen before anything moves, so they
+ * are said in a toast and no bar appears. */
+async function startPasteFetch(item: HistoryItem, confirmed = false) {
+  if (pasteFetch.value) {
+    store.toast("ui.transfers", t("已经在取回一个文件，请等它完成或先取消"));
+    return;
+  }
+  try {
+    await bridge.preparePasteEntry(item.id, confirmed);
+  } catch (error) {
+    if (isPasteConfirmRequired(error)) { void askLargePasteConfirm(item); return; }
+    const message = pastePrepareErrorText(errorCode(error), errorMessage(error));
+    store.toast("ui.transfers", message);
+    return;
+  }
+  beginPasteFetch(item);
+}
+
+/** The large-file question, with the size the sidecar withheld.
+ *
+ * `PASTE_CONFIRM_REQUIRED` refuses before any bytes move and the host's error
+ * carries only its code and message, so the size is read from the row's offer
+ * instead — the same `preview_history_entry` read the hover card makes.  A
+ * folder offer has size 0 by design (its archive is built later) and an
+ * unreadable preview answers nothing at all, so both fall back to the question
+ * without a number.
+ */
+const pasteConfirmSize = ref(0);
+async function askLargePasteConfirm(item: HistoryItem) {
+  pasteConfirmItem.value = item;
+  pasteConfirmSize.value = 0;
+  try {
+    const preview = await bridge.previewHistoryEntry(item.id);
+    const files = preview?.files || [];
+    const total = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+    if (!files.some((file) => file.kind === "dir") && total > 0) pasteConfirmSize.value = total;
+  } catch { /* the question keeps its general wording */ }
+}
+
+function beginPasteFetch(item: HistoryItem) {
+  // The reactive object is the one fetch identity: the callbacks compare
+  // `pasteFetch.value` with it so an answer belonging to a newer fetch is
+  // dropped, and mutating the proxy is what repaints the bar.
+  pasteFetch.value = { entryId: item.id, item, progress: null };
+  const current = pasteFetch.value;
+  pasteFetchRun = followPasteFetch(item.id, {
+    onProgress: (progress) => {
+      if (pasteFetch.value === current) current.progress = progress;
+    },
+    onReady: (paths) => { void finishPasteFetch(current, paths); },
+    onFailed: (reason) => {
+      if (pasteFetch.value !== current) return;
+      stopPasteFetch();
+      store.toast("ui.transfers", pasteFailureText(reason));
+    },
+  });
+}
+
+/** The files are here and the row is local.  The window steps out of the way
+ *  and the host types the paste chord; a refused chord leaves the files on the
+ *  clipboard with the same "press it yourself" sentence the hotkeys use. */
+async function finishPasteFetch(current: MainPasteFetch, paths: string[]) {
+  if (pasteFetch.value !== current) return;
+  stopPasteFetch();
+  try {
+    await bridge.hideMainAndPaste();
+    store.toast("ui.transfers", t("已取回 {count} 个文件并粘贴", { count: paths.length }));
+  } catch {
+    store.toast("ui.transfers", t("已取回 {count} 个文件，已复制，请手动粘贴", { count: paths.length }));
+  }
+}
+
+function stopPasteFetch() {
+  pasteFetchRun?.stop();
+  pasteFetchRun = undefined;
+  pasteFetch.value = null;
+}
+
+/** What the bottom bar shows while a fetch runs: its name (the transfer's own
+ *  once the list has answered, the row's preview before), the bar, the rate and
+ *  the estimate.  The percent is shown as a whole number — a percentage with a
+ *  decimal is a precision nobody reads. */
+const pasteFetchPercent = computed(() => Math.min(100, Math.max(0, pasteFetch.value?.progress?.progress || 0)));
+const pasteFetchName = computed(() => {
+  const current = pasteFetch.value;
+  if (!current) return "";
+  const progress = current.progress;
+  if (progress?.filename) {
+    return progress.files > 1
+      ? t("{name} 等 {count} 个文件", { name: progress.filename, count: progress.files })
+      : progress.filename;
+  }
+  return previewLabel(current.item);
+});
+const pasteFetchSpeed = computed(() => {
+  const speed = pasteFetch.value?.progress?.speed || 0;
+  return speed > 0 ? t("{rate}/秒", { rate: size(speed) }) : "";
+});
+const pasteFetchEta = computed(() => pasteFetch.value?.progress?.eta || "");
+
+async function cancelPasteFetch() {
+  const running = pasteFetchRun;
+  stopPasteFetch();
+  await running?.cancel();
+  store.toast("ui.transfers", t("已取消取回文件"));
+}
+
+/** The large-file question's answer: the sidecar remembers a "yes" for this
+ *  attempt only, so the fetch is prepared again with it. */
+const pasteConfirmItem = ref<HistoryItem | null>(null);
+const pasteConfirmDialog = useDialog(pasteConfirmItem);
+async function confirmLargePaste() {
+  const item = pasteConfirmItem.value;
+  pasteConfirmItem.value = null;
+  if (!item) return;
+  await startPasteFetch(item, true);
+}
+
+/** A paste shortcut that landed on a remote file: fetch it quietly, then paste.
+ *
+ * There is no bar for this path — the reader pressed a key in another
+ * application and is not looking at this window — so the fetch runs headless and
+ * only the outcome is said.  The quick-paste overlay is the path with a visible
+ * progress panel; that split is deliberate rather than a missing piece. */
+async function pasteRemoteFileFromHotkey(item: HistoryItem) {
+  try {
+    await bridge.preparePasteEntry(item.id);
+  } catch (error) {
+    if (isPasteConfirmRequired(error)) {
+      store.toast("ui.hotkey", t("文件较大，请在快速粘贴窗口中确认后取回"));
+      return;
+    }
+    store.toast("ui.hotkey", pastePrepareErrorText(errorCode(error), errorMessage(error)));
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (say: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      run?.stop();
+      run = undefined;
+      store.toast("ui.hotkey", say);
+      resolve();
+    };
+    let run: PasteFetchRun | undefined;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void run?.cancel();
+      run = undefined;
+      store.toast("ui.hotkey", t("取回文件超时，请到快速粘贴窗口重试"));
+      resolve();
+    }, PASTE_HOTKEY_TIMEOUT_MS);
+    run = followPasteFetch(item.id, {
+      onProgress: () => { /* nothing to draw: the key was pressed in another app */ },
+      onReady: (paths) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        run = undefined;
+        const count = paths.length;
+        void (async () => {
+          if (await autoPasteNow()) {
+            try {
+              await bridge.injectPaste();
+              store.toast("ui.hotkey", t("已取回 {count} 个文件并粘贴", { count }));
+            } catch {
+              store.toast("ui.hotkey", t("已复制，请按 {shortcut} 手动粘贴", { shortcut: PASTE_SHORTCUT }));
+            }
+          } else {
+            store.toast("ui.hotkey", t("已取回 {count} 个文件，已复制到剪贴板", { count }));
+          }
+          resolve();
+        })();
+      },
+      onFailed: (reason) => finish(pasteFailureText(reason)),
+    });
+  });
+}
 
 /** The menu on a history row, in the legacy menu's own order.
  *
@@ -1006,10 +1271,14 @@ const {
  * hunting along the row.  That is why the conditions match the buttons' too:
  * 翻译 stands down while a translate is already in flight, 打开链接 appears
  * only for something the sidecar would actually open, and a row with no id
- * cannot be pinned or deleted.
+ * cannot be pinned or deleted.  The one exception is 「粘贴到当前应用」, which is
+ * a *combination* of 复制 with the OS paste the hotkeys already do: the row has
+ * no button for it because its click is the row's own copy, and the paste lands
+ * in whichever application the reader meant to reach.
  *
- * It takes the point rather than the event, because the overview's feed rows
- * raise the same menu from the keyboard and a key press has no coordinates.
+ * It takes the point rather than the event, because the history page's own
+ * rows raise the same menu from the keyboard and a key press has no
+ * coordinates.
  */
 function historyMenu(at: { clientX: number; clientY: number }, item: HistoryItem) {
   const hasId = !!item.id.trim();
@@ -1024,6 +1293,16 @@ function historyMenu(at: { clientX: number; clientY: number }, item: HistoryItem
       disabled: isRemoteFile(item),
       run: () => store.copy(item),
     },
+    // Copy-and-paste in one entry, for the reader whose destination is already
+    // focused behind this window.  On a remote file there is nothing on this
+    // machine to copy yet, so the same entry starts the fetch and pastes once
+    // the files are here — the reader asked to paste, and which half needed the
+    // wire is an implementation detail they should not have to choose.
+    {
+      id: "paste-to-app", label: t("粘贴到当前应用"), icon: ClipboardPaste,
+      shortcut: PASTE_SHORTCUT, disabled: !hasId,
+      run: () => pasteToCurrentApp(item),
+    },
     // Only a clip that actually carries a second, formatted form: for plain
     // text this entry and 复制 would be the same call under two names, and an
     // image has no text form to fall back to at all.
@@ -1034,12 +1313,17 @@ function historyMenu(at: { clientX: number; clientY: number }, item: HistoryItem
           run: () => store.copyPlain(item),
         }
       : null,
+    // The explicit download, kept as the row's secondary entry: a reader who
+    // wants the file on this machine without pasting it has no other one.  Its
+    // tooltip keeps what the row's old download button said about the route and
+    // reachability, because the menu is the only place that action lives now.
     isRemoteFile(item)
       ? {
-          id: "download-file", label: t("下载文件"), icon: Download,
-          // Same rule as the row's own button: anything the sidecar could
-          // actually be asked for stays clickable, and the request answering
-          // `NOT_CONNECTED` is what tells the reader the device is away.
+          id: "download-file", label: t("仅下载到本机"), icon: Download,
+          title: remoteFileTitle(item),
+          // Same rule as before: anything the sidecar could actually be asked
+          // for stays clickable, and the request answering `NOT_CONNECTED` is
+          // what tells the reader the device is away.
           disabled: !remoteFileActionable(item),
           run: () => downloadRemoteFile(item),
         }
@@ -1923,11 +2207,9 @@ watch(
   { immediate: true },
 );
 let themeGeneration = 0;
-const APPEARANCE_MODES = new Set(["system", "light", "dark", "sepia", "midnight", "contrast"]);
 function applyTheme(mode: unknown) {
   ++themeGeneration;
-  const value = String(mode || "system");
-  document.documentElement.dataset.theme = APPEARANCE_MODES.has(value) ? value : "system";
+  applyAppearanceTheme(mode);
 }
 /** The theme the sidecar has, as opposed to the one on screen.
  *
@@ -3416,6 +3698,14 @@ const PAGES = ["overview", "history", "devices", "favorites", "transfers", "chat
  * handler takes Ctrl or Cmd on either platform; a Mac user hunting for ⌘ should
  * not be told Ctrl. */
 const MODIFIER = navigator.userAgent.includes("Mac") ? { label: "Cmd", key: "Meta" } : { label: "Ctrl", key: "Control" };
+/** The chord the OS itself pastes with, as a reader would press it.
+ *
+ * Used in the two sentences that mean "the clipboard has it, the paste did not
+ * happen": an injected paste that the OS refused, and the row menu's
+ * paste-elsewhere when the host could not type the chord.  It is not a hotkey
+ * binding — those are the reader's own and are read from the form — it is the
+ * system's, which is why it is named from `MODIFIER.label` and not from config. */
+const PASTE_SHORTCUT = MODIFIER.label === "Cmd" ? "Cmd+V" : "Ctrl+V";
 /** The digit each page answers to, derived from `PAGES` so the two cannot drift:
  * the handler matches the key the user pressed against this, and the tooltip and
  * `aria-keyshortcuts` are built from the same index. */
@@ -3474,10 +3764,9 @@ const PAGE_HEADINGS: Record<(typeof PAGES)[number], () => string> = {
   internet: () => t("互联网同步（中继）"),
 };
 const PAGE_SUMMARIES: Record<(typeof PAGES)[number], () => string> = {
-  // A sentence rather than a count, like the AI page's: the overview's own
-  // numbers are the page's, read when it is entered, and the header has no
-  // second copy of them to keep honest.
-  overview: () => t("本机状态与最近活动"),
+  // A sentence rather than a count: the overview is a hub, and the numbers it
+  // once summarised are the pages it links to.
+  overview: () => t("本机状态与常用操作"),
   history: () => t("{count} 条记录", { count: state.total }),
   // The rows this page is about, which is the list it draws under the heading:
   // the archived tail has its own heading and its own count to be read under,
@@ -3955,6 +4244,18 @@ async function browseDataDir() {
     settings.value.data_dir = picked;
   } catch (error) { store.setError(error); }
 }
+/** The folder received files are filed under, filled from the picker.
+ *
+ * Empty means the sidecar's default (the Downloads folder), which is why the
+ * button is beside a box rather than instead of one — clearing the box is how
+ * the reader goes back to the default. */
+async function browseReceiveDir() {
+  try {
+    const picked = await bridge.chooseFolder();
+    if (!picked) return;
+    settings.value.file_receive_dir = picked;
+  } catch (error) { store.setError(error); }
+}
 
 /** Entries in the process-name list that cannot match anything.
  *
@@ -4144,6 +4445,37 @@ function buildSettingsForm(loaded: Record<string, any>): Record<string, any> {
     hotkeys: (loaded.hotkeys && typeof loaded.hotkeys === "object" && !Array.isArray(loaded.hotkeys))
       ? { ...(loaded.hotkeys as Record<string, string>) }
       : {},
+    // The paste switch and the four recording rules (1.3.0).  Each boolean
+    // ships on, so a config that predates the fields draws the boxes ticked and
+    // saving it back writes what the sidecar itself would do — an absent key
+    // read as `false` here would silently turn the rules off for every reader
+    // who never visited this card.  The list is typed one pattern per line and
+    // stored as a list, the same shape 来源应用过滤 already uses.
+    auto_paste_enabled: loaded.auto_paste_enabled ?? true,
+    skip_password_manager_clips: loaded.skip_password_manager_clips ?? true,
+    skip_prelaunch_clipboard: loaded.skip_prelaunch_clipboard ?? true,
+    max_non_file_paste_mb: clampNumber(
+      loaded.max_non_file_paste_mb ?? DEFAULT_MAX_NON_FILE_PASTE_MB,
+      DEFAULT_MAX_NON_FILE_PASTE_MB,
+      MIN_MAX_NON_FILE_PASTE_MB,
+      MAX_MAX_NON_FILE_PASTE_MB,
+    ),
+    source_exclusion_patterns: Array.isArray(loaded.source_exclusion_patterns)
+      ? loaded.source_exclusion_patterns.join("\n")
+      : (loaded.source_exclusion_patterns || ""),
+    // The file-transfer limits (1.3.1).  Absent from an older config, which
+    // reads as the shipped defaults — the same values the sidecar itself uses.
+    max_file_mb: clampNumber(loaded.max_file_mb ?? DEFAULT_MAX_FILE_MB, DEFAULT_MAX_FILE_MB, 0, MAX_FILE_MB),
+    confirm_large_file_mb: clampNumber(
+      loaded.confirm_large_file_mb ?? DEFAULT_CONFIRM_LARGE_FILE_MB,
+      DEFAULT_CONFIRM_LARGE_FILE_MB, 0, MAX_FILE_MB,
+    ),
+    relay_paste_max_mb: clampNumber(
+      loaded.relay_paste_max_mb ?? DEFAULT_RELAY_PASTE_MAX_MB,
+      DEFAULT_RELAY_PASTE_MAX_MB, 0, MAX_FILE_MB,
+    ),
+    // Stored as a path string, empty = the default Downloads folder.
+    file_receive_dir: String(loaded.file_receive_dir || ""),
   };
 }
 /** Config names the form spells differently.
@@ -4161,12 +4493,21 @@ function buildSettingsForm(loaded: Record<string, any>): Record<string, any> {
  * row behind. */
 const HOTKEY_ACTIONS: ReadonlyArray<{ id: string; label: () => string }> = [
   { id: "show_window", label: () => t("呼出窗口") },
+  // Both window actions are the host's own: `show_window` raises this window
+  // and `show_quick_paste` opens the overlay, neither of which can depend on
+  // the webview being awake.  They are listed here because the card is the one
+  // place a binding is read and edited.
+  { id: "show_quick_paste", label: () => t("快速粘贴窗口") },
   { id: "toggle_monitor", label: () => t("暂停或恢复同步") },
   { id: "paste_plain", label: () => t("复制最近一条（纯文本）") },
   ...Array.from({ length: 9 }, (_, index) => ({
     id: `paste_${index + 1}`,
     label: () => t("复制第 {n} 条", { n: index + 1 }),
   })),
+  // Ships unbound: which clip the "newest remote" one is depends on what has
+  // arrived, so a default chord would be a key pressed for a row that may not
+  // exist yet.  The row is listed so it can be bound by whoever wants it.
+  { id: "paste_remote_last", label: () => t("粘贴最新远程项") },
 ];
 /** The rows the card draws, relabelled when the language changes. */
 const hotkeyRows = computed(() =>
@@ -4284,17 +4625,39 @@ async function applyHotkeys() {
  * after the reader has visited Settings → General once per launch is a
  * shortcut that does not work.  Registering them is the only thing this needs
  * the saved values for, so it reads them itself rather than filling a form
- * nobody is looking at. */
+ * nobody is looking at.  The 自动粘贴 switch rides on the same read: it is what
+ * the paste shortcuts consult before handing the OS the chord. */
 async function applySavedHotkeys() {
   if (!inDesktop()) return;
   try {
     const saved = (await bridge.settings()).settings;
+    savedAutoPasteEnabled.value = saved.auto_paste_enabled !== false;
     await registerHotkeys(!!saved.hotkeys_enabled, saved.hotkeys);
   } catch {
     // Silence, not an error band: a sidecar that is still starting cannot
     // answer yet, `store.start()` is the one that reports an unreachable one,
     // and the settings page's own read is where a broken read belongs.
   }
+}
+/** Read the stored 自动粘贴 switch on its own.
+ *
+ * Only the hotkey path is missing the value when it has none: the startup read
+ * above is the one that normally fills it, but it runs against a sidecar that
+ * may not be up yet, and a shortcut pressed in that window must not silently
+ * stop pasting.  A failed read leaves the value unknown rather than false —
+ * "copied, press it yourself" is the safe answer, but believing the switch is
+ * off is not something this window can claim. */
+async function refreshSavedAutoPaste() {
+  if (!inDesktop()) return;
+  try {
+    const saved = (await bridge.settings()).settings;
+    savedAutoPasteEnabled.value = saved.auto_paste_enabled !== false;
+  } catch { /* the value stays unknown; the next press or page visit asks again */ }
+}
+/** Whether a paste shortcut should hand the OS the chord after copying. */
+async function autoPasteNow(): Promise<boolean> {
+  if (savedAutoPasteEnabled.value === null) await refreshSavedAutoPaste();
+  return savedAutoPasteEnabled.value === true;
 }
 // Registered when the sidecar can answer, not at mount: on a cold start it is
 // still coming up, and after an update relaunch it is the same again.  The
@@ -4305,9 +4668,9 @@ watch(ready, (isReady) => {
 }, { immediate: true });
 /** What a recognised hotkey does once the host has fired it.
  *
- * `show_window` never reaches here — the host raises the window itself,
- * because a binding whose whole job is to reach a hidden window cannot depend
- * on the webview being awake to answer. */
+ * `show_window` and `show_quick_paste` never reach here — both are the host's
+ * own windows, raised or created without asking the webview anything — and
+ * every action that does arrive is one this window has to answer. */
 async function runHotkey(action: string) {
   if (action === "toggle_monitor") {
     const running = state.status?.sync_state === "running";
@@ -4318,6 +4681,35 @@ async function runHotkey(action: string) {
     } catch (error) { store.setError(error); }
     return;
   }
+  // The newest clip that arrived from another device.  Its own action rather
+  // than `paste_1`: the first row is whatever was copied here last, and the
+  // reader reaching for this one is continuing something they were sent.
+  if (action === "paste_remote_last") {
+    try {
+      const page = await bridge.history("", 0, 50, "all", "newest");
+      const item = page.items.find((row) => String(row.source_device || "").trim());
+      if (!item) {
+        store.toast("ui.hotkey", t("还没有可粘贴的远程内容"));
+        return;
+      }
+      // The newest remote item can itself be a file that lives on the peer: the
+      // same fetch-then-paste path as the numbered keys takes it, because there
+      // is nothing here to copy yet.
+      if (isRemoteFileRow(item)) { await pasteRemoteFileFromHotkey(item); return; }
+      await bridge.copyHistory(item.id, false);
+      if (await autoPasteNow()) {
+        try {
+          await bridge.injectPaste();
+          store.toast("ui.hotkey", t("已粘贴最新远程项"));
+        } catch {
+          store.toast("ui.hotkey", t("已复制，请按 {shortcut} 手动粘贴", { shortcut: PASTE_SHORTCUT }));
+        }
+        return;
+      }
+      store.toast("ui.hotkey", t("已复制最新远程项"));
+    } catch (error) { store.setError(error); }
+    return;
+  }
   const numbered = /^paste_(\d)$/.exec(action);
   const plain = action === "paste_plain";
   if (!numbered && !plain) return;
@@ -4325,6 +4717,8 @@ async function runHotkey(action: string) {
   // same unfiltered list the history page shows, so "the third one" means the
   // same clip in both places.
   const index = plain ? 1 : Number(numbered![1]);
+  const copied = plain ? t("已复制最近一条（纯文本）") : t("已复制第 {n} 条", { n: index });
+  const pasted = plain ? t("已粘贴最近一条（纯文本）") : t("已粘贴第 {n} 条", { n: index });
   try {
     const page = await bridge.history("", 0, index, "all", "newest");
     const item = page.items[index - 1];
@@ -4338,10 +4732,26 @@ async function runHotkey(action: string) {
         : t("还没有第 {n} 条记录", { n: index }));
       return;
     }
+    // A file that still lives on the peer has no local bytes to copy; the key
+    // fetches it and pastes it once it is here.  `paste_plain` is exempt: it
+    // asks for a text form, and a file row has none — the copy below answers
+    // NOT_SUPPORTED, which is the honest answer for that key.
+    if (!plain && isRemoteFileRow(item)) { await pasteRemoteFileFromHotkey(item); return; }
     await bridge.copyHistory(item.id, plain);
-    store.toast("ui.hotkey", plain
-      ? t("已复制最近一条（纯文本）")
-      : t("已复制第 {n} 条", { n: index }));
+    // Copying is half of what the key is for now: with the switch on, the host
+    // types the system chord into whatever application had the focus.  A failed
+    // injection is still a copy — the clipboard holds the row — so it is said
+    // beside the key press with the chord to press, not as the failure band.
+    if (await autoPasteNow()) {
+      try {
+        await bridge.injectPaste();
+        store.toast("ui.hotkey", pasted);
+      } catch {
+        store.toast("ui.hotkey", t("已复制，请按 {shortcut} 手动粘贴", { shortcut: PASTE_SHORTCUT }));
+      }
+      return;
+    }
+    store.toast("ui.hotkey", copied);
   } catch (error) {
     // `paste_plain` asks for a text form, and the newest clip may simply not
     // have one — a screenshot at the top of the history is ordinary, not a
@@ -4389,6 +4799,12 @@ async function foldSettingsFields(fields: string[]) {
   // The three that are not boxes on this page: the auto-update switch is its
   // own ref, and the theme and the language are drawn by the shell.
   if (fields.includes("auto_update_check")) autoUpdateCheck.value = loaded.auto_update_check !== false;
+  // The paste switch also lives outside the form for one caller: the hotkey
+  // path reads it on every press, and a change announced from another surface
+  // has to reach that copy as well as the checkbox it just moved.
+  if (fields.includes("auto_paste_enabled")) {
+    savedAutoPasteEnabled.value = loaded.auto_paste_enabled !== false;
+  }
   if (fields.includes("appearance_mode")) {
     // The sidecar is the authority on what is stored, so this is the value a
     // failed pick is rolled back to.
@@ -4441,6 +4857,7 @@ async function hydrateSettings() {
     }
     savedAutoStart.value = !!settings.value.auto_start;
     savedEncryptionEnabled.value = !!settings.value.encryption_enabled;
+    savedAutoPasteEnabled.value = settings.value.auto_paste_enabled !== false;
     storedAppearance.value = String(settings.value.appearance_mode || "system");
     applyTheme(storedAppearance.value);
     applyMotion(settings.value.ui_animation_enabled);
@@ -4597,6 +5014,16 @@ async function saveSettings() {
       MIN_RELAY_RATE_KB,
       MAX_RELAY_RATE_KB,
     );
+    // The recording rule's size limit, clamped rather than refused: it is a
+    // tuned number like the two relay ones above, and a box one keystroke out
+    // of range is narrowed to the edge and then written back, so the number on
+    // screen is the one the sidecar stored.
+    const maxNonFilePasteMb = clampNumber(
+      settings.value.max_non_file_paste_mb,
+      DEFAULT_MAX_NON_FILE_PASTE_MB,
+      MIN_MAX_NON_FILE_PASTE_MB,
+      MAX_MAX_NON_FILE_PASTE_MB,
+    );
     const storedNumbers = {
       port: clampNumber(settings.value.port, 19990, 1024, 65535),
       web_history_limit: clampNumber(settings.value.web_history_limit, 30, 1, 500),
@@ -4604,7 +5031,15 @@ async function saveSettings() {
       clipboard_poll_interval: clampNumber(settings.value.clipboard_poll_interval, 1, 0.1, 60),
       transfer_timeout: clampNumber(settings.value.transfer_timeout, 120, 5, 3600),
       max_reconnect_attempts: clampNumber(settings.value.max_reconnect_attempts, 10, 0, 100),
+      // The three file limits, clamped the same way: typed numbers rather than
+      // free text, and the sidecar refuses anything past its own bounds.
+      max_file_mb: clampNumber(settings.value.max_file_mb, DEFAULT_MAX_FILE_MB, 0, MAX_FILE_MB),
+      confirm_large_file_mb: clampNumber(
+        settings.value.confirm_large_file_mb, DEFAULT_CONFIRM_LARGE_FILE_MB, 0, MAX_FILE_MB),
+      relay_paste_max_mb: clampNumber(
+        settings.value.relay_paste_max_mb, DEFAULT_RELAY_PASTE_MAX_MB, 0, MAX_FILE_MB),
     };
+    const fileReceiveDir = String(settings.value.file_receive_dir || "").trim();
     const serviceType = String(settings.value.service_type || "").trim() || "_clipsync._tcp.local.";
     const result = await bridge.updateSettings({
       device_name: settings.value.device_name,
@@ -4641,6 +5076,24 @@ async function saveSettings() {
       ),
       source_tracking_enabled: settings.value.source_tracking_enabled,
       paste_to_top: settings.value.paste_to_top,
+      // What a shortcut does after it copies, and the four rules that decide
+      // what the recorder keeps at all (1.3.0).  The pattern list is split the
+      // way the process-name list below is: one substring per line, padding and
+      // empty lines dropped, because the sidecar matches the list it is given.
+      auto_paste_enabled: !!settings.value.auto_paste_enabled,
+      skip_password_manager_clips: !!settings.value.skip_password_manager_clips,
+      skip_prelaunch_clipboard: !!settings.value.skip_prelaunch_clipboard,
+      max_non_file_paste_mb: maxNonFilePasteMb,
+      source_exclusion_patterns: String(settings.value.source_exclusion_patterns || "")
+        .split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean),
+      // The file-transfer limits (1.3.1).  Read per operation by the transfer
+      // manager, so a changed limit reaches the next file rather than a restart.
+      ...{
+        max_file_mb: storedNumbers.max_file_mb,
+        confirm_large_file_mb: storedNumbers.confirm_large_file_mb,
+        relay_paste_max_mb: storedNumbers.relay_paste_max_mb,
+        file_receive_dir: fileReceiveDir,
+      },
       internet_sync_enabled: settings.value.internet_sync_enabled,
       relay_brokers: brokerList(settings.value.relay_brokers),
       relay_private_brokers: brokerList(settings.value.relay_private_brokers),
@@ -4686,6 +5139,9 @@ async function saveSettings() {
     }
     savedAutoStart.value = autoStart;
     savedEncryptionEnabled.value = !!settings.value.encryption_enabled;
+    // The hotkeys read this copy rather than the form, so the save is where a
+    // flipped switch has to reach them — after it landed, not before.
+    savedAutoPasteEnabled.value = !!settings.value.auto_paste_enabled;
     // What was stored is what the boxes now hold: a form still showing the
     // number the reader typed is a form claiming a value that is not in force,
     // and the bar below it has just said everything was saved.  Before the
@@ -4693,6 +5149,8 @@ async function saveSettings() {
     Object.assign(settings.value, storedNumbers);
     settings.value.relay_max_message_kb = relayMaxMessageKb;
     settings.value.relay_max_rate_kbs = relayMaxRateKbs;
+    settings.value.max_non_file_paste_mb = maxNonFilePasteMb;
+    settings.value.file_receive_dir = fileReceiveDir;
     settings.value.service_type = serviceType;
     storedAppearance.value = String(theme || "system");
     applyTheme(storedAppearance.value);
@@ -5027,24 +5485,33 @@ async function confirmRestoreBackup() {
     endBackupTask();
   }
 }
-async function exportHistory(format: string) {
-  if (backupTask.value) return;
+/** Write the history to a file, and answer the sentence that says so.
+ *
+ * The answer matters to the overview, which reaches the same export from its
+ * action rail: the settings card draws the sentence beside its own buttons, and
+ * a page with no such card has to say it in a toast instead.  `null` on a
+ * refusal, which the caller reports through the store, not as a second notice.
+ */
+async function exportHistory(format: string): Promise<string | null> {
+  if (backupTask.value) return null;
   startBackupTask("export");
   try {
     const result = await bridge.exportHistory(format);
     backupMessage.value = t("导出完成：{name}", { name: result.filename || result.filepath });
-  } catch (error) { store.setError(error); }
+    return backupMessage.value;
+  } catch (error) { store.setError(error); return null; }
   finally { endBackupTask(); }
 }
-async function importHistory() {
+/** Read a history file the reader picked, and answer what it brought back. */
+async function importHistory(): Promise<string | null> {
   // The picker is inside the try: it is a native call the host can refuse, and
   // the window's other two pickers (`shareFileToPhone`, `restoreBackup`) both
   // say so.  Left outside it, a refused dialog was an unhandled rejection and
   // the click that asked for it had no answer at all.
-  if (backupTask.value) return;
+  if (backupTask.value) return null;
   try {
     const path = await bridge.chooseFile("history");
-    if (!path) return;
+    if (!path) return null;
     startBackupTask("import");
     const result = await bridge.importHistory(path);
     // The count, not the object: the answer is `{"ok": true, "imported": n}`
@@ -5052,8 +5519,37 @@ async function importHistory() {
     // how much of their history had come back.
     backupMessage.value = t("导入完成 · {count} 条记录", { count: Number(result.imported) || 0 });
     await store.refresh();
-  } catch (error) { store.setError(error); }
+    return backupMessage.value;
+  } catch (error) { store.setError(error); return null; }
   finally { endBackupTask(); }
+}
+/** The overview's copies of the two file actions: same work, said in a toast.
+ *
+ * The settings page's backup card draws its sentence on the card; the overview
+ * has no such card, and an export that only opens a save dialog or an import
+ * that only changes a list behind another page has to say what it did where the
+ * reader is looking.
+ */
+async function exportHistoryFromOverview(format: string) {
+  const message = await exportHistory(format);
+  if (message) store.toast("ui.history", message);
+}
+async function importHistoryFromOverview() {
+  const message = await importHistory();
+  if (message) store.toast("ui.history", message);
+}
+/** The overview's own openers, each the same one-liner the settings page uses:
+ * the card is reached by the page then the section, and the section alone would
+ * leave the reader on the overview with the setting highlighted somewhere
+ * behind them. */
+function openSettingsCardFromOverview(id: string) {
+  void openSettings();
+  openSettingsCard(id);
+}
+/** Open the quick-paste overlay from the overview.  One host command: the
+ * window, the focus bookkeeping and the paste are all its. */
+async function openQuickPasteFromOverview() {
+  try { await bridge.openQuickPaste(); } catch (error) { store.setError(error); }
 }
 async function translateText() {
   if (!translationText.value.trim() || translationBusy.value) return;
@@ -5074,27 +5570,28 @@ async function translateText() {
     <aside class="sidebar">
       <div class="brand"><img :src="logo" alt="" /><span>ClipSync</span></div>
       <nav :aria-label="t('主导航')">
-        <!-- The dashboard is the first row and the page the window opens on,
-             as it was in the legacy window: it is a read of the whole machine
-             rather than of one collection, so it sits above the pages that each
-             hold one. -->
+        <!-- The three pages a reader lives in sit at the top: what this machine
+             is doing (概览), what it has copied (剪贴板历史), and which machines
+             it talks to (设备).  Everything else is a collection kept on one of
+             them, or a tool that configures the window.  The visual order changed
+             and the digit chords did not: `PAGES` still counts 概览/历史/设备 as
+             1/2/3, so a reader's fingers keep working. -->
         <button :aria-label="t('概览')" :aria-current="tab === 'overview' ? 'page' : undefined" :title="pageTitle(t('概览'), 0)" :aria-keyshortcuts="pageChord(0)" :class="{ active: tab === 'overview' }" @click="tab = 'overview'">
           <Activity :size="18" /><span>{{ t("概览") }}</span>
         </button>
-        <!-- Eight rows in one column, and nothing between them said which three
-             held this machine's own content, which three talked to another
-             machine, and which one configured the window — a reader had to
-             learn eight names before they could find one page.  Two labels are
-             the whole of it: the pages, the order in `PAGES` and the digit
-             shortcuts are untouched, because a group heading is a word above a
-             row, not a different row.  `role="group"` carries the label to a
-             screen reader and the visible line is hidden from it, so the group
-             is named once rather than twice.  See U36. -->
+        <button :aria-label="t('剪贴板历史')" :aria-current="tab === 'history' ? 'page' : undefined" :title="pageTitle(t('剪贴板历史'), 1)" :aria-keyshortcuts="pageChord(1)" :class="{ active: tab === 'history' }" @click="tab = 'history'">
+          <History :size="18" /><span>{{ t("剪贴板历史") }}</span>
+        </button>
+        <button :aria-label="t('设备')" :aria-current="tab === 'devices' ? 'page' : undefined" :title="pageTitle(t('设备'), 2)" :aria-keyshortcuts="pageChord(2)" :class="{ active: tab === 'devices' }" @click="tab = 'devices'">
+          <Monitor :size="18" /><span>{{ t("设备") }}</span>
+        </button>
+        <!-- The collections kept by the history page, and the tools that talk to
+             another machine or configure the window.  Two labels are the whole
+             of the grouping; `role="group"` carries the name to a screen reader
+             and the visible line is hidden from it, so the group is named once
+             rather than twice.  See U36. -->
         <div class="nav-group" role="group" :aria-label="t('内容')">
           <p class="nav-group-label" aria-hidden="true">{{ t("内容") }}</p>
-          <button :aria-label="t('剪贴板历史')" :aria-current="tab === 'history' ? 'page' : undefined" :title="pageTitle(t('剪贴板历史'), 1)" :aria-keyshortcuts="pageChord(1)" :class="{ active: tab === 'history' }" @click="tab = 'history'">
-            <History :size="18" /><span>{{ t("剪贴板历史") }}</span>
-          </button>
           <button :aria-label="t('收藏库')" :aria-current="tab === 'favorites' ? 'page' : undefined" :title="pageTitle(t('收藏库'), 3)" :aria-keyshortcuts="pageChord(3)" :class="{ active: tab === 'favorites' }" @click="tab = 'favorites'">
             <Star :size="18" /><span>{{ t("收藏库") }}</span>
           </button>
@@ -5110,11 +5607,8 @@ async function translateText() {
             <FileUp :size="18" /><span>{{ t("文件传输") }}</span>
           </button>
         </div>
-        <div class="nav-group" role="group" :aria-label="t('设备与工具')">
-          <p class="nav-group-label" aria-hidden="true">{{ t("设备与工具") }}</p>
-          <button :aria-label="t('设备')" :aria-current="tab === 'devices' ? 'page' : undefined" :title="pageTitle(t('设备'), 2)" :aria-keyshortcuts="pageChord(2)" :class="{ active: tab === 'devices' }" @click="tab = 'devices'">
-            <Monitor :size="18" /><span>{{ t("设备") }}</span>
-          </button>
+        <div class="nav-group" role="group" :aria-label="t('工具')">
+          <p class="nav-group-label" aria-hidden="true">{{ t("工具") }}</p>
           <button :aria-label="t('手机伴侣')" :aria-current="tab === 'companion' ? 'page' : undefined" :title="pageTitle(t('手机伴侣'), 8)" :aria-keyshortcuts="pageChord(8)" :class="{ active: tab === 'companion' }" @click="openPage('companion')">
             <Smartphone :size="18" /><span>{{ t("手机伴侣") }}</span>
           </button>
@@ -5212,17 +5706,22 @@ async function translateText() {
 
         <OverviewView v-else-if="tab === 'overview'"
           :store="store" :enabled="overviewAvailable" :sync-running="state.status?.sync_state === 'running'"
-          :companion-on="!!companion?.enabled" :companion-url="companion?.access_url || null"
+          :companion-on="!!companion?.enabled"
           :pause-left-ms="pauseLeftMs" :pause-busy="pauseBusy"
           @pause="pauseSync" @resume="resumeSync" @companion="configureCompanion"
-          @rename="renameThisDevice" @qr="openCompanionQr" @send-url="openSendUrlFromHost"
-          @devices="openPage('devices')" @history="openPage('history')" @diagnostics="openDiagnosticsCard"
-          @row-menu="historyMenu" />
+          @rename="renameThisDevice" @qr="openCompanionQr"
+          @devices="openPage('devices')" @diagnostics="openDiagnosticsCard"
+          @quick-paste="openQuickPasteFromOverview" @send-files="openPage('transfers')"
+          @import-history="importHistoryFromOverview" @export-history="exportHistoryFromOverview"
+          @settings-hotkeys="openSettingsCardFromOverview('general')"
+          @settings-update="openSettingsCardFromOverview('update')"
+          @companion-page="openPage('companion')"
+          @check-update="checkForUpdate" @settings="openSettings" />
 
         <HistoryView v-else-if="tab === 'history'" ref="historyView"
           :store="store" :ready="ready" :native="native" :translating="translateItemReading"
           @menu="historyMenu" @translate="openTranslateItem" @delete="deleteItem = $event"
-          @batch-delete="batchDeleteIds = $event" />
+          @batch-delete="batchDeleteIds = $event" @paste-to-app="pasteToCurrentApp" />
 
         <FavoritesView v-else-if="tab === 'favorites'" ref="favoritesView"
           :store="store.favorites"
@@ -5559,6 +6058,100 @@ async function translateText() {
                        rule simply never fires. -->
                   <p id="app-filter-what" class="note setting-note">{{ t("每行一条，按名称精确匹配（可用 * 和 ?）：Windows 与 Linux 写进程名（chrome.exe、firefox），macOS 写应用名（Google Chrome）。写错不会报错，只会匹配不上。") }}</p>
                   <p v-if="appFilterProblems.length" id="app-filter-issues" class="note setting-note app-filter-issue" role="status">{{ t("{count} 条带着目录，匹配不到任何进程：{list}。这里要的是进程名，不是路径。", { count: appFilterProblems.length, list: appFilterProblems.join("、") }) }}</p>
+                </fieldset>
+              </section>
+              <!-- What a clip does on the way back out, and what the recorder
+                   refuses to keep in the first place (1.3.0).  A card of its own
+                   rather than rows added to 剪贴板历史: what is kept and what
+                   happens when a clip is pasted are the two ends of the same
+                   pipeline, and the history card is already the longest one on
+                   the page.  The order is the pipeline's: paste first, then the
+                   rules that decide what gets recorded. -->
+              <section v-show="showSettingsCard('recording')" id="settings-recording" class="settings-section">
+                <h2>{{ t("粘贴与录制") }}</h2>
+                <fieldset>
+                  <legend>{{ t("粘贴") }}</legend>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.auto_paste_enabled" type="checkbox" /><span>{{ t("自动粘贴到当前应用") }}</span></span>
+                  </label>
+                  <p class="note setting-note">{{ t("打开后，按快捷键取回历史会直接粘贴到当前应用；关掉则只复制到剪贴板。快速粘贴窗口不受这个开关影响。") }}</p>
+                </fieldset>
+                <fieldset>
+                  <legend>{{ t("录制规则") }}</legend>
+                  <!-- Each rule ships on, which the short notes say rather than
+                       needing the reader to have read the config: the boxes
+                       arrive ticked on a machine that never touched this card. -->
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.skip_password_manager_clips" type="checkbox" /><span>{{ t("密码管理器内容不记录") }}</span></span>
+                  </label>
+                  <p class="note setting-note">{{ t("密码管理器会给不想被记录的内容打上标记；打开后这类内容不进历史、也不同步。") }}</p>
+                  <label class="setting setting--check">
+                    <span class="setting-control"><input v-model="settings.skip_prelaunch_clipboard" type="checkbox" /><span>{{ t("跳过启动前复制的内容") }}</span></span>
+                  </label>
+                  <p class="note setting-note">{{ t("每次启动时，剪贴板里已经存在的内容只跳过第一次，避免把上次遗留的内容带进历史。") }}</p>
+                  <label class="setting">
+                    <span class="setting-name">{{ t("非文件类单条大小上限") }}</span>
+                    <span class="setting-control">
+                      <input v-model.number="settings.max_non_file_paste_mb" :aria-label="t('非文件类单条大小上限')"
+                        type="number" :min="MIN_MAX_NON_FILE_PASTE_MB" :max="MAX_MAX_NON_FILE_PASTE_MB" step="0.1" />
+                      <span class="note">{{ t("单位 MB，0 表示不限制；只计算文本、图片、链接这类非文件内容。") }}</span>
+                    </span>
+                  </label>
+                  <label class="setting">
+                    <span class="setting-name">{{ t("来源应用排除") }}</span>
+                    <span class="setting-control">
+                      <textarea v-model="settings.source_exclusion_patterns" rows="3"
+                        :aria-label="t('来源应用排除列表')" :placeholder="t('每行一个子串')"></textarea>
+                      <span class="note">{{ t("每行一个子串；来源应用名包含其中任意一段（不区分大小写）就不记录、也不同步。") }}</span>
+                    </span>
+                  </label>
+                </fieldset>
+              </section>
+              <!-- The file limits (1.3.1): what a file clipboard may move, what
+                   a paste asks about, and what an on-demand pull may cost over
+                   the relay.  These are policy numbers rather than protocol ones
+                   — the protocol's own hard ceiling is not a setting — so each
+                   row says what its number counts. -->
+              <section v-show="showSettingsCard('files')" id="settings-files" class="settings-section">
+                <h2>{{ t("文件") }}</h2>
+                <fieldset>
+                  <legend>{{ t("大小上限") }}</legend>
+                  <label class="setting">
+                    <span class="setting-name">{{ t("单个文件大小上限") }}</span>
+                    <span class="setting-control">
+                      <input v-model.number="settings.max_file_mb" :aria-label="t('单个文件大小上限')"
+                        type="number" min="0" :max="MAX_FILE_MB" step="1" />
+                      <span class="note">{{ t("单位 MB；0 表示只受协议上限约束，默认 2048。超过这个大小的文件发送和接收都会被拒绝。") }}</span>
+                    </span>
+                  </label>
+                  <label class="setting">
+                    <span class="setting-name">{{ t("粘贴前确认的文件大小") }}</span>
+                    <span class="setting-control">
+                      <input v-model.number="settings.confirm_large_file_mb" :aria-label="t('粘贴前确认的文件大小')"
+                        type="number" min="0" :max="MAX_FILE_MB" step="1" />
+                      <span class="note">{{ t("单位 MB；粘贴的远程文件超过这个大小时会先确认，0 表示不确认。") }}</span>
+                    </span>
+                  </label>
+                  <label class="setting">
+                    <span class="setting-name">{{ t("中继取回文件上限") }}</span>
+                    <span class="setting-control">
+                      <input v-model.number="settings.relay_paste_max_mb" :aria-label="t('中继取回文件上限')"
+                        type="number" min="0" :max="MAX_FILE_MB" step="1" />
+                      <span class="note">{{ t("单位 MB；不在同一网络时，按需取回超过这个大小的文件会被拒绝，0 表示不限制。") }}</span>
+                    </span>
+                  </label>
+                </fieldset>
+                <fieldset>
+                  <legend>{{ t("接收位置") }}</legend>
+                  <label class="setting">
+                    <span class="setting-name">{{ t("文件接收目录") }}</span>
+                    <span class="setting-control">
+                      <input v-model="settings.file_receive_dir" :aria-label="t('文件接收目录')" :placeholder="t('留空使用默认的下载目录')" />
+                      <button type="button" class="icon-button icon-button--inline" :aria-label="t('选择接收目录')"
+                        :title="t('选择接收目录')" @click="browseReceiveDir"><FolderOpen :size="15" /></button>
+                      <span class="note">{{ t("收到的文件保存在这里；留空使用默认的下载目录。") }}</span>
+                    </span>
+                  </label>
                 </fieldset>
               </section>
               <!-- No notification card: this window raises no OS notification, so
@@ -6591,12 +7184,25 @@ async function translateText() {
              See U03. -->
         <AiView v-if="aiVisited" v-show="tab === 'ai'" ref="aiView" :store="store" />
       </div>
+      <!-- A paste of a remote file is a transfer the reader can watch from
+           anywhere in the window: their paste came back later than the click,
+           and the row it came from may be a page away.  Fixed above the status
+           bar, with the one action that ends it. -->
+      <div v-if="pasteFetch" class="paste-fetch" role="status" aria-live="polite">
+        <RefreshCw :size="15" class="spinning" aria-hidden="true" />
+        <span class="paste-fetch-name">{{ pasteFetchName }}</span>
+        <progress class="paste-fetch-progress" :value="pasteFetchPercent" max="100" aria-hidden="true"></progress>
+        <span class="note paste-fetch-percent">{{ Math.round(pasteFetchPercent) }}%</span>
+        <span v-if="pasteFetchSpeed" class="note">{{ pasteFetchSpeed }}</span>
+        <span v-if="pasteFetchEta" class="note">{{ t("剩余 {eta}", { eta: pasteFetchEta }) }}</span>
+        <button class="text-button" type="button" @click="cancelPasteFetch">{{ t("取消取回") }}</button>
+      </div>
       <div class="bottom-status"><ShieldCheck :size="14" />{{ t("本地数据") }}
         <span role="status" class="sync-state" :class="{ 'sync-state--stopped': syncStopped && !state.pending }">
           <Pause v-if="syncStopped && !state.pending" :size="12" />{{ state.pending ? t('正在处理') : (state.status?.runtime_error || syncLabel) }}</span>
         <!-- Status only, by the user's request: this bar used to carry the
              sync switch and the timed-pause presets too, and every one of
-             them already sits on the overview page's 快速控制 card.  Two
+             them already sits on the overview page's 快速设置 card.  Two
              copies of one control, one screen apart, is what made the bar
              read as cluttered.  What stays is what the bar alone can say --
              which state sync is in, and, when a pause is armed, how long is
@@ -6631,6 +7237,20 @@ async function translateText() {
       </div>
     </main>
 
+    <!-- The sidecar's "this paste is large, ask first" question.  It is a
+         question rather than a refusal: 继续 prepares the same paste again
+         with the answer attached, and 取消 leaves the history row as it was. -->
+    <AppDialog ref="pasteConfirmDialog" heading-id="paste-confirm-title"
+      :title="t('取回文件并粘贴？')"
+      @close="pasteConfirmItem = null" @cancel="pasteConfirmItem = null">
+      <p v-if="pasteConfirmSize > 0">{{ t("文件约 {size}，粘贴前需先从另一台设备传输。继续？", { size: size(pasteConfirmSize) }) }}</p>
+      <p v-else>{{ t("这些文件在另一台设备上，粘贴前需要先传输过来。文件较大时可能要等上一会儿。") }}</p>
+      <p v-if="pasteConfirmItem" class="note">{{ previewLabel(pasteConfirmItem) }}</p>
+      <template #actions>
+        <button @click="pasteConfirmItem = null">{{ t("取消") }}</button>
+        <button class="primary" @click="confirmLargePaste">{{ t("继续") }}</button>
+      </template>
+    </AppDialog>
     <AppDialog ref="sendUrlDialog" heading-id="send-url-title" :title='t("发送网址到 {name}", { name: deviceNamed(sendUrlDevice) })' @close="sendUrlDevice = null" @cancel="sendUrlDevice = null">
       <p class="muted">{{ t("对方将在默认浏览器中打开该 http(s) 网址。") }}</p>
       <label v-if="sendUrlCandidates.length > 1">{{ t("目标设备") }}

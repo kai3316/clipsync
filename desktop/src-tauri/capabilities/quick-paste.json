@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "quick-paste",
+  "description": "The quick-paste overlay: search clipboard history and paste one row, nothing else.",
+  "windows": ["quick-paste"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-quick-paste-list",
+    "allow-quick-paste-choose",
+    "allow-quick-paste-close",
+    "allow-quick-paste-settings",
+    "allow-prepare-paste-entry",
+    "allow-cancel-paste-entry",
+    "allow-list-transfers",
+    "allow-preview-history-entry"
+  ]
+}

@@ -298,6 +298,22 @@ def backup_config_dict(cfg: Config) -> dict:
         "retry_capture_enabled": cfg.retry_capture_enabled,
         "dedup_method": cfg.dedup_method,
         "plain_text_only": cfg.plain_text_only,
+        # ---- paste behaviour and recording rules (1.3.0) ----
+        # Preferences like the rest: a restore that dropped them would silently
+        # re-enable password-manager recording, re-record whatever was on the
+        # clipboard at launch, and lift the size cap on a machine whose owner
+        # had turned those protections on.
+        "auto_paste_enabled": cfg.auto_paste_enabled,
+        "skip_password_manager_clips": cfg.skip_password_manager_clips,
+        "skip_prelaunch_clipboard": cfg.skip_prelaunch_clipboard,
+        "max_non_file_paste_mb": cfg.max_non_file_paste_mb,
+        "source_exclusion_patterns": list(cfg.source_exclusion_patterns),
+        # ---- file transfer limits (1.3.1) ----
+        # A restore that dropped these would quietly put a machine back at the
+        # shipped ceilings after its owner had lowered one on purpose.
+        "max_file_mb": cfg.max_file_mb,
+        "confirm_large_file_mb": cfg.confirm_large_file_mb,
+        "relay_paste_max_mb": cfg.relay_paste_max_mb,
         "app_filter_enabled": cfg.app_filter_enabled,
         "app_filter_mode": cfg.app_filter_mode,
         "app_filter_list": cfg.app_filter_list,

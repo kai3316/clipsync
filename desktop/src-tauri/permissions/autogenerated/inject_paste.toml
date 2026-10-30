@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-inject-paste"
+description = "Enables the inject_paste command without any pre-configured scope."
+commands.allow = ["inject_paste"]
+
+[[permission]]
+identifier = "deny-inject-paste"
+description = "Denies the inject_paste command without any pre-configured scope."
+commands.deny = ["inject_paste"]

@@ -140,6 +140,8 @@ pub struct Tray {
     /// Ends that pause now.
     pub resume_now: &'static str,
     pub show: &'static str,
+    /// Opens the quick-paste overlay from the tray, without the main window.
+    pub quick_paste: &'static str,
     pub send_url: &'static str,
     pub show_web_qr: &'static str,
     /// The peers submenu while at least one device is connected (`{count}`).
@@ -194,6 +196,7 @@ const ZH: Strings = Strings {
         paused_left: "已暂停 · 剩余 {minutes} 分钟",
         resume_now: "立即恢复",
         show: "显示 ClipSync",
+        quick_paste: "快速粘贴",
         send_url: "发送网址到设备",
         show_web_qr: "显示网页二维码",
         devices_counted: "已连接设备 ({count})",
@@ -259,6 +262,7 @@ const EN: Strings = Strings {
         paused_left: "Paused · {minutes} min left",
         resume_now: "Resume now",
         show: "Show ClipSync",
+        quick_paste: "Quick paste",
         send_url: "Send URL to Device",
         show_web_qr: "Show Web QR Code",
         devices_counted: "Connected Devices ({count})",

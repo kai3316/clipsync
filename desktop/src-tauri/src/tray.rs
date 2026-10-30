@@ -27,6 +27,8 @@ use tauri::{AppHandle, Manager, Wry};
 
 /// Menu item ids, shared with the click handler in `main.rs`.
 pub const ID_SHOW: &str = "show";
+/// Opens the quick-paste overlay without bringing the main window back.
+pub const ID_QUICK_PASTE: &str = "quick-paste";
 pub const ID_QR: &str = "qr";
 pub const ID_ABOUT: &str = "about";
 pub const ID_QUIT: &str = "quit";
@@ -527,6 +529,7 @@ impl TrayMenu {
             ])
             .build()?;
         let show = MenuItemBuilder::with_id(ID_SHOW, s.show).build(app)?;
+        let quick_paste = MenuItemBuilder::with_id(ID_QUICK_PASTE, s.quick_paste).build(app)?;
         let send_url = MenuItemBuilder::with_id(ID_SEND_URL, s.send_url).build(app)?;
         let web_qr = MenuItemBuilder::with_id(ID_QR, s.show_web_qr).build(app)?;
         // Built empty and filled by the first refresh; an empty submenu draws
@@ -547,6 +550,7 @@ impl TrayMenu {
             .item(&pause)
             .separator()
             .item(&show)
+            .item(&quick_paste)
             .item(&send_url)
             .item(&web_qr)
             .separator()

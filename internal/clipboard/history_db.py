@@ -40,6 +40,7 @@ from internal.clipboard.format import (
     ContentType,
     decode_paths,
     decode_text,
+    encode_paths,
     split_paths,
     strip_html,
 )
@@ -1307,6 +1308,81 @@ class ClipboardHistoryDB:
         if not paths:
             return [], "gone"
         return paths, ""
+
+    def remote_file_offer(self, entry_id: str) -> dict | None:
+        """The remote-file offer a history row holds, or None.
+
+        Answers the on-demand paste's first question: *what does this row point
+        at?*  The row stores a pointer — a peer's entry id, the file names and
+        sizes the peer advertised — and this reads it back out as the four facts
+        the runtime needs: the local row id (keys the paste and its events), the
+        device that holds the files, the peer's own entry id (what a request
+        names), and the advertised file list (expected transfer count and the
+        sizes the configured limits are checked against).
+
+        None covers both "no such row" and "not a readable remote file offer":
+        a caller that reached here with a row that is not a pullable offer has
+        nothing different to do in either case — it must not start a request.
+        """
+        _index, entry = self.find_by_id(entry_id)
+        if entry is None:
+            return None
+        stored = labels_to_types(entry.get("types")).get(ContentType.FILE_REMOTE)
+        if stored is None:
+            return None
+        parsed = file_ref.parse(stored)
+        if parsed is None:
+            return None
+        return {
+            "entry_id": str(entry.get("entry_id")),
+            "source_device": str(entry.get("source_device") or ""),
+            "offer_entry": parsed["entry"],
+            "files": parsed["files"],
+            "total": parsed["total"],
+        }
+
+    def replace_file_remote_with_local(self, entry_id: str, paths: list[str]) -> dict | None:
+        """Turn a remote file *offer* row into a local file row, in place.
+
+        The completion step of an on-demand paste: the bytes have been pulled to
+        this disk, so the row stops being a pointer at another device's file and
+        becomes the file itself.  Everything that identifies the row is kept —
+        ``entry_id`` (what the paste and a peer's request refer to),
+        ``source_device`` (the row still reports the device the file came from),
+        ``pinned``, ``paste_count`` and ``timestamp`` — and only what the row
+        *is* changes: FILE_REMOTE gives way to the local FILE payload, the
+        content type becomes FILE and the preview is rebuilt from the paths, so
+        the next paste is an ordinary local copy.
+
+        Formats stored beside the offer survive: a macOS file copy carries the
+        file's name as TEXT too, and dropping it would lose something the row
+        legitimately knows.  Returns the updated row (a copy), or None when the
+        row has gone or was never a remote file offer — in which case the caller
+        still has the files on disk and must decide what to report.
+        """
+        if not paths:
+            return None
+        with self._lock:
+            index, _snapshot = self.find_by_id(entry_id)
+            if index is None:
+                return None
+            entry = self._entries[index]
+            stored = labels_to_types(entry.get("types"))
+            if ContentType.FILE_REMOTE not in stored:
+                return None
+            labels = self.payloads_for_write(entry)
+            labels.pop(CONTENT_TYPE_LABELS[ContentType.FILE_REMOTE], None)
+            labels[CONTENT_TYPE_LABELS[ContentType.FILE]] = base64.b64encode(
+                encode_paths(paths)
+            ).decode("ascii")
+            entry["types"] = labels
+            entry["content_type"] = _map_type_to_label(ContentType.FILE)
+            entry["text_preview"] = _build_preview(labels_to_types(labels))
+            # Timestamp, content type, paste count and the (encrypted) text
+            # fields, exactly as a capture or a merge would write them; pinned,
+            # status and image_fmt are deliberately untouched.
+            self._persist_entry_update(entry)
+            return dict(entry)
 
     def increment_paste(self, entry_id: str) -> int | None:
         """Increment the paste count for an entry. Returns new count or None if not found."""

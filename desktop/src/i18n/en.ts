@@ -367,7 +367,7 @@ export const EN: Record<string, string> = {
   "手机 Companion": "Phone Companion",
   "手机伴侣": "Phone Companion",
   "手机访问与远程中继": "Phone access and remote relay",
-  "设备与工具": "Devices & tools",
+  "工具": "Tools",
   "同一网络": "Same network",
   "让手机通过浏览器访问这台电脑的剪贴板、文件和聊天。":
     "Let a phone reach this computer's clipboard, files and chat in its browser.",
@@ -1198,10 +1198,9 @@ export const EN: Record<string, string> = {
   // ── A file that lives on another device ──────────────────────────────
   // Its row carries a name and a size, never a path, so the only thing to do
   // with it is ask the machine that has it.  The refusals come back as codes
-  // and are worded here, for the peer's window.  下载文件 rather than 下载:
+  // and are worded here, for the peer's window.  The row's menu entry is 仅下载到本机:
   // the row's neighbours are 复制记录/翻译记录/删除记录, and a bare 下载 reads
   // as the page's own download rather than this row's.
-  "下载文件": "Download file",
   "从 {name} 下载这个文件": "Download this file from {name}",
   // A conversation opened from a device row: the row is behind the reader, and
   // this is the line that says which one and how to get back to it.
@@ -1808,20 +1807,18 @@ export const EN: Record<string, string> = {
     "Without a password the key is derived from the device fingerprint, which is public: anything that can read these files can open the clipboard history and the device's private key.",
 
   // ── The overview page ────────────────────────────────────────────────
-  // The dashboard the window opens on: what this machine is doing, the four
-  // switches that change it, and the way in to the three pages its rows lead
-  // to.  Most of its words are the legacy panel's own (快速控制, 网络地图,
-  // 最近活动, the three network-health verdicts); the ones that differ are
-  // noted where they sit.
+  // What the window opens on: this machine's own facts, its usual switches and
+  // the actions a reader comes to the front page for.  It is a hub rather than
+  // the dashboard it used to be — the counters, the network map, the device list
+  // and the clip feed are gone, each a second copy of a page that owns them.
   "概览": "Overview",
   "跳到主内容": "Skip to the content",
   "概览暂不可用": "Overview unavailable",
   "同步引擎未运行，无法读取概览。": "The sync engine is not running, so the overview cannot be read.",
   "正在读取概览": "Reading the overview",
   "读取概览失败": "The overview could not be read",
-  "本机状态与最近活动": "This device's state and recent activity",
+  "本机状态与常用操作": "This device's state and the usual actions",
   "以太网": "Ethernet",
-  "运行时间": "Uptime",
   "网络正常": "Network healthy",
   "网络需注意": "Network needs attention",
   "网络异常": "Network problem",
@@ -1832,8 +1829,6 @@ export const EN: Record<string, string> = {
   "设备 ID": "Device ID",
   "平台": "Platform",
   "本地地址": "Local address",
-  "复制地址": "Copy address",
-  "快速控制": "Quick controls",
   "发现": "Discovery",
   // The overview's switches, named the way the settings card names them.
   // "在局域网可见" is the one half of that pair this catalogue did not have:
@@ -1841,34 +1836,15 @@ export const EN: Record<string, string> = {
   "在局域网可见": "Visible on the LAN",
   "远程访问": "Remote access",
   "已撤销未保存的更改": "Undid the unsaved changes",
-  "共 {count} 台已配对": "{count} paired in total",
   "今天": "today",
   "已置顶": "pinned",
   "连不上后台服务（{time} 起）。下面显示的是当时读到的内容，可能已经过时。":
     "Cannot reach the sidecar (since {time}). What is shown below is what it last returned, and may be out of date.",
   "已固定 · Esc 关闭": "Pinned · Esc closes",
-  "传输": "Transfers",
-  "网络地图": "Network map",
-  "已配对（离线）": "Paired (offline)",
-  "已连接设备": "Connected devices",
-  "还没有已连接的设备——复制内容并配对一台设备即可开始同步。":
-    "No devices are connected yet — copy something and pair a device to start syncing.",
-  "发送链接到设备": "Send a link to a device",
-  "最近活动": "Recent activity",
-  "查看全部": "View all",
-  "复制到剪贴板": "Copy to clipboard",
   "已复制": "Copied",
   // The status line's answer to a press that arrived while the previous one was
   // still in flight — the press is dropped, not queued, and this says so.
   "正在处理上一步…": "Still finishing the last action…",
-  "复制文本、图片和文件时，剪贴板活动将显示在这里。":
-    "Clipboard activity appears here as you copy text, images and files.",
-  "（无内容）": "(no content)",
-  "刚刚": "just now",
-  "{minutes} 分钟前": "{minutes} min ago",
-  "{hours} 小时前": "{hours} h ago",
-  "{days} 天前": "{days} d ago",
-  "另有 {count} 台未在此列出": "{count} more not listed here",
   "「安全」里两次输入的加密密码不一致，改好之前不能保存。":
     "The two encryption passwords on the Security card do not match — fix that before saving.",
   "「安全」里的加密密码还不满足下面的要求，改好之前不能保存。":
@@ -1978,4 +1954,173 @@ export const EN: Record<string, string> = {
   "将覆盖 {count} 个不同的配置项，被覆盖的原文件保留为 .bak|other": "Will overwrite {count} differing config entries, keeping the replaced originals as .bak",
   "将补齐本机缺少的 {count} 个配置项|one": "Will fill in the {count} config entry this machine is missing",
   "将补齐本机缺少的 {count} 个配置项|other": "Will fill in the {count} config entries this machine is missing",
+
+  // ── Quick paste and the recording rules (1.3.0) ───────────────────────
+  // Two surfaces: the overlay window (`quick-paste.html`, a document of its own
+  // with no `App.vue` around it) and the settings card that decides what the
+  // recorder keeps and what a shortcut does once it has copied.
+  "快速粘贴窗口": "Quick Paste window",
+  "快速粘贴": "Quick Paste",
+  "搜索剪贴板历史": "Search clipboard history",
+  "搜索剪贴板历史…": "Search clipboard history…",
+  "按类型筛选": "Filter by type",
+  "读取剪贴板历史失败": "Could not read the clipboard history",
+  "正在粘贴…": "Pasting…",
+  "粘贴失败，请重试": "Paste failed. Try again.",
+  "已复制，但没能粘贴到当前应用":
+    "Copied, but it could not be pasted into the active application",
+  "还没有可粘贴的记录": "Nothing to paste yet",
+  "换个关键词或类型试试。": "Try another keyword, or another type.",
+  "复制内容后，它会出现在这里。": "Copy something and it will show up here.",
+  "↑↓ 选择": "↑↓ Select",
+  "Enter 粘贴": "Enter: paste",
+  "Shift+Enter 纯文本粘贴": "Shift+Enter: paste as plain text",
+  "Esc 关闭": "Esc: close",
+  "双击粘贴": "Double-click: paste",
+  "粘贴与录制": "Paste & Recording",
+  "粘贴": "Paste",
+  "自动粘贴到当前应用": "Paste into the active application automatically",
+  "打开后，按快捷键取回历史会直接粘贴到当前应用；关掉则只复制到剪贴板。快速粘贴窗口不受这个开关影响。":
+    "When on, taking a clip back with a hotkey pastes it straight into the active application; when off, it is only copied. The Quick Paste window is not affected by this switch.",
+  "录制规则": "Recording rules",
+  "密码管理器内容不记录": "Don't record password-manager content",
+  "密码管理器会给不想被记录的内容打上标记；打开后这类内容不进历史、也不同步。":
+    "Password managers mark content that should not be recorded; with this on, such content never enters the history or syncs.",
+  "跳过启动前复制的内容": "Skip content copied before startup",
+  "每次启动时，剪贴板里已经存在的内容只跳过第一次，避免把上次遗留的内容带进历史。":
+    "At each launch, whatever is already on the clipboard is skipped once, so a clip left over from last time does not enter the history.",
+  "非文件类单条大小上限": "Size limit per non-file clip",
+  "单位 MB，0 表示不限制；只计算文本、图片、链接这类非文件内容。":
+    "In MB; 0 means no limit. Only non-file content — text, images and links — counts toward it.",
+  "来源应用排除": "Excluded source applications",
+  "来源应用排除列表": "Excluded source applications list",
+  "每行一个子串": "One substring per line",
+  "每行一个子串；来源应用名包含其中任意一段（不区分大小写）就不记录、也不同步。":
+    "One substring per line; if the source application's name contains any of them (case-insensitive), the clip is neither recorded nor synced.",
+  "粘贴到当前应用": "Paste into the active application",
+  "已复制，请手动按 {shortcut} 粘贴": "Copied — press {shortcut} to paste it yourself",
+  "已粘贴第 {n} 条": "Pasted item {n}",
+  "已粘贴最近一条（纯文本）": "Pasted the latest as plain text",
+  "已复制，请按 {shortcut} 手动粘贴": "Copied — press {shortcut} to paste it",
+  "已粘贴最新远程项": "Pasted the latest remote item",
+  "已复制最新远程项": "Copied the latest remote item",
+  "还没有可粘贴的远程内容": "No remote items to paste yet",
+  "粘贴最新远程项": "Paste latest remote item",
+
+  // ── The overview hub (kept, simplified) ───────────────────────────────
+  // The page is this machine's facts, four switches and one row of actions.
+  // The counters, the network map, the device list and the clip feed are gone:
+  // each was a zero on an ordinary day or a second copy of another page.
+  "本机信息": "This machine",
+  "快速设置": "Quick settings",
+  "快捷操作": "Quick actions",
+  "设备管理": "Manage devices",
+  "更多设置": "All settings",
+  "导出历史": "Export history",
+  "复制本地地址": "Copy local address",
+  "快捷键设置": "Keyboard shortcuts",
+  "去处理": "Review",
+  "手机网页访问": "Phone web page",
+  "手机伴侣未启用": "The phone companion is not running",
+  "去开启": "Turn it on",
+  "查看更新": "View update",
+  "重试": "Retry",
+  "操作没有生效，请稍后重试": "That did not take effect. Try again.",
+  "有新版本 {version} 可用": "Version {version} is available",
+  "{count} 台设备在线|one": "{count} device online",
+  "{count} 台设备在线|other": "{count} devices online",
+  "{count} 台设备在线": "{count} devices online",
+  "已配对 {count} 台 · 当前离线|one": "{count} paired device is offline",
+  "已配对 {count} 台 · 当前离线|other": "{count} paired devices are offline",
+  "已配对 {count} 台 · 当前离线": "{count} paired devices are offline",
+  "还没有配对设备 · 去配对": "No paired devices yet · pair one",
+  "有 {count} 个配对请求等待确认|one": "{count} pairing request is waiting for you",
+  "有 {count} 个配对请求等待确认|other": "{count} pairing requests are waiting for you",
+  "有 {count} 个配对请求等待确认": "{count} pairing requests are waiting for you",
+
+  // ── On-demand paste of a remote file (1.3.1) ──────────────────────────
+  // A file that lives on another machine is fetched only when it is pasted;
+  // these are the sentences of that fetch: the row's mark, the confirmation,
+  // the progress panel, the ways it can fail, and the settings that cap it.
+  "仅下载到本机": "Download to this machine only",
+  "取回并粘贴": "Fetch and paste",
+  "从 {name} 取回这个文件并粘贴": "Fetch this file from {name} and paste it",
+  "来自 {name} · 粘贴时取回": "From {name} · fetched when pasted",
+  "这个文件较大": "This file is large",
+  "粘贴前需要先从另一台设备传输，可能要用上一会儿。继续？":
+    "It has to be transferred from another device first, which can take a while. Continue?",
+  "文件较大，粘贴前需从另一台设备传输，继续？":
+    "This file is large and has to be transferred from another device before pasting. Continue?",
+  "文件约 {size}，粘贴前需先从另一台设备传输。继续？":
+    "About {size} of files have to be transferred from another device before pasting. Continue?",
+  "文件较大，请在快速粘贴窗口中确认后取回":
+    "This file is large — confirm it in the Quick Paste window before fetching",
+  "继续": "Continue",
+  "继续取回": "Fetch it",
+  "Enter 继续 · Esc 取消": "Enter: continue · Esc: cancel",
+  "取回文件并粘贴？": "Fetch the files and paste?",
+  "这些文件在另一台设备上，粘贴前需要先传输过来。文件较大时可能要等上一会儿。":
+    "These files are on another device, so they have to be transferred before they can be pasted. A large file can take a while.",
+  "正在从另一台设备取回文件…": "Fetching files from another device…",
+  "没能取回文件": "Could not fetch the files",
+  "取消取回": "Cancel fetch",
+  "Esc 取消取回并关闭": "Esc: cancel the fetch and close",
+  "{name} 等 {count} 个文件": "{name} and {count} files",
+  "{count} 个文件|one": "{count} file",
+  "{count} 个文件|other": "{count} files",
+  "{count} 个文件": "{count} files",
+  "剩余 {eta}": "{eta} left",
+  "{rate}/秒": "{rate}/s",
+  "已取消取回": "Fetch cancelled",
+  "已取消取回文件": "Cancelled fetching the files",
+  "已取回 {count} 个文件并粘贴|one": "Fetched and pasted {count} file",
+  "已取回 {count} 个文件并粘贴|other": "Fetched and pasted {count} files",
+  "已取回 {count} 个文件并粘贴": "Fetched and pasted {count} files",
+  "已取回 {count} 个文件，已复制，请手动粘贴|one":
+    "Fetched {count} file — press the paste key to paste it",
+  "已取回 {count} 个文件，已复制，请手动粘贴|other":
+    "Fetched {count} files — press the paste key to paste them",
+  "已取回 {count} 个文件，已复制，请手动粘贴":
+    "Fetched {count} files — press the paste key to paste them",
+  "已取回 {count} 个文件，已复制到剪贴板|one": "Fetched {count} file and copied it to the clipboard",
+  "已取回 {count} 个文件，已复制到剪贴板|other": "Fetched {count} files and copied them to the clipboard",
+  "已取回 {count} 个文件，已复制到剪贴板": "Fetched {count} files and copied them to the clipboard",
+  "等待传输超时，请重试": "Timed out waiting for the transfer. Try again.",
+  "取回文件超时，请到快速粘贴窗口重试":
+    "Fetching the file timed out. Retry it from the Quick Paste window.",
+  "文件超过当前大小上限，可在设置里调大":
+    "The file is over the current size limit; raise it in Settings",
+  "经互联网中继取回的文件超过上限":
+    "The file is over the limit for fetching over the internet relay",
+  "这个条目已无法从另一台设备取回":
+    "This entry can no longer be fetched from the other device",
+  "文件已取回，但写入剪贴板失败": "The file was fetched, but writing it to the clipboard failed",
+  "文件已取回并写入剪贴板，但历史记录未能更新，可以直接粘贴":
+    "The file was fetched and is on the clipboard, but the history entry could not be updated — you can paste it directly",
+  "取回失败，请重试": "Fetching failed. Try again.",
+  "取回失败：{reason}": "Fetching failed: {reason}",
+  "无法开始取回文件": "Could not start fetching the file",
+  "对方设备不在线，无法取回文件": "The other device is offline, so the file cannot be fetched",
+  "与那台设备的配对已失效，无法取回文件":
+    "The pairing with that device is no longer valid, so the file cannot be fetched",
+  "已经在取回一个文件，请等它完成或先取消":
+    "A file is already being fetched. Wait for it, or cancel it first.",
+
+  // ── The file card's limits ────────────────────────────────────────────
+  "大小上限": "Size limits",
+  "单个文件大小上限": "Maximum size per file",
+  "单位 MB；0 表示只受协议上限约束，默认 2048。超过这个大小的文件发送和接收都会被拒绝。":
+    "In MB; 0 means the protocol ceiling applies, and the default is 2048. Files larger than this are refused both when sent and when received.",
+  "粘贴前确认的文件大小": "Confirm pastes above",
+  "单位 MB；粘贴的远程文件超过这个大小时会先确认，0 表示不确认。":
+    "In MB; a remote file larger than this asks before the paste transfers, and 0 means never ask.",
+  "中继取回文件上限": "Relay fetch limit",
+  "单位 MB；不在同一网络时，按需取回超过这个大小的文件会被拒绝，0 表示不限制。":
+    "In MB; over the internet relay, an on-demand fetch larger than this is refused, and 0 means no extra limit.",
+  "接收位置": "Receive location",
+  "文件接收目录": "File receive folder",
+  "留空使用默认的下载目录": "Leave empty to use the default Downloads folder",
+  "选择接收目录": "Choose the receive folder",
+  "收到的文件保存在这里；留空使用默认的下载目录。":
+    "Received files are saved here; leave it empty to use the default Downloads folder.",
 };
