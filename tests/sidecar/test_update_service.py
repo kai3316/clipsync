@@ -316,6 +316,27 @@ def test_verify_blob_accepts_the_published_digest(tmp_path):
     ) == (True, "ok")
 
 
+def test_verify_blob_accepts_another_release_asset_by_its_own_digest(tmp_path):
+    # macOS peers can cache the .dmg while the preferred updater payload is
+    # ClipSync.app.tar.gz.  Its bytes are still this release's bytes; the
+    # receiver must check the file it actually has against that file's
+    # published digest instead of reporting a checksum mismatch.
+    path = _write_asset(str(tmp_path), name="ClipSync_aarch64.dmg")
+    digest = _digest(path)
+    release = {
+        "version": "2.0.0",
+        "asset": "ClipSync_aarch64.app.tar.gz",
+        "sha256": "1" * 64,
+        "digests": {
+            "ClipSync_aarch64.app.tar.gz": "1" * 64,
+            "ClipSync_aarch64.dmg": digest,
+        },
+    }
+    assert updater.verify_update_blob(
+        path, release, "1.0.0", source="p2p", peer_digest="",
+    ) == (True, "ok")
+
+
 def test_verify_blob_without_release_info_falls_back_to_the_sender_digest(tmp_path):
     path = _write_asset(str(tmp_path))
     assert updater.verify_update_blob(

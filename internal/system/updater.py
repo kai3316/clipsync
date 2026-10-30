@@ -466,10 +466,25 @@ def fetch_latest_asset_info(timeout: float = 10.0) -> dict | None:
     if not digest.startswith("sha256:") or len(digest) <= len("sha256:"):
         logger.info("Release %s has no sha256 digest for %s", tag, asset_name)
         return None
+    # Every asset that carries a published digest, by file name.  The preferred
+    # platform asset above is the one a *download* takes, but a peer may have
+    # cached a different installer from the same release — macOS in particular
+    # has an updater payload (`ClipSync.app.tar.gz`) and a human installer
+    # (`.dmg`), and an older peer used to cache the `.dmg`.  Verifying that blob
+    # against the preferred asset's digest rejected a perfectly good signed
+    # release as "checksum mismatch", so the receiver looks its own file up
+    # here instead of assuming both ends picked the same shape.
+    digests: dict[str, str] = {}
+    for candidate in data.get("assets") or []:
+        name = str((candidate or {}).get("name") or "")
+        published = str((candidate or {}).get("digest") or "")
+        if name and published.startswith("sha256:") and len(published) > len("sha256:"):
+            digests[name] = published[len("sha256:") :].lower()
     return {
         "version": tag,
         "asset": asset_name,
         "sha256": digest[len("sha256:") :].lower(),
+        "digests": digests,
     }
 
 
@@ -529,6 +544,15 @@ def verify_update_blob(
         if source == "github":
             return True, "ok"
         return _verify_against(blob_path, peer_digest, "peer_verified", current_version)
+
+    # A peer's cache can hold the release's other shape (macOS: `.dmg` while the
+    # preferred updater asset is `.app.tar.gz`).  Check the blob against the
+    # published digest *of the file it actually is* when the release names one;
+    # the version check above already tied it to this release.
+    digests = release_info.get("digests") or {}
+    published_for_blob = digests.get(os.path.basename(blob_path)) or ""
+    if published_for_blob:
+        expected = published_for_blob
 
     if not _matches(blob_path, expected):
         return False, "hash_mismatch"

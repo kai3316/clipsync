@@ -698,8 +698,12 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
    the sentence in a narrow column rather than squeezing it into three words a
    line — the sentence is the part that has to be read. */
 .device-version-note {
-  display: flex;
-  flex-wrap: wrap;
+  /* Icon, sentence, action — three tracks, so the button keeps the right edge
+     whether the sentence is one line or four.  The flex version let the button
+     wrap under the text when a peer advertised a much older version, which is
+     exactly the row the note exists for. */
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px 10px;
   padding: 0;
@@ -708,7 +712,7 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 }
 /* The sentence takes the room the button does not need; it is the reason the
    line exists and the button is what one does about it. */
-.device-version-note > span { flex: 1 1 220px; min-width: 0; }
+.device-version-note > span { min-width: 0; }
 .device-version-note__icon { flex-shrink: 0; color: var(--muted); }
 .device-version-note > button {
   flex-shrink: 0;

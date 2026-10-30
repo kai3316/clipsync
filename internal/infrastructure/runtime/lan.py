@@ -6922,11 +6922,14 @@ class LanRuntime:
             # exists for exactly this case, and refusing the request before it
             # could answer left the row's 测试连接 button failing on a pairing
             # that works.
-            if (
-                pid not in {p.device_id for p in self.pairing.get_known_peers()}
-                and not self._peer_is_internet_reachable(pid)
-            ):
+            if pid in (getattr(self.config, "removed_peers", {}) or {}):
                 raise ApplicationError("NOT_FOUND", "Device not found")
+            # A device that is merely discovered over the relay has no netpair
+            # secret yet, so `_peer_is_internet_reachable` is False for it.  It is
+            # still in the list the reader clicked, and "test connection" should
+            # answer "no channel yet" rather than claim the row is gone — which
+            # is what the old known-pairing guard said about every discovered
+            # internet device.
             return self._probe_device(pid)
         finally:
             self._leave()
