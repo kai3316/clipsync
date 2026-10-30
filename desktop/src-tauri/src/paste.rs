@@ -166,18 +166,18 @@ mod platform {
 mod platform {
     use super::Foreground;
     use std::ffi::c_void;
-    use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    // Injected through CoreGraphics rather than a second Apple Event.  The
-    // osascript route needs the user to allow ClipSync to control System Events
-    // under Privacy & Security → Automation; when that is denied the raw error
-    // ("not authorised to send Apple events") is the one users see.  CGEvent
-    // needs the Accessibility permission instead — the permission every
-    // clipboard utility on macOS already asks for — so it is tried as the
-    // fallback, and the sentence returned when neither is granted names both.
+    // Injection goes through CoreGraphics only.  The old osascript route needed
+    // two separate permissions — Automation (ClipSync → System Events) *and*
+    // Accessibility — and its failure mode was the raw “not authorised to send
+    // Apple events” / “osascript is not allowed to send keystrokes” error.  The
+    // CGEvent path needs Accessibility alone, and macOS shows the standard
+    // prompt that also puts ClipSync in 系统设置 → 隐私与安全性 → 辅助功能.
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> u8;
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> u8;
         fn CGEventCreateKeyboardEvent(
             source: *mut c_void,
             virtual_key: u16,
@@ -185,51 +185,79 @@ mod platform {
         ) -> *mut c_void;
         fn CGEventSetFlags(event: *mut c_void, flags: u64);
         fn CGEventPost(tap: u32, event: *mut c_void);
+        static kAXTrustedCheckOptionPrompt: *const c_void;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         fn CFRelease(cf: *const c_void);
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            num_values: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+        static kCFBooleanTrue: *const c_void;
     }
 
     const COMMAND_FLAG: u64 = 1 << 20; // kCGEventFlagMaskCommand
     const KEY_V: u16 = 9; // kVK_ANSI_V
 
-    fn osascript(script: &str) -> Result<String, String> {
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .map_err(|error| format!("无法运行 osascript：{error}"))?;
-        if !output.status.success() {
-            let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if reason.is_empty() {
-                "系统拒绝了按键注入".to_string()
-            } else {
-                reason
-            });
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    /// Whether the system prompt has already been asked for in this process.
+    /// Asking on every paste would stack dialogs; the first one lists ClipSync
+    /// in the settings pane, and the error sentence then tells the reader where
+    /// to flip the switch.
+    static PROMPTED: AtomicBool = AtomicBool::new(false);
+
+    fn permission_hint() -> String {
+        "自动粘贴需要 macOS「辅助功能」权限：请打开「系统设置 → 隐私与安全性 → 辅助功能」，\
+         把 ClipSync 的开关打开。第一次触发粘贴时系统会弹出授权提示并把它列进这个列表；\
+         如果刚才没有看到提示，再触发一次粘贴即可，打开开关后重试。"
+            .to_string()
     }
 
-    fn permission_hint(reason: &str) -> String {
-        format!(
-            "自动粘贴需要 macOS 权限：请在「系统设置 → 隐私与安全性」中，到「辅助功能」允许 ClipSync，\
-             或到「自动化」允许 ClipSync 控制 System Events，然后重试。（{reason}）"
-        )
+    /// Ask macOS for Accessibility once (the option dictionary is what makes it
+    /// show the standard “ClipSync would like to control this computer” prompt
+    /// and register the app in the list).  A plain `AXIsProcessTrusted` check —
+    /// what the first version did — asks for nothing, which is exactly why the
+    /// app was missing from the settings pane.
+    fn accessibility_trusted() -> bool {
+        if unsafe { AXIsProcessTrusted() } != 0 {
+            return true;
+        }
+        if PROMPTED.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        unsafe {
+            let keys = [kAXTrustedCheckOptionPrompt];
+            let values = [kCFBooleanTrue];
+            let options = CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            if options.is_null() {
+                return false;
+            }
+            let _ = AXIsProcessTrustedWithOptions(options);
+            CFRelease(options);
+        }
+        // The dialog is asynchronous: the first attempt is still untrusted and
+        // the reader is told to switch the row on and retry.
+        unsafe { AXIsProcessTrusted() != 0 }
     }
 
-    /// Post Cmd+V through the HID event tap; needs Accessibility, not Apple
-    /// Events.  A false `AXIsProcessTrusted` means the events would be dropped
-    /// silently, which is why it is checked before posting.
-    fn inject_with_cg_event() -> Result<(), String> {
-        if unsafe { AXIsProcessTrusted() } == 0 {
-            return Err("没有获得辅助功能权限".to_string());
-        }
+    /// Post Cmd+V through the HID event tap.
+    fn post_paste() -> Result<(), String> {
         unsafe {
             for key_down in [1u8, 0u8] {
                 let event = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, key_down);
                 if event.is_null() {
-                    return Err("无法创建按键事件".to_string());
+                    return Err("无法创建按键事件（辅助功能权限或系统状态异常）".to_string());
                 }
                 CGEventSetFlags(event, COMMAND_FLAG);
                 CGEventPost(0, event); // kCGHIDEventTap
@@ -239,44 +267,22 @@ mod platform {
         Ok(())
     }
 
+    /// macOS keeps no foreground token: reading one would need an Apple Event
+    /// (Automation) and the CGEvent paste needs only Accessibility.  Hiding the
+    /// overlay is what gives the focus back to the window behind it.
     pub fn record() -> Option<Foreground> {
-        let name = osascript(
-            "tell application \"System Events\" to get name of first application process whose frontmost is true",
-        )
-        .ok()?;
-        if name.is_empty() {
-            None
-        } else {
-            Some(Foreground { raw: name })
-        }
+        None
     }
 
-    pub fn restore(foreground: &Foreground) -> Result<(), String> {
-        let name = foreground.raw.replace('\\', "\\\\").replace('"', "\\\"");
-        osascript(&format!(
-            "tell application \"System Events\" to set frontmost of process \"{name}\" to true"
-        ))
-        .map(|_| ())
+    pub fn restore(_foreground: &Foreground) -> Result<(), String> {
+        Ok(())
     }
 
     pub fn inject() -> Result<(), String> {
-        match osascript("tell application \"System Events\" to keystroke \"v\" using command down") {
-            Ok(_) => Ok(()),
-            Err(reason) => {
-                // Without Automation the focus was never recorded, so the
-                // window hide is what returns focus; the keystroke itself can
-                // still go through the Accessibility path.
-                match inject_with_cg_event() {
-                    Ok(()) => Ok(()),
-                    Err(cg_reason) if cg_reason.contains("辅助功能") => {
-                        Err(permission_hint(&reason))
-                    }
-                    Err(cg_reason) => Err(format!(
-                        "自动粘贴失败：{cg_reason}。也可以允许 ClipSync 控制 System Events 后重试。（{reason}）"
-                    )),
-                }
-            }
+        if !accessibility_trusted() {
+            return Err(permission_hint());
         }
+        post_paste()
     }
 }
 
