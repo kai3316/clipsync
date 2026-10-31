@@ -2277,7 +2277,14 @@ describe("history rendering", () => {
     vi.mocked(bridge.translate).mockResolvedValue({ translated: "a whole long source text" } as any);
     const app = mountOn("history");
     await flushPromises();
-    await app.get('[aria-label="翻译记录"]').trigger("click");
+    // Translation moved to the row's right-click menu when the one-click
+    // favourite took its old third icon.
+    await app.findAll(".history-row")[0].trigger("contextmenu");
+    await flushPromises();
+    const translateEntry = app.findAll(".context-menu-item")
+      .find(node => node.text().includes(t("翻译")));
+    if (!translateEntry) throw new Error("no 翻译记录 entry on the row menu");
+    await translateEntry.trigger("click");
     await flushPromises();
     // The row shows the escaped preview; the dialog must show the clip itself,
     // which is the whole reason the text is read back over IPC.
@@ -2288,6 +2295,17 @@ describe("history rendering", () => {
     await flushPromises();
     expect(bridge.translate).toHaveBeenCalledExactlyOnceWith("一整段很长的原文", "en", "auto");
     expect(dialog.get(".translation-result").text()).toBe("a whole long source text");
+    closeContextMenu();
+    app.unmount();
+  });
+  it("favorites a row with one click from the star", async () => {
+    vi.clearAllMocks();
+    const app = mountOn("history");
+    await flushPromises();
+    await app.get('.history-row .row-actions [aria-label="加入收藏夹"]').trigger("click");
+    await flushPromises();
+    expect(bridge.batchFavoriteHistory).toHaveBeenCalledExactlyOnceWith(["1"], "");
+    expect(app.text()).toContain("已加入收藏夹 1 条");
     app.unmount();
   });
   it("offers to open a link clip in the browser, and only for a link", async () => {

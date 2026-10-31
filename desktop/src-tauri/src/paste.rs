@@ -71,7 +71,7 @@ pub fn restore_and_paste(foreground: Option<Foreground>, delay: Duration) -> Res
     if let Some(foreground) = foreground {
         platform::restore(&foreground)?;
         // The keystroke must not race the focus change; 120 ms is the same
-        // order CrossPaste waits for the target to come back to the front.
+        // order macOS clipboard utilities wait for the target to come back to the front.
         std::thread::sleep(Duration::from_millis(120));
     }
     if !delay.is_zero() {
@@ -230,16 +230,6 @@ mod platform {
         fn objc_autoreleasePoolPush() -> *mut c_void;
         fn objc_autoreleasePoolPop(pool: *mut c_void);
     }
-    // libdispatch, for running the AppKit activation on the main thread (the
-    // thread that owns NSApplication) while the blocking paste thread waits.
-    extern "C" {
-        fn dispatch_get_main_queue() -> *mut c_void;
-        fn dispatch_async_f(
-            queue: *mut c_void,
-            context: *mut c_void,
-            work: extern "C" fn(*mut c_void),
-        );
-    }
 
     type SendObj = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
     type SendPid = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
@@ -249,8 +239,10 @@ mod platform {
         unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> i8;
     type SendI8 = unsafe extern "C" fn(*mut c_void, *mut c_void, i8) -> i8;
     type SendVoidFromObj = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
+    type SendVoidSelObjBool =
+        unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, i8);
 
-    // Command plus the left-hand device bit, the same flags CrossPaste posts.
+    // Command plus the left-hand device bit, as a hardware key would send.
     const COMMAND_FLAG: u64 = (1 << 20) | 0x08; // kCGEventFlagMaskCommand | device L Cmd
     const KEY_V: u16 = 9; // kVK_ANSI_V
     const ACTIVATE_ALL_WINDOWS_AND_IGNORE_OTHER_APPS: usize = 3;
@@ -305,6 +297,23 @@ mod platform {
     unsafe fn send_i8(obj: *mut c_void, name: &str, value: i8) -> i8 {
         let send: SendI8 = std::mem::transmute(objc_msgSend as *const ());
         send(obj, selector(name), value)
+    }
+
+    /// Run one selector on the AppKit main thread, synchronously.
+    ///
+    /// `performSelectorOnMainThread:withObject:waitUntilDone:YES` is public
+    /// AppKit and avoids linking libdispatch — the first attempt used
+    /// `dispatch_get_main_queue`, whose symbols are not exported on current
+    /// macOS SDKs, and the macOS bundle failed at the final link step.
+    unsafe fn perform_on_main(obj: *mut c_void, name: &str, arg: *mut c_void) {
+        let send: SendVoidSelObjBool = std::mem::transmute(objc_msgSend as *const ());
+        send(
+            obj,
+            selector("performSelectorOnMainThread:withObject:waitUntilDone:"),
+            selector(name),
+            arg,
+            1,
+        );
     }
 
     fn frontmost_pid() -> Option<i32> {
@@ -371,7 +380,7 @@ mod platform {
     }
 
     /// Post Cmd+V through the HID event tap with the same event source and
-    /// device-bit flags CrossPaste uses.  Modifiers travel only as flags on the
+    /// device-bit flags.  Modifiers travel only as flags on the
     /// V key events, never as separate Command key events, so a user still
     /// holding Command is not left with a rewritten modifier state.
     fn post_paste() -> Result<(), String> {
@@ -400,58 +409,14 @@ mod platform {
         }
     }
 
-    struct MainActivation {
-        pid: i32,
-        reply: std::sync::mpsc::Sender<Result<(), String>>,
-    }
-
-    /// Runs on the AppKit main thread: hide ClipSync itself and activate the
-    /// application that owned the focus when the panel opened.  This is the same
-    /// order CrossPaste uses (`NSApp.hide(nil)` followed by
-    /// `NSRunningApplication.activate(options:)`); just hiding the window left
-    /// ClipSync active with no key window, which is where Cmd+V went.
-    extern "C" fn run_main_activation(context: *mut c_void) {
-        let work = unsafe { Box::from_raw(context as *mut MainActivation) };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            let app = send(class("NSApplication"), "sharedApplication");
-            if !app.is_null() {
-                send_void(app, "hide:", std::ptr::null_mut());
-            }
-            let target = send_with(
-                work.pid,
-                class("NSRunningApplication"),
-                "runningApplicationWithProcessIdentifier:",
-            );
-            if target.is_null() {
-                return Err("找不到原来的前台应用".to_string());
-            }
-            let _ = send_options(
-                target,
-                "activateWithOptions:",
-                ACTIVATE_ALL_WINDOWS_AND_IGNORE_OTHER_APPS,
-            );
-            Ok::<(), String>(())
-        }))
-        .unwrap_or_else(|_| Err("激活原来的前台应用时出错".to_string()));
-        let _ = work.reply.send(result);
-    }
-
     /// Bring ClipSync back after a paste hid it, so the next panel opening is not
     /// a window of a still-hidden application.
-    extern "C" fn run_show_app(_context: *mut c_void) {
-        unsafe {
-            let app = send(class("NSApplication"), "sharedApplication");
-            if app.is_null() {
-                return;
-            }
-            send_void(app, "unhide:", std::ptr::null_mut());
-            let _ = send_i8(app, "activateIgnoringOtherApps:", 1);
-        }
-    }
-
     pub fn activate_app() {
         unsafe {
-            dispatch_async_f(dispatch_get_main_queue(), std::ptr::null_mut(), run_show_app);
+            let app = send(class("NSApplication"), "sharedApplication");
+            if !app.is_null() {
+                perform_on_main(app, "unhide:", std::ptr::null_mut());
+            }
         }
     }
 
@@ -474,23 +439,31 @@ mod platform {
             .parse()
             .map_err(|_| "无法解析原来的前台应用".to_string())?;
         let started = Instant::now();
-        let (reply, answer) = std::sync::mpsc::channel();
-        let work = Box::into_raw(Box::new(MainActivation { pid, reply }));
         unsafe {
-            dispatch_async_f(
-                dispatch_get_main_queue(),
-                work as *mut c_void,
-                run_main_activation,
+            // Hide ClipSync on the AppKit main thread (synchronously); just
+            // hiding the panel window left the application active with no key
+            // window, and that is where Cmd+V went.
+            let app = send(class("NSApplication"), "sharedApplication");
+            if !app.is_null() {
+                perform_on_main(app, "hide:", std::ptr::null_mut());
+            }
+            let target = send_with(
+                pid,
+                class("NSRunningApplication"),
+                "runningApplicationWithProcessIdentifier:",
             );
-        }
-        match answer.recv_timeout(Duration::from_millis(1500)) {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => return Err(message),
-            Err(_) => return Err("等待主线程激活原来的前台应用超时".to_string()),
+            if target.is_null() {
+                return Err("找不到原来的前台应用".to_string());
+            }
+            let _ = send_options(
+                target,
+                "activateWithOptions:",
+                ACTIVATE_ALL_WINDOWS_AND_IGNORE_OTHER_APPS,
+            );
         }
         // Wait until the target really is frontmost, then give its key window
         // time to accept input.  A fixed sleep alone guessed and was wrong for
-        // slow applications; CrossPaste waits the same way (≥200ms activation,
+        // slow applications; clipboard utilities wait the same way (≥200ms activation,
         // extra 50ms after frontmost).
         let deadline = Instant::now() + Duration::from_millis(1500);
         while Instant::now() < deadline {

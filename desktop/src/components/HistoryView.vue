@@ -629,6 +629,27 @@ async function pinSelected(pinned: boolean) {
       : t("已取消置顶 {count} 条", { count }));
   }
 }
+const favoritedIds = ref<Set<string>>(new Set());
+const favoritingId = ref("");
+
+/** One-click favourite from the row.
+ *
+ * The row's third action used to be 翻译, which the right-click menu still
+ * offers; a single click on the star adds the clip to the favourites library
+ * without opening the selection toolbar. `allowUnselected` is what makes a
+ * plain row click (no checkbox selection) count.
+ */
+async function favoriteRow(item: HistoryItem) {
+  if (favoritingId.value) return;
+  favoritingId.value = item.id;
+  const count = await store.batchFavorite([item.id], "", true);
+  favoritingId.value = "";
+  if (count) {
+    favoritedIds.value = new Set(favoritedIds.value).add(item.id);
+    store.toast("ui.favorites", t("已加入收藏夹 {count} 条", { count }));
+  }
+}
+
 async function favoriteSelected() {
   const count = await store.batchFavorite([...state.selectedIds]);
   if (count) store.toast("ui.favorites", t("已加入收藏夹 {count} 条", { count }));
@@ -932,7 +953,7 @@ defineExpose({ focusSearch, search, releasePinned, clearSearchIfFocused, pinKbdR
              action for a file wanted on disk belongs. -->
         <button v-if="isRemoteFile(item)" class="icon-button" :aria-label="t('取回并粘贴')" :title="pasteRemoteTitle(item)" :disabled="historyWritable || !remoteFileActionable(item)" @click="emit('paste-to-app', item)"><ClipboardPaste :size="17" /></button>
         <button class="icon-button" :class="{ pinned: item.pinned }" :aria-label="item.pinned ? t('取消置顶') : t('置顶')" :title="item.pinned ? t('取消置顶') : t('置顶')" :disabled="historyWritable" @click="store.pin(item)"><Pin :size="17" /></button>
-        <button class="icon-button" :aria-label="t('翻译记录')" :title="t('翻译记录')" :disabled="historyWritable || translating" @click="emit('translate', item)"><Globe :size="17" /></button>
+        <button class="icon-button" :class="{ pinned: favoritedIds.has(item.id) }" :aria-label="t('加入收藏夹')" :title="t('加入收藏夹')" :disabled="historyWritable || favoritingId === item.id" @click="favoriteRow(item)"><Star :size="17" :fill="favoritedIds.has(item.id) ? 'currentColor' : 'none'" /></button>
         <button v-if="isWebLink(item)" class="icon-button" :aria-label="t('在浏览器打开')" :title="t('在浏览器打开')" :disabled="historyWritable" @click="openHistoryLink(item)"><ExternalLink :size="17" /></button>
         <button class="icon-button" :aria-label="t('删除记录')" :title="t('删除记录')" :disabled="historyWritable" @click="emit('delete', item)"><Trash2 :size="17" /></button>
       </div>
