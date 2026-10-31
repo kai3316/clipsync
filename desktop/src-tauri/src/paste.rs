@@ -282,6 +282,11 @@ mod platform {
         if !accessibility_trusted() {
             return Err(permission_hint());
         }
+        // The panel has just hidden itself.  macOS activates the application
+        // behind it a moment later; posting the chord in that gap sent Cmd+V to
+        // a window that no longer had the focus, which looked exactly like "the
+        // clip copied but nothing pasted".  Give the activation time to land.
+        std::thread::sleep(std::time::Duration::from_millis(350));
         post_paste()
     }
 }

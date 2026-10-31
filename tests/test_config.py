@@ -189,7 +189,7 @@ class TestConfigRecovery:
             assert cfg.port == 30000
             # Other fields should be defaults
             assert cfg.sync_enabled is True  # default
-            assert cfg.auto_start is False  # default
+            assert cfg.auto_start is True  # default: a clipboard manager must be running
         finally:
             config_module._config_dir = original_dir
             config_module._config_path = original_path

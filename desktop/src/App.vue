@@ -3675,6 +3675,17 @@ async function openUpdateFolder() {
   const result = await store.openUpdateFolder();
   if (!result || !result.ok) announce(result?.error || t("无法打开所在文件夹"));
 }
+/** The way out when this build refuses an update.
+ *
+ *  A checksum/signature mismatch means the bytes are not the release this
+ *  machine can prove, so installing it automatically would be the one thing
+ *  update verification exists to prevent.  Opening the release page lets the
+ *  reader finish the update by hand with a file they downloaded themselves,
+ *  without this window ever running an unverified payload.
+ */
+function openUpdateReleases() {
+  void bridge.openAboutLink("releases");
+}
 async function toggleAutoUpdateCheck(next: boolean) {
   if (autoUpdateCheckBusy.value) return;
   autoUpdateCheckBusy.value = true;
@@ -6607,8 +6618,9 @@ async function translateText() {
                   <div class="setting-actions">
                     <button v-if="updateAttempt === 'download' && updateAvailable" type="button" @click="startUpdateDownload">{{ t("再试一次") }}</button>
                     <button type="button" @click="checkForUpdate">{{ t("重新检查") }}</button>
-                    <button type="button" @click="openAboutLink('releases')"><ExternalLink :size="16" />{{ t("手动下载") }}</button>
+                    <button type="button" @click="openUpdateReleases">{{ t("手动下载最新版") }}</button>
                   </div>
+                  <p class="note">{{ t("校验失败时不会安装未通过校验的文件；可以在发布页手动下载最新版，或先在另一台设备上完成更新。") }}</p>
                   <ErrorDetail v-if="updateState.error" :code="String(updateState.error)" />
                 </div>
                 <p v-if="updateInstallable" class="note setting-note">{{ t("下载并安装最新版本，完成后应用会自动重启。") }}</p>

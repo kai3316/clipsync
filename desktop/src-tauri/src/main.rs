@@ -4083,6 +4083,28 @@ fn main() {
             tauri::async_runtime::spawn(async move { tray::refresh(&handle).await });
             // The pause countdown is the one label no event can announce.
             tray::spawn_ticker(app.handle().clone());
+            // Apply the saved launch-at-login preference on every start, not
+            // only when the settings page is saved.  It is on by default (v6),
+            // so a fresh install is there after a reboot without a visit to
+            // settings; a failure (a dev build, a policy-managed machine) only
+            // means this session does not register it, never that startup fails.
+            let autostart_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let bridge = match autostart_handle.state::<Host>().bridge().await {
+                    Ok(bridge) => bridge,
+                    Err(_) => return,
+                };
+                let settings = match bridge.call("settings.get", json!({})).await {
+                    Ok(settings) => settings,
+                    Err(_) => return,
+                };
+                let enabled = settings
+                    .get("settings")
+                    .and_then(|value| value.get("auto_start"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let _ = configure_autostart(&autostart_handle, enabled);
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

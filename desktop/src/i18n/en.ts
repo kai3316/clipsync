@@ -1192,7 +1192,9 @@ export const EN: Record<string, string> = {
   "失败于：{stage}": "failed while {stage}",
   "再试一次": "Try again",
   "重新检查": "Check again",
-  "手动下载": "Download by hand",
+  "手动下载最新版": "Download the latest version manually",
+  "校验失败时不会安装未通过校验的文件；可以在发布页手动下载最新版，或先在另一台设备上完成更新。":
+    "A file that fails verification is never installed automatically; download the latest version from the release page, or update on another device first.",
   "下载并安装": "Download and install",
   "立即安装": "Install now",
   "下载并安装最新版本，完成后应用会自动重启。":

@@ -150,7 +150,7 @@ def test_the_five_fields_default_to_what_the_contract_says():
     assert cfg.skip_prelaunch_clipboard is True
     assert cfg.max_non_file_paste_mb == 8.0
     assert cfg.source_exclusion_patterns == []
-    assert cfg.config_version == 5
+    assert cfg.config_version == 6
 
 
 def test_the_schema_table_describes_the_new_fields():
@@ -241,7 +241,22 @@ def test_a_v4_config_is_rewritten_to_the_platform_modifier(isolated_config, monk
     assert cfg.hotkeys["show_quick_paste"] == "Cmd+Shift+V"
     assert cfg.hotkeys["show_window"] == "Cmd+Shift+Space"
     assert cfg.hotkeys["paste_1"] == ""
-    assert cfg.config_version == 5
+    assert cfg.config_version == 6
+
+
+def test_a_v5_config_turns_on_launch_at_login(isolated_config):
+    isolated_config.write_text(
+        json.dumps({"config_version": 5, "auto_start": False}),
+        encoding="utf-8",
+    )
+
+    cfg = config_module.load()
+
+    assert cfg.auto_start is True
+    assert cfg.config_version == 6
+    # A save keeps the migrated version, so the flip happens once.
+    config_module.save(cfg)
+    assert json.loads(isolated_config.read_text(encoding="utf-8"))["config_version"] == 6
 
 
 def test_a_v3_config_is_migrated_to_v5_and_saved_that_way(isolated_config):
@@ -263,7 +278,7 @@ def test_a_v3_config_is_migrated_to_v5_and_saved_that_way(isolated_config):
 
     cfg = config_module.load()
 
-    assert cfg.config_version == 5
+    assert cfg.config_version == 6
     # v4 moved plain-text paste to the new default...
     assert cfg.hotkeys["paste_plain"] == DEFAULT_HOTKEYS["paste_plain"]
     # ...and added the action that did not exist before.
@@ -281,7 +296,7 @@ def test_a_v3_config_is_migrated_to_v5_and_saved_that_way(isolated_config):
     config_module.save(cfg)
 
     raw = json.loads(config_path.read_text(encoding="utf-8"))
-    assert raw["config_version"] == 5
+    assert raw["config_version"] == 6
     assert raw["hotkeys"]["paste_plain"] == old_plain
     assert config_module.load().hotkeys["paste_plain"] == old_plain
 
@@ -314,7 +329,7 @@ def test_a_v4_config_keeps_a_custom_paste_slot_but_loses_the_default_ones(isolat
     # The one-time v5 flip: hotkeys exist for new users without a trip to
     # settings; a user who turns them off again stays off.
     assert cfg.hotkeys_enabled is True
-    assert cfg.config_version == 5
+    assert cfg.config_version == 6
 
 
 def test_a_custom_paste_plain_binding_is_not_rewritten(isolated_config):
@@ -332,7 +347,7 @@ def test_a_custom_paste_plain_binding_is_not_rewritten(isolated_config):
 
     assert cfg.hotkeys["paste_plain"] == "Ctrl+Alt+P"
     assert cfg.hotkeys["show_quick_paste"] == DEFAULT_HOTKEYS["show_quick_paste"]
-    assert cfg.config_version == 5
+    assert cfg.config_version == 6
 
 
 def test_the_new_fields_round_trip_through_save_and_load(isolated_config):
@@ -346,7 +361,7 @@ def test_the_new_fields_round_trip_through_save_and_load(isolated_config):
     config_module.save(cfg)
 
     raw = json.loads(config_path.read_text(encoding="utf-8"))
-    assert raw["config_version"] == 5
+    assert raw["config_version"] == 6
     assert raw["auto_paste_enabled"] is False
     assert raw["source_exclusion_patterns"] == ["keepass", "1password"]
 

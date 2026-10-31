@@ -132,8 +132,9 @@ class Config:
     # binding off Ctrl+Shift+V, which the paste panel owns now; v5 makes the
     # global hotkeys on by default, follows the platform's modifier (Cmd on
     # macOS) and leaves the paste_1..9 slots unbound so they cannot take
-    # Ctrl+1…9 away from every other application.
-    config_version: int = 5
+    # Ctrl+1…9 away from every other application; v6 turns launch-at-login on
+    # by default, because a clipboard manager that is not running cannot paste.
+    config_version: int = 6
     device_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     device_name: str = field(default_factory=platform.node)
     port: int = 19990
@@ -150,7 +151,7 @@ class Config:
     # pause window re-arms it instead of leaving sync_enabled=False stuck
     # on forever with nothing left to re-enable it.
     timed_pause_until: float = 0.0
-    auto_start: bool = False
+    auto_start: bool = True
     # None = not configured → nothing redacted (default OFF), which is also
     # what [] (an explicit empty selection) means.  Non-empty = that subset.
     filter_enabled_categories: list[str] | None = None
@@ -1301,6 +1302,13 @@ def load() -> Config:
                         continue
                     cfg.hotkeys[action] = platform_defaults[action]
                 cfg.config_version = 5
+            # v6 (1.3.3): launch at login is on by default.  A clipboard manager
+            # that is not running cannot paste, and the first thing a reader
+            # expects after installing one is that it is there after a reboot.
+            # The flip is one-way like the others: turning it back off is kept.
+            if data.get("config_version", 1) < 6:
+                cfg.auto_start = True
+                cfg.config_version = 6
             # Migrate from legacy dict-format peers (pre-list) to list format:
             #   {"device_id": {device_name, public_key_pem, paired, notes}, ...}
             cfg.peers = _parse_peer_list(data, "peers")
@@ -1319,7 +1327,7 @@ def load() -> Config:
 
 def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
     with config_lock:
-        cfg.config_version = 5
+        cfg.config_version = 6
         config_dir = _config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = _config_path()
