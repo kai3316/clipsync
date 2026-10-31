@@ -3630,6 +3630,9 @@ fn open_quick_paste_for(app: tauri::AppHandle) {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = origin;
         }
+        // A previous paste hid ClipSync on macOS so the target could become
+        // frontmost; bring the app back before showing this next overlay.
+        paste::activate_app();
         let existing = app.get_webview_window("quick-paste").is_some();
         match ensure_quick_paste_window(&app) {
             Ok(window) => {

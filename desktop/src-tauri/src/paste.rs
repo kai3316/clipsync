@@ -41,6 +41,16 @@ pub fn record_foreground() -> Option<Foreground> {
     platform::record()
 }
 
+/// Make sure our own application is visible again before the overlay opens.
+///
+/// On macOS a paste hides the application (`NSApp.hide`) so the target can take
+/// the focus; without an explicit unhide the next overlay would be a window of
+/// a still-hidden app.  Other platforms have nothing to do.
+pub fn activate_app() {
+    #[cfg(target_os = "macos")]
+    platform::activate_app();
+}
+
 /// Press Ctrl/Cmd+V in the application that currently has the focus.
 ///
 /// `delay` is spent before the keystroke so the caller can hide its own window
@@ -186,6 +196,7 @@ mod platform {
         ) -> *mut c_void;
         fn CGEventSetFlags(event: *mut c_void, flags: u64);
         fn CGEventPost(tap: u32, event: *mut c_void);
+        fn CGEventSourceCreate(state: u32) -> *mut c_void;
         static kAXTrustedCheckOptionPrompt: *const c_void;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -219,6 +230,16 @@ mod platform {
         fn objc_autoreleasePoolPush() -> *mut c_void;
         fn objc_autoreleasePoolPop(pool: *mut c_void);
     }
+    // libdispatch, for running the AppKit activation on the main thread (the
+    // thread that owns NSApplication) while the blocking paste thread waits.
+    extern "C" {
+        fn dispatch_get_main_queue() -> *mut c_void;
+        fn dispatch_async_f(
+            queue: *mut c_void,
+            context: *mut c_void,
+            work: extern "C" fn(*mut c_void),
+        );
+    }
 
     type SendObj = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
     type SendPid = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
@@ -226,10 +247,17 @@ mod platform {
         unsafe extern "C" fn(*mut c_void, *mut c_void, i32) -> *mut c_void;
     type SendBoolFromOptions =
         unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> i8;
+    type SendI8 = unsafe extern "C" fn(*mut c_void, *mut c_void, i8) -> i8;
+    type SendVoidFromObj = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
 
-    const COMMAND_FLAG: u64 = 1 << 20; // kCGEventFlagMaskCommand
+    // Command plus the left-hand device bit, the same flags CrossPaste posts.
+    const COMMAND_FLAG: u64 = (1 << 20) | 0x08; // kCGEventFlagMaskCommand | device L Cmd
     const KEY_V: u16 = 9; // kVK_ANSI_V
     const ACTIVATE_ALL_WINDOWS_AND_IGNORE_OTHER_APPS: usize = 3;
+    const HID_EVENT_TAP: u32 = 0;
+    const COMBINED_SESSION_SOURCE: u32 = 0;
+    const SETTLE_AFTER_FRONTMOST: Duration = Duration::from_millis(50);
+    const MIN_ACTIVATION_SETTLE: Duration = Duration::from_millis(200);
 
     /// Whether the system prompt has already been asked for in this process.
     /// Asking on every paste would stack dialogs; the first one lists ClipSync
@@ -265,6 +293,18 @@ mod platform {
     unsafe fn send_options(obj: *mut c_void, name: &str, options: usize) -> i8 {
         let send: SendBoolFromOptions = std::mem::transmute(objc_msgSend as *const ());
         send(obj, selector(name), options)
+    }
+
+    unsafe fn send_void(obj: *mut c_void, name: &str, arg: *mut c_void) {
+        let send: SendVoidFromObj = std::mem::transmute(objc_msgSend as *const ());
+        send(obj, selector(name), arg)
+    }
+
+    /// A BOOL parameter is one byte, not an NSUInteger; mixing the two ABI
+    /// signatures works by accident on some arm64 builds and not others.
+    unsafe fn send_i8(obj: *mut c_void, name: &str, value: i8) -> i8 {
+        let send: SendI8 = std::mem::transmute(objc_msgSend as *const ());
+        send(obj, selector(name), value)
     }
 
     fn frontmost_pid() -> Option<i32> {
@@ -330,20 +370,89 @@ mod platform {
         unsafe { AXIsProcessTrusted() != 0 }
     }
 
-    /// Post Cmd+V through the HID event tap.
+    /// Post Cmd+V through the HID event tap with the same event source and
+    /// device-bit flags CrossPaste uses.  Modifiers travel only as flags on the
+    /// V key events, never as separate Command key events, so a user still
+    /// holding Command is not left with a rewritten modifier state.
     fn post_paste() -> Result<(), String> {
         unsafe {
+            let source = CGEventSourceCreate(COMBINED_SESSION_SOURCE);
+            let mut failure: Option<String> = None;
             for key_down in [1u8, 0u8] {
-                let event = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, key_down);
+                let event = CGEventCreateKeyboardEvent(source, KEY_V, key_down);
                 if event.is_null() {
-                    return Err("无法创建按键事件（辅助功能权限或系统状态异常）".to_string());
+                    failure = Some(
+                        "无法创建按键事件（辅助功能权限或系统状态异常）".to_string(),
+                    );
+                    break;
                 }
                 CGEventSetFlags(event, COMMAND_FLAG);
-                CGEventPost(0, event); // kCGHIDEventTap
+                CGEventPost(HID_EVENT_TAP, event);
                 CFRelease(event as *const c_void);
             }
+            if !source.is_null() {
+                CFRelease(source);
+            }
+            match failure {
+                Some(message) => Err(message),
+                None => Ok(()),
+            }
         }
-        Ok(())
+    }
+
+    struct MainActivation {
+        pid: i32,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    }
+
+    /// Runs on the AppKit main thread: hide ClipSync itself and activate the
+    /// application that owned the focus when the panel opened.  This is the same
+    /// order CrossPaste uses (`NSApp.hide(nil)` followed by
+    /// `NSRunningApplication.activate(options:)`); just hiding the window left
+    /// ClipSync active with no key window, which is where Cmd+V went.
+    extern "C" fn run_main_activation(context: *mut c_void) {
+        let work = unsafe { Box::from_raw(context as *mut MainActivation) };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            let app = send(class("NSApplication"), "sharedApplication");
+            if !app.is_null() {
+                send_void(app, "hide:", std::ptr::null_mut());
+            }
+            let target = send_with(
+                work.pid,
+                class("NSRunningApplication"),
+                "runningApplicationWithProcessIdentifier:",
+            );
+            if target.is_null() {
+                return Err("找不到原来的前台应用".to_string());
+            }
+            let _ = send_options(
+                target,
+                "activateWithOptions:",
+                ACTIVATE_ALL_WINDOWS_AND_IGNORE_OTHER_APPS,
+            );
+            Ok::<(), String>(())
+        }))
+        .unwrap_or_else(|_| Err("激活原来的前台应用时出错".to_string()));
+        let _ = work.reply.send(result);
+    }
+
+    /// Bring ClipSync back after a paste hid it, so the next panel opening is not
+    /// a window of a still-hidden application.
+    extern "C" fn run_show_app(_context: *mut c_void) {
+        unsafe {
+            let app = send(class("NSApplication"), "sharedApplication");
+            if app.is_null() {
+                return;
+            }
+            send_void(app, "unhide:", std::ptr::null_mut());
+            let _ = send_i8(app, "activateIgnoringOtherApps:", 1);
+        }
+    }
+
+    pub fn activate_app() {
+        unsafe {
+            dispatch_async_f(dispatch_get_main_queue(), std::ptr::null_mut(), run_show_app);
+        }
     }
 
     pub fn record() -> Option<Foreground> {
@@ -364,30 +473,32 @@ mod platform {
             .raw
             .parse()
             .map_err(|_| "无法解析原来的前台应用".to_string())?;
-        // `quick_paste_choose` calls `window.hide()` and then this function on a
-        // blocking thread; give the main run loop a moment to actually order the
-        // panel out before asking another application to become active.
-        std::thread::sleep(Duration::from_millis(120));
-        with_autorelease_pool(|| unsafe {
-            let cls = class("NSRunningApplication");
-            let app = send_with(pid, cls, "runningApplicationWithProcessIdentifier:");
-            if app.is_null() {
-                return Err("找不到原来的前台应用".to_string());
-            }
-            // All windows + ignoring other apps: activating without the second
-            // flag can lose to whatever the window manager thinks is active.
-            let _ = send_options(
-                app,
-                "activateWithOptions:",
-                ACTIVATE_ALL_WINDOWS_AND_IGNORE_OTHER_APPS,
+        let started = Instant::now();
+        let (reply, answer) = std::sync::mpsc::channel();
+        let work = Box::into_raw(Box::new(MainActivation { pid, reply }));
+        unsafe {
+            dispatch_async_f(
+                dispatch_get_main_queue(),
+                work as *mut c_void,
+                run_main_activation,
             );
-            Ok::<(), String>(())
-        })?;
-        // Wait for the activation to actually become frontmost before the
-        // keystroke; a fixed sleep guessed and was wrong for slow applications.
-        let deadline = Instant::now() + Duration::from_millis(900);
+        }
+        match answer.recv_timeout(Duration::from_millis(1500)) {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => return Err(message),
+            Err(_) => return Err("等待主线程激活原来的前台应用超时".to_string()),
+        }
+        // Wait until the target really is frontmost, then give its key window
+        // time to accept input.  A fixed sleep alone guessed and was wrong for
+        // slow applications; CrossPaste waits the same way (≥200ms activation,
+        // extra 50ms after frontmost).
+        let deadline = Instant::now() + Duration::from_millis(1500);
         while Instant::now() < deadline {
             if with_autorelease_pool(frontmost_pid) == Some(pid) {
+                let settle = MIN_ACTIVATION_SETTLE
+                    .saturating_sub(started.elapsed())
+                    .max(SETTLE_AFTER_FRONTMOST);
+                std::thread::sleep(settle);
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(15));
@@ -402,9 +513,6 @@ mod platform {
         if !accessibility_trusted() {
             return Err(permission_hint());
         }
-        // `restore` has already waited for the target to be frontmost; this
-        // small margin covers the key-window hand-off inside that application.
-        std::thread::sleep(Duration::from_millis(120));
         post_paste()
     }
 }
