@@ -165,8 +165,9 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::Foreground;
-    use std::ffi::c_void;
+    use std::ffi::{c_void, CString};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     // Injection goes through CoreGraphics only.  The old osascript route needed
     // two separate permissions — Automation (ClipSync → System Events) *and*
@@ -200,15 +201,93 @@ mod platform {
         ) -> *const c_void;
         static kCFBooleanTrue: *const c_void;
     }
+    // Reading and re-activating the frontmost application through NSWorkspace /
+    // NSRunningApplication.  This is what the previous “sleep and hope” version
+    // was missing: hiding the panel does not make macOS hand the focus back on
+    // its own schedule, so Cmd+V could be posted while ClipSync was still the
+    // active application and the keystroke went nowhere.
+    #[link(name = "AppKit", kind = "framework")]
+    extern "C" {}
+    #[link(name = "objc")]
+    extern "C" {
+        fn objc_getClass(name: *const std::os::raw::c_char) -> *mut c_void;
+        fn sel_registerName(name: *const std::os::raw::c_char) -> *mut c_void;
+        fn objc_msgSend();
+        // These are called from a tokio blocking thread, which has no
+        // autorelease pool of its own; NSWorkspace hands back autoreleased
+        // objects, so the pool is opened around each ObjC call.
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    type SendObj = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+    type SendPid = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+    type SendObjFromPid =
+        unsafe extern "C" fn(*mut c_void, *mut c_void, i32) -> *mut c_void;
+    type SendBoolFromOptions =
+        unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> i8;
 
     const COMMAND_FLAG: u64 = 1 << 20; // kCGEventFlagMaskCommand
     const KEY_V: u16 = 9; // kVK_ANSI_V
+    const ACTIVATE_ALL_WINDOWS_AND_IGNORE_OTHER_APPS: usize = 3;
 
     /// Whether the system prompt has already been asked for in this process.
     /// Asking on every paste would stack dialogs; the first one lists ClipSync
     /// in the settings pane, and the error sentence then tells the reader where
     /// to flip the switch.
     static PROMPTED: AtomicBool = AtomicBool::new(false);
+
+    fn class(name: &str) -> *mut c_void {
+        let name = CString::new(name).expect("class name");
+        unsafe { objc_getClass(name.as_ptr()) }
+    }
+
+    fn selector(name: &str) -> *mut c_void {
+        let name = CString::new(name).expect("selector name");
+        unsafe { sel_registerName(name.as_ptr()) }
+    }
+
+    unsafe fn send(obj: *mut c_void, name: &str) -> *mut c_void {
+        let send: SendObj = std::mem::transmute(objc_msgSend as *const ());
+        send(obj, selector(name))
+    }
+
+    unsafe fn send_pid(obj: *mut c_void, name: &str) -> i32 {
+        let send: SendPid = std::mem::transmute(objc_msgSend as *const ());
+        send(obj, selector(name))
+    }
+
+    unsafe fn send_with(pid: i32, obj: *mut c_void, name: &str) -> *mut c_void {
+        let send: SendObjFromPid = std::mem::transmute(objc_msgSend as *const ());
+        send(obj, selector(name), pid)
+    }
+
+    unsafe fn send_options(obj: *mut c_void, name: &str, options: usize) -> i8 {
+        let send: SendBoolFromOptions = std::mem::transmute(objc_msgSend as *const ());
+        send(obj, selector(name), options)
+    }
+
+    fn frontmost_pid() -> Option<i32> {
+        unsafe {
+            let workspace = send(class("NSWorkspace"), "sharedWorkspace");
+            if workspace.is_null() {
+                return None;
+            }
+            let app = send(workspace, "frontmostApplication");
+            if app.is_null() {
+                return None;
+            }
+            let pid = send_pid(app, "processIdentifier");
+            (pid > 0).then_some(pid)
+        }
+    }
+
+    fn with_autorelease_pool<T>(body: impl FnOnce() -> T) -> T {
+        let pool = unsafe { objc_autoreleasePoolPush() };
+        let result = body();
+        unsafe { objc_autoreleasePoolPop(pool) };
+        result
+    }
 
     fn permission_hint() -> String {
         "自动粘贴需要 macOS「辅助功能」权限：请打开「系统设置 → 隐私与安全性 → 辅助功能」，\
@@ -267,26 +346,65 @@ mod platform {
         Ok(())
     }
 
-    /// macOS keeps no foreground token: reading one would need an Apple Event
-    /// (Automation) and the CGEvent paste needs only Accessibility.  Hiding the
-    /// overlay is what gives the focus back to the window behind it.
     pub fn record() -> Option<Foreground> {
-        None
+        let pid = with_autorelease_pool(frontmost_pid)?;
+        // The panel can be opened while ClipSync itself is frontmost (for
+        // example a tray click on a machine where the main window was just
+        // hidden); activating ourselves again would paste into no window.
+        if pid == std::process::id() as i32 {
+            return None;
+        }
+        Some(Foreground {
+            raw: pid.to_string(),
+        })
     }
 
-    pub fn restore(_foreground: &Foreground) -> Result<(), String> {
-        Ok(())
+    pub fn restore(foreground: &Foreground) -> Result<(), String> {
+        let pid: i32 = foreground
+            .raw
+            .parse()
+            .map_err(|_| "无法解析原来的前台应用".to_string())?;
+        // `quick_paste_choose` calls `window.hide()` and then this function on a
+        // blocking thread; give the main run loop a moment to actually order the
+        // panel out before asking another application to become active.
+        std::thread::sleep(Duration::from_millis(120));
+        with_autorelease_pool(|| unsafe {
+            let cls = class("NSRunningApplication");
+            let app = send_with(pid, cls, "runningApplicationWithProcessIdentifier:");
+            if app.is_null() {
+                return Err("找不到原来的前台应用".to_string());
+            }
+            // All windows + ignoring other apps: activating without the second
+            // flag can lose to whatever the window manager thinks is active.
+            let _ = send_options(
+                app,
+                "activateWithOptions:",
+                ACTIVATE_ALL_WINDOWS_AND_IGNORE_OTHER_APPS,
+            );
+            Ok::<(), String>(())
+        })?;
+        // Wait for the activation to actually become frontmost before the
+        // keystroke; a fixed sleep guessed and was wrong for slow applications.
+        let deadline = Instant::now() + Duration::from_millis(900);
+        while Instant::now() < deadline {
+            if with_autorelease_pool(frontmost_pid) == Some(pid) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        Err(format!(
+            "原来的前台应用没有重新获得焦点（目标 pid {pid}，当前前台 pid {:?}）",
+            with_autorelease_pool(frontmost_pid)
+        ))
     }
 
     pub fn inject() -> Result<(), String> {
         if !accessibility_trusted() {
             return Err(permission_hint());
         }
-        // The panel has just hidden itself.  macOS activates the application
-        // behind it a moment later; posting the chord in that gap sent Cmd+V to
-        // a window that no longer had the focus, which looked exactly like "the
-        // clip copied but nothing pasted".  Give the activation time to land.
-        std::thread::sleep(std::time::Duration::from_millis(350));
+        // `restore` has already waited for the target to be frontmost; this
+        // small margin covers the key-window hand-off inside that application.
+        std::thread::sleep(Duration::from_millis(120));
         post_paste()
     }
 }
