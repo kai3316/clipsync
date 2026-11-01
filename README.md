@@ -72,6 +72,7 @@ ClipSync 让你在几台电脑之间自然地复制粘贴：一边复制，另�
 | Linux（ARM64） | `ClipSync_<版本>_arm64.deb` 或 `.AppImage` |
 
 下载安装后打开就能用。macOS 第一次打开如果提示无法验证，在 Finder 里右键点击 ClipSync，选择「打开」即可。
+也可以从 Cloudflare 镜像下载：[Windows](https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_x64-setup.exe) · [macOS Apple 芯片](https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_aarch64.dmg) · [macOS Intel](https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_x64.dmg) · [Linux AppImage](https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_amd64.AppImage)
 
 ## 第一次使用
 

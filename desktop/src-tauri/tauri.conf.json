@@ -31,6 +31,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlGQkQ4ODg3NDQwRDlCNTAKUldSUW13MUVoNGk5bnhKMXFtazl6bzhzblJ4OW1yOUhQczR6a1l0QUVSbmxxZE1sOVdrek9vQW8K",
       "endpoints": [
+        "https://dl.kai3316.dpdns.org/latest.json",
         "https://github.com/kai3316/clipsync/releases/latest/download/latest.json"
       ],
       "windows": {
