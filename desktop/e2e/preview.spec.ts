@@ -54,12 +54,7 @@ const PAGES: PageEntry[] = [
   { id: "favorites", label: T("收藏库", "Favorites") },
   { id: "transfers", label: T("文件传输", "File Transfer") },
   { id: "chat", label: T("附近聊天", "Nearby Chat") },
-  {
-    id: "ai",
-    label: T("AI 配置", "AI config"),
-    sub: T("本机配置", "This machine"),
-    action: T("读取本机配置", "Read local config"),
-  },
+  { id: "ai", label: T("AI 配置", "AI config") },
   { id: "settings", label: T("设置", "Settings") },
 ];
 

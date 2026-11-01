@@ -53,7 +53,7 @@ export const fixtures: Record<string, unknown> = {
   // this module (`install-host.ts`).  See its own `S`.
   sample: { lang: LANGUAGE, local: LOC, mac: MAC, mini: MINI },
   get_app_status: {
-    version: "1.1.0",
+    version: "1.3.2",
     health: "ready",
     device_name: LOC,
     device_id: "7f3c1a92-4e8b-4d21-9a55-2c6e0b7d4f18",
@@ -127,7 +127,7 @@ export const fixtures: Record<string, unknown> = {
       device_name: LOC,
       language: LANGUAGE,
       language_chosen: true,
-      appearance_mode: "system",
+      appearance_mode: "dark",
       sync_enabled: true,
       plain_text_only: false,
       encryption_enabled: true,
@@ -297,13 +297,22 @@ export const fixtures: Record<string, unknown> = {
   // refreshed rows come through `devices.changed`, which a preview has no
   // reason to simulate.
   scan_devices: { enabled: true, visible: true },
+  set_hotkeys: [],
   companion_status: {
     enabled: true,
     port: 8765,
     running: true,
     state: "running",
     access_url: "http://192.168.1.7:8765/mobile.html?token=prv-8f21c4d9",
+    remote: {
+      enabled: true, companion_running: true, token_set: true, mode: "readonly",
+      brokers: ["wss://relay.example.net/mqtt"], default_brokers: ["wss://relay.example.net/mqtt"],
+      page_url: "https://clipsync.local/mobile.html", connected: true,
+      broker: "wss://relay.example.net/mqtt", phone_online: true, phone_id: "phone-1",
+      last_seen: 1789342000, rx: 12, tx: 8, error: "",
+    },
   },
+  companion_qr: { ok: true, url: "https://clipsync.local/mobile.html?token=preview", page_url: "https://clipsync.local/mobile.html", qr: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAZoAAAGaAQAAAAAefbjOAAADIUlEQVR4nO1cW46jQAx0A9J8NlIOMEchN9szzQ3CUXKAkeBzJSKvbFeTKF/DJNoJ01WKEE1jCdyWH9UmSWUzxma7jAiFACoCoCIAKgKgIgAqAqAi9qSIBHSCQ2/pQrkqMpfT44883kZQ6AmKGNQw+dkSl9KfqVU92dlRWp8vWShV/osVIbHSgxuDmQDMQlVPeREfqk6tGUOrmHjxd2oo9IAiurtxEmkXkbk3AxFNw4cN70CVV6QINc8gY4+AIeP7YlHjVR7vS6DQM3xEtrAwY5CG6SBwFB9d+IhbJosq//2KGL2S6C2fPMNIPJ8st11K1fEzj7cNFHrcR+jtpUssvFrAwNA9yBVUeR21hlrioKpeYZh7sFrjlH3W0gpLMFhrVBM1ejcBVRktdBx99c+dkRKXpCd3FPMb+YhdLu63osZ4vCQzgSVJtgvzYdHxvVjAeLSyNH8yj6gmaqgHDI8LRkTpyUlKJ6wCiB+4+cXfqaHQ4xahljhYuhChA6Q2zMIzijgwj6jGItS9AGhrmEXkk24gK59NH1FR1BAPGHfDiBWrMdAiqhHKcBQy9s5H+K7WX9v+NnLK64+529k7bQKFgFjl5D/gzQJGn9RZbAk7aJfrPLVXRdTIuiaQK2FVzsJlMLOsi7PUki5Y4Ykpt5IoRr17gpllTUKzBYes6iQl0gqjK+3g9hKz7Krb4+J+i7PsPZFoF7UtcZU52eGgSfLSJcmT6Jhsdg/v1FDo8aghUXgaKeFXfZOrBAycrdQVOctqGCrxmhPUZOEjCmsVrZi0iGoYqrY4gEJW36SSkXK6bdAiauqP0Olu4wv2gDu501VX1ADwvUbZ2goeE7UGfUSN33SJdczIcHbi0ltpSm0aO6M/8ngbQaEn9GIPXmLM1oFdoJZZprjDO/bT+uUGVV7bN12KctMDRjGDmDWw+qzsmy5DnhArxuSx4tJ5a3YKX/Li79RQ6IkWIbbmKfa38mdnG6DYBbUuTHKWte10tTic7hjNK0fBqFENi+1AsyVa666cZaQazCNqEEr8Z7JdrFNDoQAVAVARABUBUBEAFQH8P0X8A7fvpTMQB1yAAAAAAElFTkSuQmCC' },
   internet_pairing_status: {
     generated_code: "K3M7-9QDA",
     peers: [
@@ -536,7 +545,7 @@ export const fixtures: Record<string, unknown> = {
     web_port: 8765,
     lan_ip: "192.168.1.7",
     os: "Windows 11",
-    version: "1.1.0",
+    version: "1.3.2",
   },
   get_overview: {
     connected_count: 1,
@@ -557,7 +566,7 @@ export const fixtures: Record<string, unknown> = {
     local_ip: "192.168.1.7",
     port: 51888,
     platform: "Windows",
-    version: "1.1.0",
+    version: "1.3.2",
     network_type: "lan",
     network_detail: S("有线连接 · 1 Gbps", "Wired · 1 Gbps"),
     // No `recent_items` here: the feed is the newest history rows, and
