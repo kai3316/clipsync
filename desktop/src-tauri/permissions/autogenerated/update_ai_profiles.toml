@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-ai-profiles"
+description = "Enables the update_ai_profiles command without any pre-configured scope."
+commands.allow = ["update_ai_profiles"]
+
+[[permission]]
+identifier = "deny-update-ai-profiles"
+description = "Denies the update_ai_profiles command without any pre-configured scope."
+commands.deny = ["update_ai_profiles"]

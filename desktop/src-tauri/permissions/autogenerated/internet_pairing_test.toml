@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-internet-pairing-test"
+description = "Enables the internet_pairing_test command without any pre-configured scope."
+commands.allow = ["internet_pairing_test"]
+
+[[permission]]
+identifier = "deny-internet-pairing-test"
+description = "Denies the internet_pairing_test command without any pre-configured scope."
+commands.deny = ["internet_pairing_test"]

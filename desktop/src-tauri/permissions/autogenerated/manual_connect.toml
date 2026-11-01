@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-manual-connect"
+description = "Enables the manual_connect command without any pre-configured scope."
+commands.allow = ["manual_connect"]
+
+[[permission]]
+identifier = "deny-manual-connect"
+description = "Denies the manual_connect command without any pre-configured scope."
+commands.deny = ["manual_connect"]

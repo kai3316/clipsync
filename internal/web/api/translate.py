@@ -1,0 +1,369 @@
+"""ClipSync translation endpoint — LibreTranslate-compatible proxy with a
+free anonymous fallback.
+
+Two modes:
+
+* **Configured** — ``cfg.translate_url`` / ``cfg.translate_api_key`` point
+  at a LibreTranslate-compatible instance (official, self-hosted, or a
+  key-protected mirror).  The API key, when set, is sent as
+  ``Authorization: Bearer <key>``.
+* **Free fallback** — when neither is configured the public LibreTranslate
+  instances now demand an API key, so we transparently fall back to MyMemory
+  (https://api.mymemory.translated.net), which works anonymously.  MyMemory
+  can't auto-detect the source language, so for ``source=auto`` we guess it
+  from Unicode blocks.
+
+Uses only stdlib (urllib + json) — zero dependencies.
+"""
+
+import http.client
+import json
+import logging
+import urllib.error
+import urllib.parse
+import urllib.request
+
+logger = logging.getLogger(__name__)
+
+LIBRETRANSLATE_URL = "https://libretranslate.com/translate"
+MYMEMORY_URL = "https://api.mymemory.translated.net/get"
+REQUEST_TIMEOUT = 15  # seconds
+# The largest response this app will read from a translation service.  Real
+# answers are a few hundred bytes; a service that streams gigabytes is either
+# broken or hostile, and reading it whole is how the sidecar ran out of memory.
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects instead of following them.
+
+    The endpoint is checked before it is dialled, but a redirect is a second
+    destination that check never saw — a public-looking host that answers
+    ``302`` to ``http://169.254.169.254/`` walks straight past it.  Returning
+    None makes urllib raise the ``HTTPError`` for the 3xx, which the caller
+    already turns into an ordinary "service unavailable".
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class _GuardedConnectionMixin:
+    """Refuse a socket that is not where the pre-flight check was told it would be.
+
+    ``is_safe_outbound_url`` resolves the name and rejects link-local and
+    reserved answers, and then urllib resolves it *again* to connect — so a
+    name the endpoint's DNS controls could answer "public" for the check and
+    "169.254.169.254" for the connection.  Checking the peer address inside
+    ``connect()`` closes that window: the address inspected is the one the
+    socket is on, and a refusal happens before a single request byte is
+    written.
+    """
+
+    def connect(self):  # pragma: no cover - exercised through refusal tests
+        super().connect()
+        from internal.web.api.security import blocked_address_reason
+
+        try:
+            peer = self.sock.getpeername()[0]
+        except (OSError, AttributeError):
+            return
+        reason = blocked_address_reason(str(peer))
+        if reason:
+            close = getattr(self, "close", None)
+            if close is not None:
+                close()
+            raise OSError(f"refused address {peer}: {reason}")
+
+
+class _GuardedHTTPConnection(_GuardedConnectionMixin, http.client.HTTPConnection):
+    pass
+
+
+class _GuardedHTTPSConnection(_GuardedConnectionMixin, http.client.HTTPSConnection):
+    pass
+
+
+class _GuardedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_GuardedHTTPConnection, req)
+
+
+class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_GuardedHTTPSConnection, req, context=self._context)
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(
+    _NoRedirect, _GuardedHTTPHandler, _GuardedHTTPSHandler
+)
+
+
+def _read_bounded(resp, limit: int = MAX_RESPONSE_BYTES) -> bytes:
+    """Read at most *limit* bytes, refusing anything larger.
+
+    ``resp.read()`` with no argument reads whatever the server sends.  One
+    oversized answer — a misconfigured instance, or a service the endpoint's
+    owner pointed at this machine — was enough to hold it all in memory.
+    """
+    body = resp.read(limit + 1)
+    if len(body) > limit:
+        raise ValueError(f"response larger than {limit} bytes")
+    return body
+
+SUPPORTED_LANGUAGES = {
+    "auto": "Auto-detect",
+    "en": "English",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "fr": "French",
+    "de": "German",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "hi": "Hindi",
+}
+
+# LibreTranslate-style codes → MyMemory codes.  MyMemory accepts most ISO
+# 639-1 codes as-is; only codes that differ need a mapping.
+_MYMMEMORY_LANGMAP = {
+    "zh": "zh-CN",
+    "pt": "pt-PT",
+}
+
+
+def translate_text(
+    text: str,
+    target_lang: str = "en",
+    source_lang: str = "auto",
+    cfg=None,
+) -> dict:
+    """Translate text using the configured provider or a free fallback.
+
+    Args:
+        text: The text to translate.
+        target_lang: Target language code (default 'en').
+        source_lang: Source language code (default 'auto').
+        cfg: Optional Config; ``translate_url`` / ``translate_api_key`` are
+            read from it when present.
+
+    Returns:
+        dict with keys: ok, translated, source_lang, target_lang.
+        On error: ok=False with an error message.
+    """
+    if not text or not text.strip():
+        return {"ok": False, "error": "No text provided"}
+
+    # Validate and sanitise language codes
+    if source_lang not in SUPPORTED_LANGUAGES:
+        source_lang = "auto"
+    if target_lang not in SUPPORTED_LANGUAGES or target_lang == "auto":
+        target_lang = "en"
+
+    text = text.strip()
+
+    url = (getattr(cfg, "translate_url", "") or "").strip() or LIBRETRANSLATE_URL
+    api_key = (getattr(cfg, "translate_api_key", "") or "").strip()
+
+    # Unconfigured → the free anonymous path.  The official public instance
+    # now requires an API key, so "free" means the MyMemory fallback.
+    if url == LIBRETRANSLATE_URL and not api_key:
+        return _translate_mymemory(text, target_lang, source_lang)
+
+    # Checked here as well as on write: the endpoint also comes from the config
+    # file, and this machine is the one that fetches it — an unvalidated value
+    # makes the app a request proxy into its own loopback, LAN or cloud
+    # metadata service, with the answer handed back to whoever set it.
+    from internal.web.api.security import is_safe_outbound_url
+
+    ok, why = is_safe_outbound_url(url)
+    if not ok:
+        logger.warning("Refusing to translate via an unsafe endpoint (%s)", why)
+        return {"ok": False, "error": "Translation endpoint not allowed: " + why}
+
+    return _translate_libretranslate(url, api_key, text, target_lang, source_lang)
+
+
+def _translate_libretranslate(
+    url: str, api_key: str, text: str, target_lang: str, source_lang: str
+) -> dict:
+    """POST to a LibreTranslate-compatible endpoint."""
+    text = text[:5000]
+    request_body = json.dumps(
+        {
+            "q": text,
+            "source": source_lang,
+            "target": target_lang,
+            "format": "text",
+        }
+    ).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+
+    try:
+        req = urllib.request.Request(url, data=request_body, headers=headers, method="POST")
+        with _NO_REDIRECT_OPENER.open(req, timeout=REQUEST_TIMEOUT) as resp:
+            result = json.loads(_read_bounded(resp).decode("utf-8"))
+
+        if not isinstance(result, dict) or not isinstance(result.get("translatedText"), str):
+            return {"ok": False, "error": "Invalid response from translation service."}
+        translated = result["translatedText"]
+        detected_lang = result.get("detectedLanguage", {})
+        if isinstance(detected_lang, dict):
+            detected_code = detected_lang.get("language")
+            src_lang = detected_code if isinstance(detected_code, str) else source_lang
+        else:
+            src_lang = source_lang
+
+        logger.info(
+            "Translated %d chars %s → %s (LibreTranslate)", len(text), src_lang, target_lang
+        )
+
+        return {
+            "ok": True,
+            "translated": translated,
+            "source_lang": src_lang,
+            "target_lang": target_lang,
+        }
+
+    except urllib.error.HTTPError as e:
+        logger.warning("LibreTranslate HTTP error: %s %s", e.code, e.reason)
+        error_msg = "Translation service unavailable"
+        try:
+            # Bounded like the success path: an error body is still a body, and
+            # the service that produced it is the one being distrusted.
+            error_body = _read_bounded(e, 64 * 1024)
+            err_data = json.loads(error_body.decode("utf-8", errors="replace"))
+            error_msg = err_data.get("error", error_msg)
+        except Exception:
+            pass
+        return {"ok": False, "error": error_msg}
+
+    except urllib.error.URLError as e:
+        logger.warning("LibreTranslate connection error: %s", e.reason)
+        return {
+            "ok": False,
+            "error": ("Translation service is not reachable. Check your internet connection."),
+        }
+
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.warning("LibreTranslate response parse error: %s", e)
+        return {"ok": False, "error": "Invalid response from translation service."}
+
+    except ValueError as e:
+        # After the JSON clause on purpose: JSONDecodeError is a ValueError, and
+        # a malformed answer is not an oversized one.
+        logger.warning("LibreTranslate response refused: %s", e)
+        return {"ok": False, "error": "Translation service response was too large."}
+
+    except Exception as e:
+        logger.error("Unexpected translation error: %s", e)
+        return {"ok": False, "error": "Translation failed. Please try again later."}
+
+
+def _translate_mymemory(text: str, target_lang: str, source_lang: str) -> dict:
+    """Translate via the free MyMemory API (no key required).
+
+    MyMemory's langpair needs an explicit source language, so ``auto`` is
+    resolved by a Unicode-block heuristic before the request.
+    """
+    if source_lang == "auto":
+        source_lang = _detect_source_lang(text)
+
+    # MyMemory caps a single query at ~500 bytes; trim on a UTF-8 byte
+    # boundary so CJK text (3 bytes/char) doesn't get rejected.  Flag the
+    # cut so the UI can tell the user instead of silently half-translating.
+    input_bytes = text.encode("utf-8")
+    text = input_bytes[:450].decode("utf-8", errors="ignore").strip()
+    truncated = len(input_bytes) > 450
+
+    src = _MYMMEMORY_LANGMAP.get(source_lang, source_lang)
+    tgt = _MYMMEMORY_LANGMAP.get(target_lang, target_lang)
+
+    url = MYMEMORY_URL + "?" + urllib.parse.urlencode({"q": text, "langpair": f"{src}|{tgt}"})
+
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with _NO_REDIRECT_OPENER.open(req, timeout=REQUEST_TIMEOUT) as resp:
+            result = json.loads(_read_bounded(resp).decode("utf-8"))
+
+        translated = result.get("responseData", {}).get("translatedText", "") or ""
+        # Success responses carry responseStatus == 200; error responses carry
+        # it as null/missing even though the HTTP status is still 200.
+        if result.get("responseStatus") != 200 or not translated:
+            details = result.get("responseDetails") or ""
+            logger.warning("MyMemory error: %s", details or translated[:200])
+            return {
+                "ok": False,
+                "error": details or "Translation service unavailable",
+            }
+
+        logger.info("Translated %d chars %s → %s (MyMemory)", len(text), source_lang, target_lang)
+        return {
+            "ok": True,
+            "translated": translated,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "truncated": truncated,
+        }
+
+    except urllib.error.HTTPError as e:
+        logger.warning("MyMemory HTTP error: %s %s", e.code, e.reason)
+        return {"ok": False, "error": "Translation service unavailable"}
+
+    except urllib.error.URLError as e:
+        logger.warning("MyMemory connection error: %s", e.reason)
+        return {
+            "ok": False,
+            "error": ("Translation service is not reachable. Check your internet connection."),
+        }
+
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.warning("MyMemory response parse error: %s", e)
+        return {"ok": False, "error": "Invalid response from translation service."}
+
+    except ValueError as e:
+        # After the JSON clause: JSONDecodeError is a ValueError too.
+        logger.warning("MyMemory response refused: %s", e)
+        return {"ok": False, "error": "Translation service response was too large."}
+
+    except Exception as e:
+        logger.error("Unexpected translation error: %s", e)
+        return {"ok": False, "error": "Translation failed. Please try again later."}
+
+
+def _detect_source_lang(text: str) -> str:
+    """Guess the source language from Unicode blocks (for auto-detect).
+
+    Covers the languages we advertise; anything else defaults to English.
+    Only the first matching block wins.
+    """
+    # CJK ideographs (simplified + traditional).  A string that also contains
+    # kana is likely Japanese, so check kana first.
+    for ch in text:
+        if 0x3040 <= ord(ch) <= 0x30FF or 0x31F0 <= ord(ch) <= 0x31FF:
+            return "ja"
+    for ch in text:
+        if 0x4E00 <= ord(ch) <= 0x9FFF or 0x3400 <= ord(ch) <= 0x4DBF:
+            return "zh"
+    for ch in text:
+        if 0xAC00 <= ord(ch) <= 0xD7AF:
+            return "ko"
+    for ch in text:
+        if 0x0400 <= ord(ch) <= 0x04FF:
+            return "ru"
+    for ch in text:
+        if 0x0600 <= ord(ch) <= 0x06FF:
+            return "ar"
+    for ch in text:
+        if 0x0900 <= ord(ch) <= 0x097F:
+            return "hi"
+    # European diacritics etc. are close enough to English for our purposes.
+    return "en"

@@ -1,0 +1,19 @@
+# Keep the repository itself LF-only regardless of each contributor's
+# core.autocrlf setting.  Every tracked text file is already LF in the index,
+# so this records the existing invariant rather than changing anything.
+#
+# Deliberately NOT "eol=lf": the working tree is left to core.autocrlf, so
+# Windows checkouts keep CRLF on disk exactly as they do today.
+* text=auto
+
+# Binary assets — never line-ending converted, never diffed as text.
+*.ico binary
+*.icns binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.zip binary
+*.db binary
+
+# Windows batch files genuinely need CRLF to be safe for cmd.exe.
+*.bat text eol=crlf

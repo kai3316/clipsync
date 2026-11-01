@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-batch-delete-favorites"
+description = "Enables the batch_delete_favorites command without any pre-configured scope."
+commands.allow = ["batch_delete_favorites"]
+
+[[permission]]
+identifier = "deny-batch-delete-favorites"
+description = "Denies the batch_delete_favorites command without any pre-configured scope."
+commands.deny = ["batch_delete_favorites"]

@@ -1,0 +1,3228 @@
+"""Built-in HTTP server for ClipSync Web Companion.
+
+Serves a mobile-optimised web page that lets phones on the same LAN
+view clipboard history, push text to the desktop, and transfer files.
+Supports WebSocket connections at /ws for real-time data push.
+
+The server delegates API routes to routes.py, WebSocket handling to
+ws.py, and serves static files from internal/web/static/.
+"""
+
+import contextlib
+import gzip
+import hashlib
+import hmac
+import ipaddress
+import json
+import logging
+import mimetypes
+import os
+import posixpath
+import re
+import shutil
+import socket
+import socketserver
+import sys
+import threading
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
+
+from internal.i18n import T
+from internal.platform import decode_console_output
+
+# Device names Windows will not let a file be called.  Shared with the file
+# transfer's own sanitiser rather than spelled again here: two copies of the
+# blocklist is two chances for one of them to miss a name the other catches,
+# and the upload path and the transfer path have to refuse the same names.
+from internal.sync.file_transfer import _WINDOWS_RESERVED_NAMES
+from internal.transport.discovery import get_all_local_addresses
+
+logger = logging.getLogger(__name__)
+
+# Compiled i18n cache, keyed by locale code.  _interpolate_html runs on
+# every static asset request; re-reading and re-parsing the locale JSON file
+# each time is wasteful -- so the table itself is cached, and whoever injects
+# it serializes the slice it needs (see `_mobile_i18n_payload`).
+_i18n_cache: dict[str, dict[str, str]] = {}
+# Guards the cache: every static-asset request may reach it from its own
+# connection thread, and building a locale reads and parses a JSON file, so
+# two threads can both miss and both do that work.
+_i18n_cache_lock = threading.Lock()
+
+# The only sentences the phone page resolves out of the shared catalogue.
+#
+# `mobile.html` carries its own bilingual strings inline (`T`, written as
+# `ZH ? '…' : '…'`) and consults the shared catalogue for exactly one thing:
+# the `text_key` a chat system row arrives with (`chatSystemText` -> `jt`).
+# Injecting the whole catalogue therefore sends 1364 keys -- about 67 KB of
+# text, ~80 KB serialized -- to deliver four sentences, over whatever network
+# the phone is on.  This tuple is that four, and it is the payload.
+#
+# Frozen rather than derived from the page: reading the keys back out of
+# `mobile.html` with a pattern would make the payload depend on that file's
+# syntax, and a refactor there would silently shrink it -- the symptom is a raw
+# `chat.system.*` key on a phone screen, which nobody traces back to the
+# injection.
+# `tests/sidecar/test_chat_system_keys.py` holds this tuple to both ends (the
+# keys the sidecar puts on the wire, and the keys the page maps), and
+# `tests/test_web_server.py` holds the payload to it.
+MOBILE_I18N_KEYS = (
+    "chat.system.file_cancelled",
+    "chat.system.file_declined",
+    "chat.system.peer_offline",
+    "chat.system.session_closed_by_peer",
+)
+
+
+def _mobile_i18n_payload(translations: dict[str, str]) -> str:
+    """The shared catalogue reduced to what the phone page can ask for.
+
+    A key that is not in *translations* is left out rather than raised on: a
+    locale file missing a sentence degrades to the page's own fallback
+    dictionary, which is what it did before any of this was trimmed.
+    """
+    return json.dumps(
+        {key: translations[key] for key in MOBILE_I18N_KEYS if key in translations},
+        ensure_ascii=False,
+    )
+
+
+
+def _escape_script_json(json_text: str) -> str:
+    """Escape ``<``, ``>``, ``&`` in an already-JSON-encoded string.
+
+    json.dumps leaves those three characters as-is, so a value containing
+    ``</script>`` would terminate the inline <script> element they are
+    interpolated into.  Re-encoding them (legal JSON escapes, transparent
+    to the browser) keeps the literal inside the script block regardless.
+    """
+    return json_text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def _js_string(value: str) -> str:
+    """Serialize a string for safe embedding inside an inline <script>."""
+    return _escape_script_json(json.dumps(value, ensure_ascii=False))
+
+
+# ── Upload directory ─────────────────────────────────────────────
+
+
+def _get_upload_dir(cfg=None) -> str:
+    """Return the directory phone uploads are saved to.
+
+    Follows the configured ``file_receive_dir`` when set (the same directory
+    P2P file transfers use) and otherwise falls back to ``~/Downloads/ClipSync``.
+    Resolved at request time so a receive-dir change moves phone uploads too.
+    """
+    if cfg is not None:
+        configured = getattr(cfg, "file_receive_dir", "") or ""
+        if configured:
+            d = os.path.expanduser(configured)
+        else:
+            d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
+    else:
+        d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
+
+    # Re-checked on every use, not only when the setting is written: the value
+    # also comes from a config file a user (or another process) can edit
+    # directly, and every handler here lists/downloads/deletes inside whatever
+    # this returns.
+    from internal.web.api.security import is_safe_receive_dir
+
+    if not is_safe_receive_dir(d)[0]:
+        logger.warning(
+            "file_receive_dir %r is outside the allowed roots — falling back to the default",
+            d,
+        )
+        d = os.path.join(os.path.expanduser("~"), "Downloads", "ClipSync")
+
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        # Called from a GET handler that sits outside the dispatch try, so an
+        # unwritable receive directory used to drop the connection with a
+        # traceback instead of answering.  The callers each fail their own way
+        # from here (an empty listing, a 404 on download).
+        logger.warning("Upload directory is not usable: %s", d, exc_info=True)
+    return d
+
+
+# ── Upload filename sanitisation ─────────────────────────────────
+
+# `_WINDOWS_RESERVED_NAMES` is imported at the top of this file rather than
+# spelled again here: two copies of a device-name blocklist is two chances for
+# one of them to miss a name the other catches, and the upload path and the
+# transfer path must refuse the same names.
+
+def _sanitize_upload_filename(name: str) -> str:
+    """Sanitize an upload filename (ported from the P2P file-transfer
+    sanitizer).  Strips path separators, traversal components, control
+    characters, trailing dots/spaces and Windows-reserved names so an
+    illegal name cannot raise OSError/ValueError or escape the upload dir.
+
+    The character set that has to go is the one Windows itself refuses, and
+    ``:`` is the one that does not fail loudly: NTFS reads ``notes:1.txt`` as a
+    data stream on a file called ``notes``, so the upload reports the name it was
+    given while the directory listing shows ``notes`` -- a file the user cannot
+    find and cannot delete by the name they were shown.  The download path
+    already rejects ``:`` for the same reason (see the file route); this is that
+    rule applied at the other end.
+    """
+    name = str(name or "").replace("\\", "/")
+    name = os.path.basename(name)
+    name = name.lstrip(".")
+    if not name:
+        name = "uploaded_file"
+    name = name.rstrip(" .")
+    if not name:
+        name = "uploaded_file"
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', "-", name)
+    name = name.rstrip(" .-")
+    if not name or name.strip("-") == "":
+        # A name made entirely of the characters just replaced has nothing left
+        # to identify it, and a directory of "-" is worse than a generic one.
+        name = "uploaded_file"
+    base = name.split(".")[0].upper()
+    if base in _WINDOWS_RESERVED_NAMES:
+        name = f"_{name}"
+    return name
+
+
+def _canonical_request_path(path: str) -> str:
+    """Collapse request-path aliases to the single form used for routing.
+
+    ``posixpath.normpath`` folds ``/./x`` and ``/a//b``, but it deliberately
+    PRESERVES exactly two leading slashes -- POSIX reserves ``//foo`` for an
+    implementation-defined meaning.  So ``//api/push`` stayed ``//api/push``,
+    matched no ``/api/...`` route, and came back 404 even though every browser,
+    proxy and naive string-join treats it as ``/api/push``.  Collapse the
+    leading run so the alias routes like the canonical path.
+    """
+    if not path:
+        return path
+    path = posixpath.normpath(path)
+    if path.startswith("//"):
+        path = "/" + path.lstrip("/")
+    return path
+
+
+# ── Simple multipart form parser (no external deps) ──────────────
+class _MultipartError(ValueError):
+    """Raised by _parse_multipart for a structurally invalid multipart body.
+
+    The /api/upload endpoint catches this and answers with an explicit 400 so
+    a truncated or malformed upload fails loudly instead of silently writing
+    a partial (corrupt) file and reporting success.
+    """
+
+
+def _parse_content_disposition(line: str):
+    """Parse a Content-Disposition header line into (name, filename).
+
+    Quote-aware: a filename containing ``;`` or ``=`` (legal on every OS) no
+    longer truncates at the first ``;`` the way the previous naive
+    ``split(";")`` parser did.  Backslash escapes inside the quoted-string are
+    honoured per RFC 6266.  Either value may be None when absent.
+    """
+    name = None
+    filename = None
+    semi0 = line.find(";")
+    pos = semi0 + 1 if semi0 != -1 else len(line)  # first param starts after "form-data"
+    n = len(line)
+    while pos < n:
+        while pos < n and line[pos] in " \t;":
+            pos += 1
+        if pos >= n:
+            break
+        eq = line.find("=", pos)
+        semi = line.find(";", pos)
+        if eq == -1 or (semi != -1 and semi < eq):
+            # A parameter without "=" ("; foo") — skip it whole.
+            pos = semi + 1 if semi != -1 else n
+            continue
+        key = line[pos:eq].strip().lower()
+        val_start = eq + 1
+        if val_start < n and line[val_start] == '"':
+            j = val_start + 1
+            chars = []
+            while j < n:
+                ch = line[j]
+                if ch == "\\" and j + 1 < n:
+                    chars.append(line[j + 1])
+                    j += 2
+                    continue
+                if ch == '"':
+                    j += 1
+                    break
+                chars.append(ch)
+                j += 1
+            value = "".join(chars)
+            pos = j
+        else:
+            semi = line.find(";", val_start)
+            if semi == -1:
+                value = line[val_start:].strip()
+                pos = n
+            else:
+                value = line[val_start:semi].strip()
+                pos = semi + 1
+        if key == "name" and name is None:
+            name = value
+        elif key == "filename" and filename is None:
+            filename = value
+    return name, filename
+
+
+def _parse_multipart(body: bytes, content_type: str) -> dict:
+    """Parse multipart/form-data. Returns {field_name: (filename, data)}.
+
+    Raises ``_MultipartError`` (a ValueError subclass) with a readable reason
+    when the body is structurally invalid — no boundary in the header, a body
+    that does not start at the boundary, a part missing its header/body
+    separator, or (the important one) a TRUNCATED body whose closing
+    ``--boundary--`` never arrived.  Parsing operates entirely on the
+    in-memory buffer, so it can never hang regardless of input.
+    """
+    boundary = None
+    for part in content_type.split(";"):
+        part = part.strip()
+        if part.lower().startswith("boundary="):
+            boundary = part.split("=", 1)[1].strip().strip('"').strip("'")
+            break
+    if not boundary:
+        raise _MultipartError("no boundary in Content-Type header")
+    b_bytes = boundary.encode("utf-8", errors="surrogateescape")
+    delimiter = b"--" + b_bytes
+    if not body.startswith(delimiter):
+        raise _MultipartError("body does not start with the multipart boundary")
+    body = body[len(delimiter) :]
+    if body.startswith(b"--"):
+        # Legal empty form: "--boundary--" right after the opening delimiter.
+        return {}
+    # A multipart boundary is only meaningful as a standalone delimiter line:
+    # "\r\n--<boundary>\r\n" between parts, "\r\n--<boundary>--" at the end.
+    # Split on the full middle delimiter (not the raw boundary bytes) so file
+    # content that happens to contain the boundary sequence isn't truncated.
+    sep = b"\r\n--" + b_bytes + b"\r\n"
+    close = b"\r\n--" + b_bytes + b"--"
+    parts = body.split(sep)
+
+    # Terminator check: the LAST split element must carry the closing
+    # delimiter, followed by nothing but optional whitespace/CRLF.  A body cut
+    # off mid-upload has no closing delimiter — rejecting it here prevents a
+    # corrupt partial file being written and reported as a success.
+    last = parts[-1]
+    close_idx = last.rfind(close)
+    if close_idx == -1:
+        raise _MultipartError("multipart body is truncated (closing boundary missing)")
+    epilogue = last[close_idx + len(close) :]
+    if epilogue.strip(b"\r\n \t"):
+        raise _MultipartError("unexpected data after the closing boundary")
+
+    result = {}
+    for pi, part in enumerate(parts):
+        is_last = pi == len(parts) - 1
+        if is_last:
+            # Cut exactly at the closing delimiter.  The CRLF preceding it is
+            # conceptually part of the boundary (RFC 2046), so the slice keeps
+            # the file content byte-for-byte — including trailing newlines the
+            # old code stripped away with .rstrip().
+            part = part[:close_idx]
+        else:
+            # Strip exactly the CRLF terminating the first boundary line
+            # (only the very first element still carries it).  Never strip
+            # further bytes — they belong to the part's content.
+            if part.startswith(b"\r\n"):
+                part = part[2:]
+        if not part:
+            continue
+        if b"\r\n\r\n" not in part:
+            # Every real client sends Content-Disposition headers; a part with
+            # no header/body separator is malformed input — fail explicitly
+            # instead of dropping unknown bytes into some other field.
+            raise _MultipartError("malformed part (missing header/body separator)")
+        header_section, body_data = part.split(b"\r\n\r\n", 1)
+        field_name = None
+        filename = None
+        headers_text = header_section.decode("utf-8", errors="replace")
+        for line in headers_text.split("\r\n"):
+            if line.lower().startswith("content-disposition:"):
+                field_name, filename = _parse_content_disposition(line)
+        if field_name:
+            result[field_name] = (filename or "", body_data)
+    return result
+
+
+def _check_declared_length(body: bytes, declared_length: int) -> str | None:
+    """Return an error message when the read body mismatches Content-Length.
+
+    ``handler.rfile.read(n)`` returns fewer bytes than requested when the
+    client disconnects mid-upload; the resulting buffer cannot be valid
+    multipart, so the caller rejects it up front instead of parsing garbage.
+    """
+    if declared_length > 0 and len(body) != declared_length:
+        return "incomplete upload: connection closed before the file finished sending"
+    return None
+
+
+# ── PWA icons (generated at startup) ────────────────────────────
+
+
+def _make_icon(size: int, dark: bool = False) -> bytes:
+    """Generate a simple clipboard icon PNG with PIL."""
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    margin = size // 8
+    r = size // 6
+    # Background rounded rect
+    bg_color = (26, 39, 50, 255) if dark else (26, 82, 118, 255)
+    draw.rounded_rectangle(
+        [margin, margin, size - margin, size - margin],
+        radius=r,
+        fill=bg_color,
+    )
+    # Clipboard shape: white rectangle with top clip
+    cx = size // 2
+    cy = size // 2
+    bw, bh = size * 3 // 8, size * 5 // 12
+    left, top = cx - bw // 2, cy - bh // 2
+    # Board body
+    draw.rounded_rectangle(
+        [left, top + r // 2, left + bw, top + bh],
+        radius=r // 2,
+        fill=(255, 255, 255, 240),
+    )
+    # Clip on top
+    clip_w = bw // 2
+    draw.rounded_rectangle(
+        [cx - clip_w // 2, top - r // 2, cx + clip_w // 2, top + r],
+        radius=r // 3,
+        fill=(255, 255, 255, 240),
+    )
+    # Lines on clipboard
+    lx = left + bw // 5
+    lw = bw * 3 // 5
+    line_color = bg_color
+    for li in range(3):
+        ly = top + bh // 3 + li * (bh // 5)
+        draw.rectangle([lx, ly, lx + lw, ly + size // 30], fill=line_color)
+
+    buf = BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+# ── Static file directory ───────────────────────────────────────
+
+
+def _get_static_dir() -> str:
+    """Return the path to the static files directory."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
+# ── Static response compression ─────────────────────────────────
+
+# Below this, the gzip header and the round trip cost more than the bytes it
+# saves: a 300-byte icon file is not what makes a phone page slow.
+_GZIP_MIN_BYTES = 1024
+
+# The types that shrink.  Everything else this directory holds (PNG icons,
+# woff2 fonts) is already compressed, and gzip over it produces a body that is
+# usually a little larger and always slower to produce.
+_GZIP_TYPES = (
+    "text/",
+    "application/javascript",
+    "application/json",
+    "application/xml",
+    "image/svg+xml",
+)
+
+
+# Content-addressed static URLs.  `_asset_version` answers "what are these
+# bytes", and a request that carries the same answer in `?v=` is one this server
+# may tell a browser never to revalidate — a changed file is a different URL, so
+# there is nothing to check.  Keyed by (path, mtime, size) so a rebuilt asset is
+# re-read once rather than hashed on every request.
+_ASSET_VERSIONS: dict[tuple[str, int, int], str] = {}
+_ASSET_VERSIONS_LOCK = threading.Lock()
+_ASSET_VERSIONS_KEEP = 64
+
+
+def _asset_version(rel_path: str) -> str:
+    """A short fingerprint of a static file's bytes, or "" when it is missing.
+
+    "" is the answer for a file that is not there rather than an exception:
+    a page that names an asset this install does not have should serve, and the
+    empty version simply means the URL carries no usable cache key.
+    """
+    full = os.path.normpath(os.path.join(_get_static_dir(), rel_path.lstrip("/")))
+    try:
+        st = os.stat(full)
+        key = (full, st.st_mtime_ns, st.st_size)
+        with _ASSET_VERSIONS_LOCK:
+            cached = _ASSET_VERSIONS.get(key)
+        if cached is not None:
+            return cached
+        with open(full, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()[:12]
+    except OSError:
+        return ""
+    with _ASSET_VERSIONS_LOCK:
+        if len(_ASSET_VERSIONS) >= _ASSET_VERSIONS_KEEP:
+            _ASSET_VERSIONS.clear()
+        _ASSET_VERSIONS[key] = digest
+    return digest
+
+
+def _accepts_gzip(accept_encoding: str) -> bool:
+    """Whether the client will take a gzip body, honouring ``q=0``.
+
+    ``gzip;q=0`` is the client saying it understands the token and does not
+    want it, which a substring test would read as a yes.  ``*`` counts for
+    gzip as well, and a bare ``gzip`` is the common case.
+    """
+    for part in (accept_encoding or "").split(","):
+        token, _, params = part.partition(";")
+        if token.strip().lower() not in ("gzip", "*"):
+            continue
+        quality = 1.0
+        for params_part in params.split(";"):
+            param = params_part.strip()
+            if param.startswith("q="):
+                try:
+                    quality = float(param[2:])
+                except ValueError:
+                    quality = 1.0
+        if quality > 0:
+            return True
+    return False
+
+
+def _gzip_if_worthwhile(accept_encoding: str, data: bytes, mime: str) -> bytes | None:
+    """*data* gzipped, or ``None`` when the body should go out as it is.
+
+    ``None`` rather than the original bytes so the caller can tell "compressed"
+    from "not compressed" without comparing lengths — the ETag has to differ
+    between the two representations, and a body that happened to be unchanged
+    would otherwise be labelled as the wrong one.
+    """
+    if len(data) < _GZIP_MIN_BYTES:
+        return None
+    if not mime.startswith(_GZIP_TYPES):
+        return None
+    if not _accepts_gzip(accept_encoding):
+        return None
+    return gzip.compress(data, 6)
+
+
+# ── Token validation helper ─────────────────────────────────────
+
+
+def _bearer_token(headers) -> str:
+    """The ``Authorization: Bearer <token>`` value, or "" when there is none.
+
+    Header names are case-insensitive and the scheme may carry any amount of
+    whitespace, so the scheme is matched case-insensitively and the token is
+    stripped; anything that is not a Bearer credential is ignored.
+    """
+    if headers is None:
+        return ""
+    try:
+        value = headers.get("Authorization", "") or ""
+    except AttributeError:
+        return ""
+    parts = str(value).split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return ""
+
+
+def _query_tokens(path: str) -> list[str]:
+    """The ``?token=`` value, or [] unless exactly one was supplied.
+
+    The single-value rule is the old behaviour kept intact: a duplicated
+    token parameter is a malformed request, not a second chance to guess.
+    """
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+    tokens = params.get("token", [])
+    return tokens if len(tokens) == 1 else []
+
+
+def _validate_token(path: str, expected_token: str, headers=None) -> bool:
+    """Check the request's token, from ``Authorization: Bearer`` or ``?token=``.
+
+    Bearer is the preferred form for API calls: the token then never appears
+    in a request URL, so it cannot leak through logs, history or Referer.
+    The query form stays accepted because the page itself is opened with
+    ``?token=`` (the QR bootstrap) and browsers cannot set headers on
+    subresource loads or WebSocket handshakes.  This only keeps the token
+    out of API request URLs; the companion is still plain HTTP, so a LAN
+    eavesdropper can read the header (or the first-hop URL) in flight.
+
+    When ``expected_token`` is empty the web companion treats auth as
+    disabled (the user cleared the token): every request passes here.  The
+    state-changing methods still require a local browser origin in that
+    case; see ``_empty_token_origin_is_local``.
+    """
+    if not expected_token:
+        return True
+    candidates = []
+    bearer = _bearer_token(headers)
+    if bearer:
+        candidates.append(bearer)
+    candidates.extend(_query_tokens(path))
+    # Compared as bytes: ``compare_digest`` on two str raises TypeError when
+    # either side holds a non-ASCII character, and both sides here come
+    # straight off the wire (``?token=`` and the Bearer header).  That call
+    # sits outside the dispatch try, so a request carrying ``?token=ü`` used to
+    # escape as an unhandled exception and drop the connection — and a token
+    # that ever contained a non-ASCII character locked every request out.
+    expected = expected_token.encode("utf-8", errors="replace")
+    return any(
+        hmac.compare_digest(candidate.encode("utf-8", errors="replace"), expected)
+        for candidate in candidates
+    )
+
+
+def _authority_parts(value: str) -> tuple[str, int] | None:
+    """(host, port) from an Origin or Referer URL, or None when it is not one.
+
+    The port defaults from the scheme: ``http://host`` in an Origin header means
+    port 80, never the port this server happens to listen on.
+    """
+    text_ = (value or "").strip()
+    if not text_:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(text_)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in ("http", "https") or not host:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return host.lower(), port
+
+
+def _host_header_parts(value: str) -> tuple[str, int | None] | None:
+    """(host, port or None) from a Host header, or None when unparseable.
+
+    A Host header carries no scheme, so it is parsed as a network-path
+    reference; a port that is not a number makes the whole header unusable,
+    because a request whose Host cannot be read cannot be matched at all.
+    """
+    text_ = (value or "").strip()
+    if not text_:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit("//" + text_)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    return host.lower(), port
+
+
+def _origin_matches_host(origin: str, host_header: str, server_port) -> bool:
+    """Whether *origin* names the same authority as this request's Host header.
+
+    Used by the state-changing methods: a page from another host or another
+    port is not allowed to drive this machine, whatever token it holds.  When
+    the Host header carries no port (an HTTP/1.0 client, a proxy that dropped
+    it), the port this server listens on is the one to compare against.
+    """
+    parsed_origin = _authority_parts(origin)
+    if parsed_origin is None:
+        return False
+    parsed_host = _host_header_parts(host_header)
+    if parsed_host is None:
+        return False
+    origin_host, origin_port = parsed_origin
+    host_host, host_port = parsed_host
+    if host_port is None:
+        host_port = server_port
+    return origin_host == host_host and host_port is not None and origin_port == host_port
+
+
+def _is_ip_literal(host: str) -> bool:
+    """Whether *host* is an IP address literal rather than a DNS name."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Whether *host* is a loopback literal (127.0.0.0/8 or ::1)."""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _accepted_local_host(handler) -> str:
+    """The address this request was accepted on, or "" when unavailable.
+
+    ``getsockname()`` on an accepted socket is the local address the client
+    actually reached, which is exactly what the empty-token check wants: it
+    cannot be influenced by a Host header or a rebinding DNS answer.
+    """
+    try:
+        return str(handler.connection.getsockname()[0])
+    except (AttributeError, IndexError, OSError):
+        return ""
+
+
+def _empty_token_origin_is_local(
+    origin: str, host_header: str, server_port, local_host: str
+) -> bool:
+    """Whether a no-token write's browser origin names this machine by IP.
+
+    With the token cleared there is no secret left to authenticate a browser
+    request, so the only thing that separates this machine's own pages from
+    a DNS-rebinding attack is the *kind* of host the origin names.  The
+    origin must still match the request's Host, and then:
+
+    * ``localhost`` is accepted only when the connection itself arrived on
+      the loopback interface;
+    * any other host must be an IP literal equal to the address this request
+      was accepted on (or another loopback literal on a loopback connection).
+
+    A host name -- the rebound ``evil.com``, but also a legitimate
+    ``my-pc.local`` or a reverse-proxied name -- is refused.  The QR code
+    and the companion page both address the server by IP, so they keep
+    working.
+    """
+    parsed_origin = _authority_parts(origin)
+    if parsed_origin is None:
+        return False
+    if not _origin_matches_host(origin, host_header, server_port):
+        return False
+    origin_host = parsed_origin[0]
+    local_host = (local_host or "").lower()
+    if origin_host == "localhost":
+        return _is_loopback_host(local_host)
+    if not _is_ip_literal(origin_host):
+        return False
+    if origin_host == local_host:
+        return True
+    return _is_loopback_host(origin_host) and _is_loopback_host(local_host)
+
+
+# ── Safe request body reader ─────────────────────────────────────
+
+# Upper bound on a single request body read.  Guards against a malicious or
+# buggy client sending a huge Content-Length and wedging a worker thread
+# waiting on bytes that never arrive.
+#
+# 32 MiB, not 128.  Every accepted body is read into memory in one buffer
+# before an endpoint looks at it, and there are 64 connection slots, so the old
+# cap was a peak of several GB held at once for bodies no endpoint needs — the
+# only large body this server accepts is a web upload, and that is bounded by
+# the transfer size a phone can practically send.
+_MAX_BODY_BYTES = 32 * 1024 * 1024
+
+
+def _read_request_body(handler) -> bytes:
+    """Read the request body per Content-Length, safely.
+
+    Returns b"" when Content-Length is absent, malformed, non-positive, or
+    exceeds _MAX_BODY_BYTES.  The endpoint then surfaces a 4xx response
+    instead of a worker thread dying on a ValueError from int().
+    """
+    raw = handler.headers.get("Content-Length")
+    if raw is None:
+        return b""
+    try:
+        length = int(raw)
+    except (ValueError, TypeError):
+        return b""
+    if length <= 0 or length > _MAX_BODY_BYTES:
+        return b""
+    try:
+        return handler.rfile.read(length)
+    except (OSError, TimeoutError):
+        # The client stalled mid-body and the socket timeout fired.  Close the
+        # connection (unread bytes remain on it) and answer with an empty body
+        # instead of letting the timeout escape do_POST and spill a traceback
+        # through BaseServer.handle_error.
+        handler.close_connection = True
+        return b""
+
+
+# ── File download response builder ──────────────────────────────
+
+
+def _build_file_response(filepath: str, mime: str = "application/octet-stream"):
+    """Build headers + body for a file download response.
+
+    Returns (status, headers, body_bytes) tuple.
+    Returns (404, ...) if file not found.
+    """
+    if not os.path.isfile(filepath):
+        return (
+            404,
+            {"Content-Type": "application/json"},
+            json.dumps({"error": "not found"}).encode("utf-8"),
+        )
+
+    try:
+        fsize = os.path.getsize(filepath)
+    except OSError:
+        # Between the `isfile` check and here the file can go away -- another
+        # client's DELETE, or the user in their file manager.  Returning 404 is
+        # the answer the caller can act on; letting the OSError escape aborts the
+        # request before any response is written, and the client sees a dropped
+        # connection instead of "gone".
+        return (
+            404,
+            {"Content-Type": "application/json"},
+            json.dumps({"error": "not found"}).encode("utf-8"),
+        )
+    fname = os.path.basename(filepath)
+    try:
+        fname.encode("latin-1")
+        safe = fname.replace('"', "").replace("\r", "").replace("\n", "")
+        disp = f'attachment; filename="{safe}"'
+    except UnicodeEncodeError:
+        encoded = urllib.parse.quote(fname, safe="")
+        disp = f"attachment; filename=\"download\"; filename*=UTF-8''{encoded}"
+
+    headers = {
+        "Content-Type": mime,
+        "Content-Length": str(fsize),
+        "Content-Disposition": disp,
+        "Cache-Control": "no-cache",
+    }
+    # For large files, return the filepath for streaming instead of loading into memory
+    return 200, headers, filepath
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ── WEB SERVER ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════
+
+
+class _CompanionHTTPServer(ThreadingHTTPServer):
+    """`ThreadingHTTPServer` with the name lookup taken out of `server_bind`.
+
+    The stock class fills in `server_name` with `socket.getfqdn(bound_address)`,
+    and `getfqdn` throws the address away when it is the wildcard::
+
+        if not name or name in ('0.0.0.0', '::'):
+            name = gethostname()
+        hostname, aliases, ipaddrs = gethostbyaddr(name)
+
+    So binding ``"0.0.0.0"`` is a *reverse lookup of this machine's own name* --
+    on the thread that starts the companion, which is the thread the user is
+    waiting on.  Where that name is in no zone (a macOS CI runner, a laptop that
+    just joined a guest network, anything behind a VPN that took the name server
+    away with it) the resolver does not fail fast, and the app sits in
+    ``start()`` for the resolver's own timeout -- tens of seconds, with the
+    window already up.  macOS is where it is reliably fatal: Linux answers its
+    own name out of /etc/hosts and Windows out of the local DNS client, while
+    macOS hands it to mDNSResponder, which waits out its full timeout.  It is
+    the same misbehaviour ``discovery.get_all_local_addresses`` bounds, reached
+    through the standard library instead of through this project's code, which
+    is why bounding that one did not cover this.
+
+    Nothing needs the value it computes.  ``server_name`` is read nowhere in
+    this project, and the two places the stdlib would have used it are both out
+    of play: ``BaseHTTPRequestHandler.address_string()`` no longer does a
+    reverse lookup (it returns the client IP), and this project's handler
+    overrides ``log_message`` to a no-op.
+    """
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
+# How long the elevated firewall script is left on disk before it is swept.
+# See `_remove_later`.
+_FIREWALL_SCRIPT_SWEEP_DELAY = 120.0
+
+# Directories waiting for the delayed sweep, so a shutdown inside the delay
+# can still clean them up.  See `_remove_later`.
+_pending_removals: set[str] = set()
+_pending_removals_lock = threading.Lock()
+
+
+def _remove_later(directory: str) -> None:
+    """Delete a directory after a delay, on a daemon thread.  Never raises.
+
+    The elevated process reads the script after ``ShellExecuteW`` returns and
+    there is no completion signal to wait for, so the delete has to be
+    deferred — but a script that runs as Administrator should not be left
+    behind indefinitely either.  ``sweep_pending_removals`` runs the same
+    cleanup immediately, for a shutdown that happens inside the delay.
+    """
+
+    def sweep() -> None:
+        with _pending_removals_lock:
+            _pending_removals.discard(directory)
+        shutil.rmtree(directory, ignore_errors=True)
+
+    with _pending_removals_lock:
+        _pending_removals.add(directory)
+    timer = threading.Timer(_FIREWALL_SCRIPT_SWEEP_DELAY, sweep)
+    timer.daemon = True
+    timer.start()
+
+
+def sweep_pending_removals() -> None:
+    """Run every deferred directory cleanup now.  Never raises."""
+    with _pending_removals_lock:
+        pending = list(_pending_removals)
+        _pending_removals.clear()
+    for directory in pending:
+        with contextlib.suppress(Exception):
+            shutil.rmtree(directory, ignore_errors=True)
+
+
+class WebServer:
+    """Lightweight HTTP server for the ClipSync web companion."""
+
+    FW_RULE_NAME = "ClipSync Web Companion"
+    # The legacy status loop polled the device snapshot at this cadence and
+    # pushed the page whenever a rendered field changed; the fingerprint does
+    # the change detection, so a steady page stays quiet.
+    DEVICE_BROADCAST_INTERVAL = 3.0
+
+    def __init__(
+        self,
+        cfg,
+        clipboard_history,
+        sync_mgr,
+        get_connected_ids=None,
+        on_nav_url=None,
+        on_forward_file=None,
+        get_overview_data=None,
+        on_device_action=None,
+        on_device_test=None,
+        on_transfer_action=None,
+        on_get_transfers=None,
+        on_speed_test_start=None,
+        on_speed_test_poll=None,
+        on_window_close=None,
+        on_toggle_discovery=None,
+        on_toggle_visibility=None,
+        on_settings_change=None,
+        on_show_web_qr=None,
+        on_send_url=None,
+        get_discovered_peers=None,
+        get_resolved_hashes=None,
+        get_pending_pairings=None,
+        get_reconnect_states=None,
+        get_relay_state=None,
+        get_current_relay_broker=None,
+        enc_mgr=None,
+        on_open_file=None,
+        on_open_folder=None,
+        on_restart=None,
+        on_reset_dedup=None,
+        get_certs=None,
+        get_diagnostics=None,
+        on_update_download=None,
+        on_update_status=None,
+        on_update_open_folder=None,
+        on_diagnostics_request=None,
+        on_web_upload=None,
+        chat_mgr=None,
+        get_chat_devices=None,
+        chat_send_fn=None,
+        chat_start_session=None,
+        get_chat_muted=None,
+        set_chat_muted=None,
+        on_history_change=None,
+        on_favorites_change=None,
+    ):
+        self._cfg = cfg
+        self._sync_mgr = sync_mgr
+        self._get_connected_ids = get_connected_ids
+        self._get_discovered_peers = get_discovered_peers
+        self._get_resolved_hashes = get_resolved_hashes
+        self._get_pending_pairings = get_pending_pairings
+        # Auto-reconnect bookkeeping source (transport manager); optional —
+        # when unwired, /api/devices simply omits the reconnecting fields.
+        self._get_reconnect_states = get_reconnect_states
+        self._get_relay_state = get_relay_state
+        self._get_current_relay_broker = get_current_relay_broker
+        self._enc_mgr = enc_mgr
+        self._on_open_file = on_open_file
+        self._on_open_folder = on_open_folder
+        self._on_restart = on_restart
+        # Callback invoked before a web-driven clipboard write (paste_rich) so
+        # the sync manager's dedup state is cleared and the write re-syncs to
+        # peers.  Defaults to the sync manager's own method when available.
+        if on_reset_dedup is None:
+            _sync_mgr = self._sync_mgr
+
+            def _default_reset_dedup():
+                try:
+                    if _sync_mgr is not None and hasattr(_sync_mgr, "reset_dedup_for_restore"):
+                        _sync_mgr.reset_dedup_for_restore()
+                except Exception:
+                    logger.debug("reset_dedup_for_restore failed", exc_info=True)
+
+            self._on_reset_dedup = _default_reset_dedup
+        else:
+            self._on_reset_dedup = on_reset_dedup
+        self._on_show_web_qr = on_show_web_qr
+        self._on_send_url = on_send_url
+        self._on_nav_url = on_nav_url
+        self._on_forward_file = on_forward_file
+        self._get_overview_data = get_overview_data
+        self._on_device_action = on_device_action
+        self._on_device_test = on_device_test
+        self._on_transfer_action = on_transfer_action
+        self._on_get_transfers = on_get_transfers
+        self._on_speed_test_start = on_speed_test_start
+        self._on_speed_test_poll = on_speed_test_poll
+        self._on_window_close = on_window_close
+        self._on_toggle_discovery = on_toggle_discovery
+        self._on_toggle_visibility = on_toggle_visibility
+        self._on_settings_change = on_settings_change
+        self._get_certs = get_certs
+        self._get_diagnostics = get_diagnostics
+        self._on_update_download = on_update_download
+        self._on_update_status = on_update_status
+        self._on_update_open_folder = on_update_open_folder
+        self._on_diagnostics_request = on_diagnostics_request
+        self._on_web_upload = on_web_upload
+        # ── Nearby Chat ──────────────────────────────────────────
+        self._chat_mgr = chat_mgr
+        self._get_chat_devices = get_chat_devices
+        self._chat_send_fn = chat_send_fn
+        self._chat_start_session = chat_start_session
+        self._get_chat_muted = get_chat_muted
+        self._set_chat_muted = set_chat_muted
+        # The panel's own favourite routes write the shared store directly, so
+        # they have to say so: the host publishes the change on the event
+        # journal, which is what the native window's cached list listens to.
+        self._on_favorites_change = on_favorites_change
+        # Same seam, other event: the panel's history routes broadcast to the
+        # panels themselves, so a delete or a clear made on a phone published
+        # nothing the window hears about.
+        self._on_history_change = on_history_change
+        self._httpd: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self._device_thread: threading.Thread | None = None
+        self._device_stop = threading.Event()
+        self._firewall_ok: bool = False
+        # Pre-generate PWA icons
+        self._icon_192 = _make_icon(192)
+        self._icon_512 = _make_icon(512)
+        # `_upload_dir` is a property, not a field: see its own note below.
+        self._static_dir = _get_static_dir()
+
+        # ── Upgrade history to SQLite-backed storage if needed ───
+        self._history = self._upgrade_history(clipboard_history)
+
+        # Import ws module lazily to avoid circular imports
+        from internal.web.dialog import DialogManager
+        from internal.web.ws import WebSocketManager
+
+        self._ws_manager = WebSocketManager(
+            cfg=cfg,
+            history=self._history,
+            sync_mgr=sync_mgr,
+            get_connected_ids=get_connected_ids,
+            get_discovered=get_discovered_peers,
+            get_resolved_hashes=get_resolved_hashes,
+            get_pending_pairings=get_pending_pairings,
+            get_reconnect_states=self._get_reconnect_states,
+        )
+
+        self._dialog_mgr = DialogManager()
+        self._dialog_mgr.ws_manager = self._ws_manager
+        # When a new web client attaches, flush any dialogs that were queued
+        # while no client was connected (e.g. an incoming file transfer that
+        # arrived "blind") so they are shown instead of silently rejected.
+        self._ws_manager.on_client_attached = self._dialog_mgr.flush_pending
+
+    # ── History upgrade ──────────────────────────────────────────
+
+    @staticmethod
+    def _upgrade_history(clipboard_history):
+        """Return the clipboard history instance to use (always ClipboardHistoryDB).
+
+        If *clipboard_history* is already a ClipboardHistoryDB, return it
+        unchanged.  Otherwise (None or an unknown/mock value), create a
+        fresh ClipboardHistoryDB instance.  The legacy JSON ClipboardHistory
+        backend no longer exists, so there is no migration branch.
+        """
+        from internal.clipboard.history_db import ClipboardHistoryDB
+
+        if isinstance(clipboard_history, ClipboardHistoryDB):
+            return clipboard_history
+
+        logger.info("Creating new ClipboardHistoryDB instance")
+        return ClipboardHistoryDB()
+
+    # ── Public properties ────────────────────────────────────────
+
+    @property
+    def _upload_dir(self) -> str:
+        """The directory the phone uploads to, downloads from and lists.
+
+        Resolved per read rather than cached at startup.  ``file_receive_dir``
+        is a setting the user can change while the phone service is up, and
+        ``_get_upload_dir`` follows it — which is what the upload path has
+        always relied on.  The Files list, download and delete paths read this
+        name, so caching it left them pointing at the directory the user had
+        just moved away from: a file uploaded (or, now, shared from the desktop)
+        after such a change landed in the new directory and the Files tab
+        listed the old one, so it never appeared.  The legacy application
+        papered over that at the single call site that changed the setting, by
+        assigning ``web_server._upload_dir`` by hand; there is one source of
+        truth here instead.
+        """
+        return _get_upload_dir(getattr(self, "_cfg", None))
+
+    @_upload_dir.setter
+    def _upload_dir(self, value) -> None:
+        """Route an assignment to the config the getter reads.
+
+        Kept because the legacy settings path assigns the new directory here
+        rather than writing the setting itself.  Storing a shadow copy would
+        reintroduce the staleness the getter exists to remove, so the
+        assignment is recorded where it is read from.
+        """
+        self._cfg.file_receive_dir = str(value)
+
+    @property
+    def firewall_ok(self) -> bool:
+        return self._firewall_ok
+
+    @property
+    def is_running(self) -> bool:
+        if self._thread is None or not self._thread.is_alive() or self._httpd is None:
+            return False
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            sock.connect(("127.0.0.1", self._cfg.web_port))
+            sock.close()
+            return True
+        except Exception:
+            return False
+
+    @property
+    def ws_manager(self):
+        """Expose the WebSocket manager for external use (e.g., by sync_mgr)."""
+        return self._ws_manager
+
+    @property
+    def dialog_mgr(self):
+        """Expose the DialogManager for webview-mode dialog replacement."""
+        return self._dialog_mgr
+
+    # ── Firewall management ──────────────────────────────────────
+
+    @staticmethod
+    def _firewall_rule_ports_netsh() -> set[str] | None:
+        """Read the rule's ports with netsh, or None when it cannot be read.
+
+        netsh prints its field *labels* in the OS display language — on a
+        Chinese Windows the line is ``本地端口: 19990,19991`` — so this fast
+        path only works where the system language is English; see
+        ``_firewall_rule_ports`` for the read that does not care.  None means
+        "could not read the answer", which is not the same as "no ports" and
+        must not be reported as a blockage.
+        """
+        import re
+        import subprocess
+
+        try:
+            check = subprocess.run(
+                [
+                    "netsh",
+                    "advfirewall",
+                    "firewall",
+                    "show",
+                    "rule",
+                    f"name={WebServer.FW_RULE_NAME}",
+                    "verbose",
+                ],
+                # Bytes, then sniff the codepage — see the add-rule call below.
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=10,
+            )
+        except Exception:
+            return None
+        out = decode_console_output(check.stdout)
+        if check.returncode != 0 or WebServer.FW_RULE_NAME not in out:
+            # Either there is no such rule, or the output is in a language
+            # this cannot read — netsh says "no rules match" in that language
+            # too, so the two are not separable here.  Either way the answer
+            # is not available from this path.
+            return None
+        # Every match, not the first: repeated repairs used to be able to
+        # leave more than one rule under this name, and taking the first could
+        # answer for a stale one.
+        present: set[str] = set()
+        for value in re.findall(r"LocalPort:\s+(\S+)", out):
+            present.update(p for p in value.split(",") if p)
+        return present or None
+
+    @staticmethod
+    def _firewall_rule_ports_cim() -> set[str] | None:
+        """Read the rule's ports through PowerShell's firewall cmdlets.
+
+        The cmdlets hand back objects, so no label is involved and the answer
+        is the same in every language.  This is the slow path — starting
+        PowerShell and loading the NetSecurity module costs a couple of
+        seconds, against a fraction of one for netsh — so it is only reached
+        where netsh cannot be understood at all.
+        """
+        import subprocess
+
+        # Doubled quotes are how a single quote is escaped inside a PowerShell
+        # single-quoted string; the name is a constant, but this keeps the
+        # command well-formed if it ever stops being one.
+        name = WebServer.FW_RULE_NAME.replace("'", "''")
+        script = (
+            # A sentinel, because "no output" is ambiguous from here: it is
+            # what both "no such rule" and "the cmdlet never ran" look like.
+            "Write-Output 'CLIPSYNC-RULE'"
+            f";foreach($r in @(Get-NetFirewallRule -DisplayName '{name}'"
+            " -ErrorAction SilentlyContinue)){"
+            "$p=$r|Get-NetFirewallPortFilter;"
+            "Write-Output ($p.LocalPort -join ',')}"
+        )
+        try:
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    # No -ExecutionPolicy: that switch governs script *files*,
+                    # and this is -Command, so there is nothing to relax.
+                    # -NoProfile keeps the user's profile out of the timing
+                    # and out of the output.
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=30,
+            )
+        except Exception:
+            return None
+        lines = [line.strip() for line in decode_console_output(result.stdout).splitlines()]
+        if "CLIPSYNC-RULE" not in lines:
+            return None
+        ports: set[str] = set()
+        for line in lines:
+            if not line or line == "CLIPSYNC-RULE":
+                continue
+            ports.update(p for p in line.split(",") if p)
+        return ports
+
+    # The answer to the last firewall check, per requested port set.  The
+    # startup path asks this question on every launch, and a reading costs a
+    # couple of processes on a Windows whose netsh output cannot be parsed --
+    # seconds of PowerShell.  The rule is machine-wide state that only this
+    # application rewrites, and the one function that rewrites it
+    # (_open_firewall) clears this.
+    _fw_read_cache: dict[tuple[str, ...], tuple[bool, str]] = {}
+    _fw_cache_lock = threading.Lock()
+
+    @staticmethod
+    def _firewall_rule_ports() -> set[str] | None:
+        """The ports the ClipSync inbound rule allows, or None if unreadable.
+
+        A rule that allowed both ports used to be reported as allowing none:
+        the check matched the literal label ``LocalPort:``, and netsh prints
+        that label in the OS display language, so on a Chinese Windows the
+        line read ``本地端口:`` and nothing matched.  Diagnostics then said
+        "wrong port", "Request permission" deleted the rule and re-created it
+        identically, and the warning could never clear — the rule was correct
+        before the repair and correct after it.
+
+        Returns the union of the ports the rules of that name list, with
+        ``{"Any"}`` for a rule that allows everything and ``set()`` when no
+        such rule exists.  ``None`` means the question could not be answered,
+        which is not the same answer as "no".
+
+        Three readers, cheapest first: the firewall store itself (milliseconds,
+        and no language involved), netsh (tens of milliseconds, but its field
+        labels are localized) and the PowerShell cmdlets (seconds).
+        """
+        ports = WebServer._firewall_rule_ports_registry()
+        if ports is not None:
+            return ports
+        ports = WebServer._firewall_rule_ports_netsh()
+        if ports is not None:
+            return ports
+        return WebServer._firewall_rule_ports_cim()
+
+    @staticmethod
+    def _firewall_rule_ports_registry() -> set[str] | None:
+        """Read the rule's ports straight out of the firewall store.
+
+        The rule is a value in the registry, so this is a read of one key
+        rather than a process start: a few milliseconds against the tens that
+        netsh costs and the seconds that loading PowerShell costs.  It is also
+        language-proof -- the store holds ``LPort=19990`` whatever the OS
+        display language is, which is the whole problem with reading netsh
+        output (see :meth:`_firewall_rule_ports_netsh`).
+
+        Returns ``None`` when the question cannot be answered here (a
+        non-Windows platform, a locked-down key, a rule that is not there), so
+        the caller can fall back rather than read it as "no ports".
+        """
+        if sys.platform != "win32":
+            return None
+        import winreg
+
+        key_path = (
+            r"SYSTEM\CurrentControlSet\Services\SharedAccess"
+            r"\Parameters\FirewallPolicy\FirewallRules"
+        )
+        wanted = WebServer.FW_RULE_NAME.casefold()
+        ports: set[str] = set()
+        seen = False
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+                _subkeys, value_count, _changed = winreg.QueryInfoKey(key)
+                for index in range(value_count):
+                    try:
+                        _name, data, _kind = winreg.EnumValue(key, index)
+                    except OSError:
+                        continue
+                    text = str(data)
+                    # The store's own version prefix ("v2.33|") is not a field
+                    # and splits into a token no comparison will match.
+                    fields = text.split("|")
+                    if not any(
+                        field.casefold() == f"name={wanted}" for field in fields
+                    ):
+                        continue
+                    seen = True
+                    for field in fields:
+                        if not field.startswith("LPort="):
+                            continue
+                        ports.update(
+                            p for p in field[len("LPort=") :].split(",") if p
+                        )
+        except OSError:
+            return None
+        if not seen:
+            # No rule of that name: an answer, and the same one the other
+            # readers give for it.
+            return set()
+        return ports or None
+
+    @staticmethod
+    def check_firewall_rule_cached(
+        ports: int | list[int] | None = None,
+    ) -> tuple[bool, str]:
+        """``check_firewall_rule`` with the answer remembered for this process.
+
+        The startup path asks this question on every launch, and on a Windows
+        whose netsh output this cannot read the answer costs a PowerShell
+        start (seconds) each time.  The rule is machine-wide state that only
+        this application rewrites, and the one function that rewrites it
+        (``_open_firewall``) clears this cache — so within a process the first
+        answer stands.  Diagnostics asks the uncached question, which is the
+        one whose whole job is to report what is true right now.
+        """
+        if sys.platform != "win32":
+            return (True, "")
+        key = tuple(str(p) for p in ([ports] if isinstance(ports, int) else (ports or [])))
+        with WebServer._fw_cache_lock:
+            hit = WebServer._fw_read_cache.get(key)
+        if hit is not None:
+            return hit
+        answer = WebServer.check_firewall_rule(ports)
+        if answer[1] == "Unknown":
+            # A question that could not be answered is not an answer, and the
+            # very next thing a caller does with it can change it (a repair
+            # that writes the rule).  Only a definite reading is worth keeping.
+            return answer
+        with WebServer._fw_cache_lock:
+            WebServer._fw_read_cache[key] = answer
+        return answer
+
+    @staticmethod
+    def _firewall_repair_is_safe() -> bool:
+        """Whether a repair could put back what it is about to remove.
+
+        netsh only writes the rule from an elevated process, so an
+        unelevated one that deletes first and then fails to add leaves the
+        machine with *no* rule where it had a working one — worse than the
+        mismatch it set out to fix, and with the app unable to restore it.
+        Ask the OS before removing anything.
+        """
+        if sys.platform != "win32":
+            return True
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            # Cannot prove elevation: treat it as absent, so the worst case is
+            # a rule left alone rather than one destroyed.
+            return False
+
+    @staticmethod
+    def check_firewall_rule(ports: int | list[int] | None = None) -> tuple[bool, str]:
+        """Check that the ClipSync rule allows all the given ports.
+
+        `ports` may be a single int or a list of ints. The app needs both the
+        TCP sync port and the web companion port open, and a Windows rule's
+        LocalPort is a comma-separated list — so every requested port must be
+        present. Returns (True, "OK") when all ports are allowed.
+        """
+        if sys.platform != "win32":
+            return (True, "")
+        if isinstance(ports, int):
+            ports = [ports]
+        ports = [str(p) for p in (ports or [])]
+        allowed = WebServer._firewall_rule_ports()
+        if allowed is None:
+            # Rules unreadable: name that as the problem.  Claiming a wrong
+            # port here is what made the warning permanent.
+            return (False, "Unknown")
+        if not allowed:
+            return (False, "Blocked")
+        if "Any" in allowed:
+            # A rule open to every port covers the ones we need.
+            return (True, "OK")
+        missing = [p for p in ports if p not in allowed]
+        if missing:
+            actual = ",".join(sorted(allowed, key=lambda p: (not p.isdigit(), int(p or 0))))
+            return (False, f"Wrong port (got {actual}, needs {','.join(missing)})")
+        return (True, "OK")
+
+    @staticmethod
+    def _open_firewall(port: int, web_port: int | None = None) -> bool:
+        # Static: the rule is machine-wide, so diagnostics can repair it even
+        # when no companion instance exists (web access disabled).
+        if sys.platform != "win32":
+            return True
+        # One rule must cover both the TCP sync port and the web companion
+        # port, otherwise the diagnostics check / other peers on the TCP port
+        # would report a "wrong port" mismatch against the single-port rule.
+        ports = [port]
+        if web_port and web_port != port:
+            ports.append(web_port)
+        import subprocess
+
+        # The cached question: this runs on every launch, and on a Windows
+        # whose netsh output this cannot read, the uncached one costs a
+        # PowerShell start every time.
+        ok, detail = WebServer.check_firewall_rule_cached(ports)
+        if ok:
+            return True
+        if detail.startswith("Wrong port"):
+            # Delete before adding: netsh would otherwise create a *second*
+            # rule under the same name rather than update the first.
+            #
+            # Only a rule that was read and found wrong is in this branch.
+            # "Unknown" deliberately is not: unreadable means unread, not
+            # wrong, and this delete is how a working rule gets destroyed --
+            # the add that follows needs elevation, so if that is refused the
+            # machine is left with no rule at all.  A rule readable enough to
+            # say "wrong ports" is not serving what we need, so removing it
+            # costs nothing -- but only where the add behind it can be
+            # expected to land.  Unelevated, "delete then fail to add" is the
+            # one outcome strictly worse than doing nothing, and every launch
+            # used to attempt it: ask first.
+            if not WebServer._firewall_repair_is_safe():
+                logger.info(
+                    "Firewall rule needs updating (%s), but replacing it needs "
+                    "administrator rights — leaving the existing rule alone",
+                    detail,
+                )
+                return False
+            logger.info("Replacing the firewall rule (%s)", detail)
+            WebServer._fw_read_cache.clear()
+            try:  # noqa: SIM105
+                subprocess.run(
+                    [
+                        "netsh",
+                        "advfirewall",
+                        "firewall",
+                        "delete",
+                        "rule",
+                        f"name={WebServer.FW_RULE_NAME}",
+                    ],
+                    # Output is discarded, but text=True would still risk the
+                    # reader-thread decode crash — capture raw bytes.
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        try:
+            result = subprocess.run(
+                [
+                    "netsh",
+                    "advfirewall",
+                    "firewall",
+                    "add",
+                    "rule",
+                    f"name={WebServer.FW_RULE_NAME}",
+                    "dir=in",
+                    "action=allow",
+                    f"localport={','.join(map(str, ports))}",
+                    "protocol=TCP",
+                    "profile=any",
+                ],
+                # No text=True: it decodes with the ANSI codepage, but netsh
+                # emits the console output codepage — UTF-8 on plenty of
+                # Windows 11 boxes whose GetACP() still says 936.  That
+                # mismatch first crashed subprocess's reader thread (empty
+                # output, so the failure had no reason attached) and then, once
+                # forced to errors="replace", turned the elevation error into
+                # mojibake.  decode_console_output sniffs it instead.
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                logger.info("Firewall rule created for port %s", ",".join(map(str, ports)))
+                WebServer._fw_read_cache.clear()
+                return True
+            else:
+                stderr = decode_console_output(result.stderr).strip()
+                stdout = decode_console_output(result.stdout).strip()
+                # Always say something: netsh can fail with no output at all
+                # (typically "not running as administrator"), and a bare
+                # "Failed to create firewall rule:" told the user nothing.
+                logger.warning(
+                    "Failed to create firewall rule (exit %s): %s",
+                    result.returncode,
+                    stderr
+                    or stdout
+                    or "no output — ClipSync is probably not running as administrator",
+                )
+                # The rule was removed (or a second one attempted) and netsh
+                # did not take: whatever the last read said is no longer true.
+                WebServer._fw_read_cache.clear()
+                return False
+        except Exception as e:
+            logger.warning("Firewall setup error: %s", e)
+            return False
+
+    @staticmethod
+    def _open_firewall_elevated(port: int, web_port: int | None = None) -> bool:
+        """Repair the firewall rule through a UAC-elevated netsh call.
+
+        Deleting/creating rules via netsh needs admin rights, and most runs
+        are not elevated. When the unelevated attempt fails, write a small
+        batch file with the exact delete+add commands and launch it with
+        ShellExecuteW's "runas" verb so the user gets a UAC prompt. Returns
+        True if the prompt was accepted (the elevated process then applies
+        the rule), False if it was cancelled or failed to launch.
+        """
+        if sys.platform != "win32":
+            return True
+        ports = [port]
+        if web_port and web_port != port:
+            ports.append(web_port)
+        import ctypes
+        import os as _os
+        import tempfile as _tempfile
+
+        # A name nobody can predict, in a directory only this user can write.
+        # The old form was `clipsync_firewall_<ports>.bat` in the shared temp
+        # directory: predictable, world-writable, and left behind — so anything
+        # running as this user could replace the file between it being written
+        # and being run elevated.
+        directory = _tempfile.mkdtemp(prefix="clipsync_fw_")
+        bat = _os.path.join(directory, "repair.bat")
+        try:
+            # Overwrite any pre-existing file so nothing stale runs elevated.
+            with open(bat, "w", encoding="utf-8") as _f:
+                _f.write(
+                    "\r\n".join(
+                        [
+                            "@echo off",
+                            f'netsh advfirewall firewall delete rule name="{WebServer.FW_RULE_NAME}" >nul 2>&1',  # noqa: E501
+                            f'netsh advfirewall firewall add rule name="{WebServer.FW_RULE_NAME}" '
+                            f"dir=in action=allow localport={','.join(map(str, ports))} protocol=TCP profile=any",  # noqa: E501
+                        ]
+                    )
+                    + "\r\n"
+                )
+            import ctypes
+
+            # ShellExecuteW returns a value >32 on success, but 1223
+            # (ERROR_CANCELLED) when the user declined the UAC prompt —
+            # that is a failure even though it is numerically >32.
+            result = ctypes.windll.shell32.ShellExecuteW(None, "runas", bat, "", None, 1)
+            return result > 32 and result != 1223
+        except Exception:
+            return False
+        finally:
+            # Swept on a delay, because the elevated process reads the file
+            # after this call returns and there is no completion signal for a
+            # ShellExecute.  A script that runs as Administrator should not sit
+            # in a temp directory indefinitely.
+            _remove_later(directory)
+
+    # ── Start / Stop ────────────────────────────────────────────
+
+    def start(self) -> bool:
+        if self._thread is not None:
+            return True
+        # Bind all interfaces: the dashboard serves the local webview AND
+        # phones/tablets/other devices on the LAN (a core feature). Whether
+        # remote devices may access is controlled by cfg.web_enabled (see
+        # _companion_client_ok) — the server itself stays up for the UI.
+        host = "0.0.0.0"
+        port = self._cfg.web_port
+        logger.info("Starting web companion on %s:%d", host, port)
+        # Allow both the TCP sync port and the web companion port.
+        self._firewall_ok = self._open_firewall(self._cfg.port, self._cfg.web_port)
+
+        # Capture all dependencies for the handler closure
+        cfg = self._cfg
+        history = self._history
+        sync_mgr = self._sync_mgr
+        get_connected_ids = self._get_connected_ids
+        get_discovered_peers = self._get_discovered_peers
+        get_resolved_hashes = self._get_resolved_hashes
+        get_pending_pairings = self._get_pending_pairings
+        get_reconnect_states = self._get_reconnect_states
+        get_relay_state = self._get_relay_state
+        get_current_relay_broker = self._get_current_relay_broker
+        enc_mgr = self._enc_mgr
+        on_open_file = self._on_open_file
+        on_open_folder = self._on_open_folder
+        on_restart = self._on_restart
+        on_reset_dedup = self._on_reset_dedup
+        on_show_web_qr = self._on_show_web_qr
+        on_send_url = self._on_send_url
+        on_nav_url = self._on_nav_url
+        on_forward_file = self._on_forward_file
+        get_overview_data = self._get_overview_data
+        on_device_action = self._on_device_action
+        on_device_test = self._on_device_test
+        on_transfer_action = self._on_transfer_action
+        on_get_transfers = self._on_get_transfers
+        on_speed_test_start = self._on_speed_test_start
+        on_speed_test_poll = self._on_speed_test_poll
+        on_window_close = self._on_window_close
+        on_toggle_discovery = self._on_toggle_discovery
+        on_toggle_visibility = self._on_toggle_visibility
+        on_settings_change = self._on_settings_change
+        get_certs = self._get_certs
+        on_diagnostics_request = self._on_diagnostics_request
+        on_web_upload = self._on_web_upload
+        chat_mgr = self._chat_mgr
+        get_chat_devices = self._get_chat_devices
+        chat_send_fn = self._chat_send_fn
+        chat_start_session = self._chat_start_session
+        get_chat_muted = self._get_chat_muted
+        set_chat_muted = self._set_chat_muted
+        on_history_change = self._on_history_change
+        on_favorites_change = self._on_favorites_change
+        get_diagnostics = self._get_diagnostics
+        on_update_download = self._on_update_download
+        on_update_status = self._on_update_status
+        on_update_open_folder = self._on_update_open_folder
+        upload_dir = self._upload_dir  # startup dir (chat-download fallback)
+        _server = self  # live _upload_dir is mutated by the settings apply path
+        static_dir = self._static_dir
+        icon_192 = self._icon_192
+        icon_512 = self._icon_512
+        ws_manager = self._ws_manager
+        # Cap the number of concurrently handled connections so a flood of
+        # slow clients cannot exhaust worker threads.
+        connection_semaphore = threading.Semaphore(64)
+        # WebSockets get their OWN budget.  A /ws connection blocks in
+        # client.serve() for as long as the page stays open, so counting it
+        # against the HTTP budget meant a handful of open tabs (each with a
+        # reconnecting socket) could permanently consume slots that short
+        # requests need, and the UI would start answering 503 to everything.
+        ws_semaphore = threading.Semaphore(16)
+        import internal.web.routes as api_routes
+
+        class _Handler(BaseHTTPRequestHandler):
+            # Slowloris defence: bound every socket operation on this
+            # connection.  A client that opens a socket but never finishes the
+            # request line / headers (or stalls mid-body) times out instead of
+            # occupying a worker thread forever.  StreamRequestHandler.setup()
+            # applies this to the underlying socket.
+            timeout = 30
+
+            def log_message(inner_self, fmt, *args):  # noqa: N805
+                pass
+
+            def handle(inner_self):  # noqa: N805
+                # Cap the number of concurrently handled connections so a
+                # flood of slow clients cannot exhaust worker threads.  When
+                # the semaphore is exhausted the connection is rejected
+                # outright rather than queued (which would grow threads
+                # unboundedly).
+                if not connection_semaphore.acquire(blocking=False):
+                    # Reject with a clean HTTP 503 rather than a bare close —
+                    # a rejected connection (a reload during a busy period)
+                    # would otherwise see a connection reset and take the
+                    # whole UI offline.
+                    #
+                    # This runs BEFORE super().handle(), so no request line has
+                    # been parsed yet and the BaseHTTPRequestHandler response
+                    # helpers cannot be used: send_response() reaches for
+                    # self.requestline / self.request_version and raises
+                    # AttributeError, which is not an OSError -- so the 503 was
+                    # never sent, the traceback escaped, and the client got
+                    # exactly the reset this branch exists to avoid.  Write the
+                    # bytes ourselves instead.
+                    with contextlib.suppress(Exception):
+                        inner_self.connection.sendall(
+                            b"HTTP/1.1 503 Service Unavailable\r\n"
+                            b"Content-Type: application/json\r\n"
+                            b"Content-Length: 25\r\n"
+                            b"Connection: close\r\n"
+                            b"\r\n"
+                            b'{"error": "server busy"}\n'
+                        )
+                    with contextlib.suppress(Exception):
+                        inner_self.connection.close()
+                    return
+                inner_self._http_slot_held = True
+                try:
+                    super().handle()
+                finally:
+                    inner_self._release_http_slot()
+
+            def _release_http_slot(inner_self):  # noqa: N805
+                """Give the HTTP connection slot back, at most once.
+
+                A /ws upgrade calls this early: it then blocks in serve() for
+                the life of the page under the separate WS budget, and must not
+                sit on an HTTP slot while doing so.
+                """
+                if getattr(inner_self, "_http_slot_held", False):
+                    inner_self._http_slot_held = False
+                    connection_semaphore.release()
+
+            def handle_one_request(self):
+                # The client (web UI) disconnects abruptly when the app
+                # restarts or the window closes mid-response. Writing the
+                # response then raises BrokenPipeError/ConnectionResetError,
+                # which would otherwise spill a noisy traceback to stderr on
+                # every restart. Swallow those and mark the connection closed.
+                try:
+                    super().handle_one_request()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    self.close_connection = True
+
+            def _token_ok(inner_self) -> bool:  # noqa: N805
+                return _validate_token(inner_self.path, cfg.web_token, inner_self.headers)
+
+            def _write_origin_ok(inner_self) -> bool:  # noqa: N805
+                """Whether a state-changing request may proceed.
+
+                With the token armed the request must be same-origin (Origin,
+                else Sec-Fetch-Site, else Referer); a client with no browser
+                origin signal at all is left to the token check the caller
+                makes next.  A cross-site request is refused whatever token
+                it carries.
+
+                With the token cleared there is no secret left, so the only
+                thing that separates this machine's own pages from a
+                DNS-rebinding page is the kind of host the browser names.  A
+                browser source signal is required, it must be same-origin,
+                and its host must be an IP literal this request was accepted
+                on (or localhost over the loopback); a host name -- the
+                rebound ``evil.com``, or a legitimate ``my-pc.local`` -- is
+                refused.  See ``_empty_token_origin_is_local``.
+                """
+                origin = inner_self.headers.get("Origin")
+                host = inner_self.headers.get("Host", "")
+                referer = inner_self.headers.get("Referer") or inner_self.headers.get("Referrer")
+                if cfg.web_token:
+                    if origin:
+                        return _origin_matches_host(origin, host, cfg.web_port)
+                    site = (inner_self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+                    if site:
+                        return site in ("same-origin", "none")
+                    if referer:
+                        return _origin_matches_host(referer, host, cfg.web_port)
+                    return inner_self._token_ok()
+                source = origin or referer
+                if not source:
+                    # No browser signal and no secret: a rebinding page would
+                    # look exactly like this, so it is refused.
+                    return False
+                return _empty_token_origin_is_local(
+                    source, host, cfg.web_port, _accepted_local_host(inner_self)
+                )
+
+            def _send_allow_origin(inner_self):  # noqa: N805
+                """Echo the request Origin only when it is this same origin.
+
+                The API answers are token-authenticated, so a wildcard would
+                let any page that can reach the port read them.  A same-origin
+                caller does not need CORS at all, but echoing its own origin
+                keeps the header for clients that expect one.
+                """
+                origin = inner_self.headers.get("Origin")
+                if origin and _origin_matches_host(
+                    origin, inner_self.headers.get("Host", ""), cfg.web_port
+                ):
+                    inner_self.send_header("Access-Control-Allow-Origin", origin)
+
+            def _companion_client_ok(inner_self) -> bool:  # noqa: N805
+                """Allow the request when the companion serves it.
+
+                The web companion's job is to serve the dashboard to phones /
+                LAN devices. The local webview dashboard is reached over
+                127.0.0.1. When the companion is turned off the server keeps
+                running for the local dashboard but must refuse non-local
+                clients — otherwise the dashboard breaks (it IS served by
+                this server).
+                """
+                if cfg.web_enabled:
+                    return True
+                host = (inner_self.client_address or ("", 0))[0]
+                return host in ("127.0.0.1", "::1")
+
+            @staticmethod
+            def _available_locales() -> set:
+                """Return the set of available locale codes, discovered from
+                JSON files in static/locales/ plus any registered in the
+                Python i18n module."""
+                locales = set()
+                locales_dir = os.path.join(static_dir, "locales")
+                try:
+                    for fname in os.listdir(locales_dir):
+                        if fname.endswith(".json"):
+                            locales.add(fname[:-5])  # strip .json
+                except OSError:
+                    pass
+                from internal.i18n import LOCALES
+
+                locales.update(LOCALES.keys())
+                return locales
+
+            @staticmethod
+            def _load_i18n_translations(cfg) -> dict[str, str]:
+                """Load translations for the configured locale from a JSON
+                locale file.  Falls back to the Python i18n dicts if the
+                JSON file doesn't exist yet.
+
+                The table is cached per locale so static-asset requests don't
+                re-read/re-parse the file every time; the caller serializes
+                whatever slice it is about to inject (the phone page is sent
+                ``_mobile_i18n_payload``, not this)."""
+                from internal.i18n import LOCALES
+                from internal.version import __version__
+
+                locale = cfg.language if cfg.language in _Handler._available_locales() else "en"
+
+                with _i18n_cache_lock:
+                    cached = _i18n_cache.get(locale)
+                if cached is not None:
+                    return cached
+
+                # Try JSON locale file first
+                locales_dir = os.path.join(static_dir, "locales")
+                json_path = os.path.join(locales_dir, f"{locale}.json")
+
+                def _load_locale_json(code):
+                    """Load a locale's JSON file, or None when missing/corrupt."""
+                    path = os.path.join(locales_dir, f"{code}.json")
+                    try:
+                        if not os.path.isfile(path):
+                            return None
+                        with open(path, encoding="utf-8") as f:
+                            return json.load(f)
+                    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                        return None
+
+                translations = _load_locale_json(locale)
+                if translations is None:
+                    # The configured locale's JSON is missing/corrupt.  Fall
+                    # back to the on-disk JSON locale files, which carry every
+                    # web key — the Python i18n dicts are a subset and would
+                    # render raw key names across many panels.
+                    logger.warning(
+                        "Failed to load locale JSON: %s, falling back to en.json", json_path
+                    )
+                    translations = _load_locale_json("en")
+                if translations is None:
+                    logger.warning("No locale JSON on disk, falling back to Python dict")
+                    translations = dict(LOCALES.get(locale, LOCALES.get("en", {})))
+
+                # The version lives in exactly one place (internal/version.py);
+                # inject it here so the web UI never carries its own copy.
+                # (No phone page reads it -- `MOBILE_I18N_KEYS` is what decides
+                # what actually goes out -- but the table is the web UI's.)
+                translations["settings_window.about_version"] = "v" + __version__
+                with _i18n_cache_lock:
+                    _i18n_cache[locale] = translations
+                return translations
+
+            def _drain_rejected_body(inner_self, limit: int = 65536) -> None:  # noqa: N805
+                """Read a rejected request's body so the 403 is not lost.
+
+                A response written while the client's body is still unread
+                makes Windows reset the connection, and the reset can discard
+                the response before the client reads it.  Draining a bounded
+                prefix first keeps a rejection readable; a larger body still
+                closes, and a client that stalls is cut off after a second
+                rather than holding a worker for the full request timeout.
+                """
+                try:
+                    declared = int(inner_self.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    declared = 0
+                if declared <= 0:
+                    return
+                try:
+                    previous = inner_self.connection.gettimeout()
+                    inner_self.connection.settimeout(1.0)
+                except OSError:
+                    previous = None
+                remaining = min(declared, limit)
+                try:
+                    while remaining > 0:
+                        chunk = inner_self.rfile.read(min(remaining, 8192))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                except OSError:
+                    inner_self.close_connection = True
+                finally:
+                    if previous is not None:
+                        with contextlib.suppress(OSError):
+                            inner_self.connection.settimeout(previous)
+                if declared > limit:
+                    inner_self.close_connection = True
+
+            def _send_json(inner_self, data, status=200):  # noqa: N805
+                body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                inner_self.send_response(status)
+                inner_self.send_header("Content-Type", "application/json; charset=utf-8")
+                # Stated rather than implied by closing the connection.  The
+                # handler never sets `protocol_version`, so this is HTTP/1.0 and
+                # a missing length would still work -- but only until somebody
+                # raises that to 1.1 as a performance idea, at which point every
+                # response without one hangs until it times out.
+                inner_self.send_header("Content-Length", str(len(body)))
+                inner_self.send_header("Cache-Control", "no-cache")
+                inner_self._send_allow_origin()
+                inner_self.send_header("Referrer-Policy", "no-referrer")
+                inner_self.send_header("X-Content-Type-Options", "nosniff")
+                inner_self.end_headers()
+                with contextlib.suppress(OSError):
+                    inner_self.wfile.write(body)
+
+            def _send_html(inner_self, html: str, status=200):  # noqa: N805
+                body = html.encode("utf-8")
+                # The companion page is the one payload this server sends that is
+                # measured in hundreds of kilobytes -- with the language table
+                # interpolated into it, an order of magnitude more than the file
+                # on disk -- and a phone reaches it over the relay as often as
+                # over the LAN.  Same three decisions as `_serve_static`: only
+                # when the client asked, only when the body is worth it (it
+                # always is, here), and `Vary` on every response either way.
+                compressed = _gzip_if_worthwhile(
+                    inner_self.headers.get("Accept-Encoding", ""), body,
+                    "text/html; charset=utf-8",
+                )
+                gzipped = compressed is not None
+                if compressed is not None:
+                    body = compressed
+                inner_self.send_response(status)
+                inner_self.send_header("Content-Type", "text/html; charset=utf-8")
+                inner_self.send_header("Content-Length", str(len(body)))
+                inner_self.send_header("Cache-Control", "no-cache")
+                inner_self.send_header("Vary", "Accept-Encoding")
+                if gzipped:
+                    inner_self.send_header("Content-Encoding", "gzip")
+                inner_self.send_header("Referrer-Policy", "no-referrer")
+                inner_self.send_header("X-Content-Type-Options", "nosniff")
+                inner_self.end_headers()
+                with contextlib.suppress(OSError):
+                    inner_self.wfile.write(body)
+
+            @staticmethod
+            def _page_lang() -> str:
+                """Short html ``lang`` attribute matching the configured language."""
+                return "zh" if cfg.language == "zh-CN" else "en"
+
+            def _send_companion_disabled_page(inner_self) -> None:  # noqa: N805
+                """Serve a friendly page when the companion is off and a browser
+                (phone / tablet) opens the dashboard — not a raw JSON error."""
+                if cfg.language == "zh-CN":
+                    title, desc = (
+                        "远程访问已关闭",
+                        "该设备的远程访问已被关闭，暂时无法访问其仪表盘。",
+                    )
+                else:
+                    title, desc = (
+                        "Remote access disabled",
+                        "Remote access is turned off on this device, so its "
+                        "dashboard is temporarily unavailable.",
+                    )
+                html = (
+                    "<!doctype html><html lang='"
+                    + inner_self._page_lang()
+                    + "'><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    "<meta name='theme-color' content='#05060D'>"
+                    "<title>" + title + "</title>"
+                    "<body style='font-family:system-ui,-apple-system,sans-serif;"
+                    "background:#0f1117;color:#e6e8ee;display:flex;align-items:center;"
+                    "justify-content:center;height:100vh;margin:0'>"
+                    "<div style='text-align:center;max-width:26rem;padding:1.5rem'>"
+                    "<div style='font-size:2rem;margin-bottom:.5rem'>&#128241;&#128279;</div>"
+                    "<h1 style='font-size:18px;margin:0 0 .5rem'>" + title + "</h1>"
+                    "<p style='color:#9aa0ad;font-size:14px;line-height:1.5'>" + desc + "</p>"
+                    "</div></body></html>"
+                )
+                inner_self._send_html(html, status=403)
+
+            def _wants_html(inner_self) -> bool:  # noqa: N805
+                """True when the client asked for an HTML page rather than an API.
+
+                A stale-token phone page (Accept: text/html) should get a
+                friendly "re-scan the QR" page, while the SPA's /api fetches
+                (Accept: */* or application/json) keep the JSON 403.
+                """
+                accept = (inner_self.headers.get("Accept") or "").lower()
+                return "text/html" in accept or "application/xhtml+xml" in accept
+
+            def _send_token_expired_page(inner_self) -> None:  # noqa: N805
+                """Serve a friendly page when a page request has a stale token.
+
+                After the user regenerates the web token, any phone page / PWA
+                that still holds the OLD token 403s.  Show a helpful message
+                instead of raw JSON so the user knows to re-scan the QR code.
+                """
+                if cfg.language == "zh-CN":
+                    title = "访问链接已失效"
+                    desc = "访问令牌已更改，此链接已失效。请返回电脑端的 ClipSync，重新扫描二维码。"
+                else:
+                    title = "This link has expired"
+                    desc = (
+                        "The access token was changed, so this link no longer works. "
+                        "Re-scan the QR code on your computer to reconnect."
+                    )
+                html = (
+                    "<!doctype html><html lang='"
+                    + inner_self._page_lang()
+                    + "'><meta charset='utf-8'>"
+                    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                    "<meta name='theme-color' content='#05060D'>"
+                    "<title>" + title + "</title>"
+                    "<body style='font-family:system-ui,-apple-system,sans-serif;"
+                    "background:#0f1117;color:#e6e8ee;display:flex;align-items:center;"
+                    "justify-content:center;height:100vh;margin:0'>"
+                    "<div style='text-align:center;max-width:26rem;padding:1.5rem'>"
+                    "<div style='font-size:2rem;margin-bottom:.5rem'>&#128279;</div>"
+                    "<h1 style='font-size:18px;margin:0 0 .5rem'>" + title + "</h1>"
+                    "<p style='color:#9aa0ad;font-size:14px;line-height:1.5'>" + desc + "</p>"
+                    "</div></body></html>"
+                )
+                inner_self._send_html(html, status=403)
+
+            def _send_file(inner_self, filepath: str, mime: str = "application/octet-stream"):  # noqa: N805
+                status, headers, body = _build_file_response(filepath, mime)
+                inner_self.send_response(status)
+                for key, val in headers.items():
+                    inner_self.send_header(key, val)
+                inner_self._send_allow_origin()
+                inner_self.end_headers()
+                if status == 200:
+                    try:
+                        if isinstance(body, str) and os.path.isfile(body):
+                            # Stream in chunks so large files are not loaded
+                            # into memory all at once.
+                            with open(body, "rb") as f:
+                                while True:
+                                    chunk = f.read(64 * 1024)
+                                    if not chunk:
+                                        break
+                                    inner_self.wfile.write(chunk)
+                        else:
+                            inner_self.wfile.write(body)
+                    except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                        pass
+
+            def _serve_static(inner_self, rel_path: str, mime: str | None = None):  # noqa: N805
+                """Serve a file from the static directory. Text files get placeholder interpolation."""  # noqa: E501
+                # Security: prevent path traversal
+                safe_path = rel_path.lstrip("/").replace("\\", "/")
+                if ".." in safe_path:
+                    inner_self._send_json({"error": "forbidden"}, 403)
+                    return
+
+                full_path = os.path.normpath(os.path.join(static_dir, safe_path))
+                # Ensure we don't escape the static directory.  Compared by path
+                # component, not by string prefix: a sibling directory whose name
+                # merely starts with the same characters (``static-evil`` beside
+                # ``static``) satisfies ``startswith`` while being outside.  The
+                # ``..`` test above already blocks the traversal that would reach
+                # one, so this is the second line rather than the first -- and a
+                # second line that cannot be defeated by a directory name is the
+                # point of having one.
+                root = os.path.normpath(static_dir)
+                if full_path != root and not full_path.startswith(root + os.sep):
+                    inner_self._send_json({"error": "forbidden"}, 403)
+                    return
+
+                if not os.path.isfile(full_path):
+                    inner_self._send_json({"error": "not found"}, 404)
+                    return
+
+                # Determine MIME type with explicit fallbacks for Windows
+                if mime is None:
+                    mime, _ = mimetypes.guess_type(full_path)
+                if mime is None:
+                    # Explicit MIME map for common web assets (mimetypes may miss on Windows)
+                    _MIME_MAP = {  # noqa: N806
+                        ".js": "application/javascript; charset=utf-8",
+                        ".mjs": "application/javascript; charset=utf-8",
+                        ".css": "text/css; charset=utf-8",
+                        ".html": "text/html; charset=utf-8",
+                        ".json": "application/json; charset=utf-8",
+                        ".svg": "image/svg+xml",
+                        ".png": "image/png",
+                        ".ico": "image/x-icon",
+                        ".woff2": "font/woff2",
+                    }
+                    ext = os.path.splitext(full_path)[1].lower()
+                    mime = _MIME_MAP.get(ext, "application/octet-stream")
+
+                # Interpolate placeholders in text files (.html, .js, .css, .json, .svg)
+                text_exts = (".html", ".js", ".css", ".json", ".svg")
+                if safe_path.endswith(text_exts) or mime.startswith("text/"):
+                    try:
+                        with open(full_path, encoding="utf-8") as f:
+                            content = f.read()
+                        # Only do full interpolation for HTML files
+                        is_html = safe_path.endswith(".html")
+                        content = inner_self._interpolate_html(content, is_html)
+                        data = content.encode("utf-8")
+                    except Exception:
+                        with open(full_path, "rb") as f:
+                            data = f.read()
+                else:
+                    with open(full_path, "rb") as f:
+                        data = f.read()
+
+                # HTTP validators + cache policy.
+                #
+                # HTML pages carry the interpolated auth token IN the body, so
+                # they must revalidate on every request (Cache-Control:
+                # no-cache) and must NOT get a 304 based on an ETag — a token
+                # regeneration with a same-length token would otherwise serve
+                # a stale page forever.
+                #
+                # The service worker must also always revalidate (no-cache) so
+                # a changed sw.js is picked up promptly; it is served with the
+                # correct JavaScript MIME type so SW registration works in any
+                # secure context (https / localhost).
+                #
+                # Non-HTML assets (js/css/svg/...) carry the token only in
+                # their URL query string, so a token change produces fresh URLs
+                # and the browser cache naturally misses.  They are served with
+                # Cache-Control: no-cache so the browser REVALIDATES on every
+                # load — a ClipSync update changes the asset bytes without
+                # changing the URL, and max-age would serve stale JS/CSS for up
+                # to an hour.  The ETag/Last-Modified + 304 path below makes
+                # that revalidation cheap (304 = no body transfer).
+                #
+                # Compression, decided once for every static response.
+                #
+                # The phone page is ~290 KB of markup and script, and it is
+                # fetched over the relay by phones that are not on this network
+                # — that is seconds of transfer for bytes that shrink by four
+                # fifths.  Downloads never come through here (they have their
+                # own routes with their own Range handling), so nothing here
+                # needs excluding for their sake.
+                #
+                # ``Vary: Accept-Encoding`` is sent with *every* response that
+                # took this decision, the 304 included: a cache that replays a
+                # gzip body to a client that cannot unpack it is worse than no
+                # cache at all.
+                # A URL that carries the file's own fingerprint is the only
+                # one this server may mark immutable: the bytes behind a
+                # different `v` are different bytes, so there is nothing to
+                # revalidate.  Everything else keeps `no-cache`, because a
+                # ClipSync update rewrites these files without changing their
+                # paths.  HTML and the service worker never qualify — the page
+                # carries the auth token in its body, and a stale `sw.js` is the
+                # one stale file this app cannot recover from on its own.
+                immutable = False
+                if not safe_path.endswith(".html") and safe_path != "sw.js":
+                    try:
+                        requested_v = (
+                            urllib.parse.parse_qs(urllib.parse.urlsplit(inner_self.path).query)
+                            .get("v", [""])[0]
+                        )
+                    except ValueError:
+                        requested_v = ""
+                    immutable = bool(requested_v) and requested_v == _asset_version(safe_path)
+                cache_control = (
+                    "public, max-age=31536000, immutable" if immutable else "no-cache"
+                )
+                compressed = _gzip_if_worthwhile(
+                    inner_self.headers.get("Accept-Encoding", ""), data, mime
+                )
+                gzipped = compressed is not None
+                if compressed is not None:
+                    data = compressed
+
+                if safe_path.endswith(".html") or safe_path == "sw.js":
+                    if safe_path == "sw.js":
+                        mime = "application/javascript; charset=utf-8"
+                    inner_self.send_response(200)
+                    inner_self.send_header("Content-Type", mime)
+                    inner_self.send_header("Content-Length", str(len(data)))
+                    inner_self.send_header("Cache-Control", "no-cache")
+                    inner_self.send_header("Vary", "Accept-Encoding")
+                    if gzipped:
+                        inner_self.send_header("Content-Encoding", "gzip")
+                else:
+                    etag = None
+                    last_modified = None
+                    try:
+                        st = os.stat(full_path)
+                        # The variant is part of the validator: the browser
+                        # stores one ETag per URL *per encoding* (this is what
+                        # `Vary` buys), and a shared tag would let a 304 answer
+                        # for a body the client does not have.
+                        etag = f'"{st.st_mtime_ns:x}-{len(data):x}{"-gz" if gzipped else ""}"'
+                        last_modified = time.strftime(
+                            "%a, %d %b %Y %H:%M:%S GMT", time.gmtime(st.st_mtime)
+                        )
+                    except OSError:
+                        pass
+                    if etag is not None and (
+                        inner_self.headers.get("If-None-Match") == etag
+                        or (
+                            last_modified is not None
+                            and inner_self.headers.get("If-Modified-Since") == last_modified
+                        )
+                    ):
+                        inner_self.send_response(304)
+                        inner_self.send_header("ETag", etag)
+                        inner_self.send_header("Cache-Control", cache_control)
+                        inner_self.send_header("Vary", "Accept-Encoding")
+                        inner_self.send_header("Referrer-Policy", "no-referrer")
+                        inner_self.send_header("X-Content-Type-Options", "nosniff")
+                        inner_self.end_headers()
+                        return
+                    inner_self.send_response(200)
+                    inner_self.send_header("Content-Type", mime)
+                    inner_self.send_header("Content-Length", str(len(data)))
+                    inner_self.send_header("Cache-Control", cache_control)
+                    inner_self.send_header("Vary", "Accept-Encoding")
+                    if gzipped:
+                        inner_self.send_header("Content-Encoding", "gzip")
+                    if etag is not None:
+                        inner_self.send_header("ETag", etag)
+                    if last_modified is not None:
+                        inner_self.send_header("Last-Modified", last_modified)
+                # No ACAO:* here: these assets (mobile.html, JS, CSS) carry the
+                # interpolated auth token, so they must never be readable
+                # cross-origin.  Same-origin loads (webview / PWA) don't need
+                # CORS.
+                inner_self.send_header("Referrer-Policy", "no-referrer")
+                inner_self.send_header("X-Content-Type-Options", "nosniff")
+                inner_self.end_headers()
+                with contextlib.suppress(
+                    ConnectionAbortedError, ConnectionResetError, BrokenPipeError
+                ):
+                    inner_self.wfile.write(data)
+
+            def _interpolate_html(self, content: str, is_html: bool = True) -> str:
+                """Replace placeholders in static HTML/JS with runtime values.
+                For HTML files: full interpolation (i18n, token, device info)
+                For other files (JS/CSS): only token interpolation
+                Translations are loaded from JSON locale files in
+                internal/web/static/locales/, falling back to the Python
+                i18n dicts for backward compatibility.
+                """
+                i18n_json = self._load_i18n_translations(cfg)
+                locale = cfg.language if cfg.language in self._available_locales() else "en"
+                locale_code_json = json.dumps(locale, ensure_ascii=False)
+                # The phone page's slice of that table: the sentences it can
+                # ask for by key, and nothing else.  See `MOBILE_I18N_KEYS`.
+                mobile_i18n_json = _mobile_i18n_payload(i18n_json)
+
+                # Always replace token (for cache busting and auth). URL-encode
+                # it so a user-set token with & / " / space / < / > can't break
+                # out of a query string or attribute (default tokens are
+                # already URL-safe and pass through unchanged).
+                content = content.replace("__TOKEN__", urllib.parse.quote(cfg.web_token, safe=""))
+
+                # One-shot factory-reset marker: the host writes it before
+                # restarting so the frontend can clear its browser-side
+                # localStorage (the reset's file deletion can't reach it).
+                # Injected exactly once, then the marker is removed.
+                # Only HTML consumes these markers.  They are one-shot, and the
+                # flags below are interpolated into the HTML branch alone, so
+                # unlinking them while serving a .js or .css file threw the
+                # signal away without anyone acting on it -- and the browser
+                # fetches the page's JS/CSS alongside (sometimes before) the
+                # page, so in practice the reset almost never reached the UI.
+                reset_flag = "false"
+                fresh_flag = "false"
+                try:
+                    from internal.config.config import _config_dir
+
+                    marker = _config_dir() / "factory_reset_pending"
+                    if is_html and marker.exists():
+                        reset_flag = "true"
+                        marker.unlink()
+                    # One-shot web-wizard re-surface.  After a factory reset the
+                    # desktop language picker (gated by cfg.language_chosen) may
+                    # still show while a browser holding a stale
+                    # clipsync_onboarded flag would otherwise not re-run the web
+                    # wizard.  Written alongside the reset marker, so the FIRST
+                    # page load after a reset re-surfaces the wizard exactly
+                    # once; afterwards the browser's own flag governs again.
+                    fresh_marker = _config_dir() / "web_fresh_pending"
+                    if is_html and fresh_marker.exists():
+                        fresh_flag = "true"
+                        fresh_marker.unlink()
+                except Exception:
+                    pass
+
+                # Full interpolation only for HTML files
+                if is_html:
+                    replacements = [
+                        # Escape <, >, & even in the already-serialized i18n
+                        # payload so no translation string can break out of the
+                        # inline <script> block.
+                        #
+                        # What goes in is the phone page's own slice, not the
+                        # catalogue: 1364 keys were travelling to deliver four
+                        # sentences.  `__I18N__` used to carry the whole table
+                        # for a dashboard that no longer exists; no file in
+                        # `static/` contains that placeholder any more, so it
+                        # is gone rather than left to be re-adopted.
+                        ("__CLIPSYNC_I18N_DATA__", _escape_script_json(mobile_i18n_json)),
+                        ("__CLIPSYNC_I18N_LOCALE__", _escape_script_json(locale_code_json)),
+                        ("__DEVICE_ID__", _js_string(cfg.device_id)),
+                        ("__DEVICE_NAME__", _js_string(cfg.device_name)),
+                        # Fresh-install flag (one-shot): after a factory reset
+                        # the web onboarding wizard is gated by a localStorage
+                        # flag the reset can't clear, while the desktop language
+                        # picker is gated by cfg.language_chosen — the two could
+                        # disagree, leaving the user with the language picker but
+                        # no wizard.  This is now driven by a one-shot
+                        # "web_fresh_pending" marker (written at reset time) so
+                        # it injects exactly once and never re-surfaces on every
+                        # refresh/app open (the old cfg.language_chosen proxy
+                        # stayed true forever when no language was ever picked,
+                        # so the wizard showed on EVERY load).
+                        # The fingerprint of the page's own script, so the
+                        # URL changes when the file does and the response can
+                        # be cached for a year instead of revalidated on every
+                        # cold start.  See `_asset_version`.
+                        ("__ASSET_V_FORMAT_JS__", _asset_version("js/format.js")),
+                        ("__FRESH__", fresh_flag),
+                        ("__RESET__", reset_flag),
+                    ]
+                    for placeholder, value in replacements:
+                        if placeholder in content:
+                            content = content.replace(placeholder, value)
+
+                return content
+
+            # ── HTTP method handlers ─────────────────────────────
+
+            def do_OPTIONS(inner_self):  # noqa: N805
+                # A preflight is a browser asking permission to make a
+                # cross-origin request; only this same origin gets one.  The
+                # response names that origin rather than a wildcard, so the
+                # header can never let another site read a token-authenticated
+                # answer.
+                origin = inner_self.headers.get("Origin")
+                if origin and not _origin_matches_host(
+                    origin, inner_self.headers.get("Host", ""), cfg.web_port
+                ):
+                    inner_self.send_response(403)
+                    inner_self.send_header("Content-Length", "0")
+                    inner_self.end_headers()
+                    return
+                inner_self.send_response(204)
+                if origin:
+                    inner_self.send_header("Access-Control-Allow-Origin", origin)
+                inner_self.send_header(
+                    "Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+                )
+                inner_self.send_header(
+                    "Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With"
+                )
+                inner_self.send_header("Access-Control-Max-Age", "86400")
+                inner_self.end_headers()
+
+            def do_GET(inner_self):  # noqa: N805
+                parsed = urllib.parse.urlparse(inner_self.path)
+                path = parsed.path
+                # Collapse path aliases (`//index.html`, `/./index.html`,
+                # `/a//b`) to their canonical form so they route to the same
+                # handler as the exact path — otherwise they fall through to
+                # the CORS-enabled static path that embeds the auth token.
+                path = _canonical_request_path(path)
+                qs = parsed.query
+                query_params = urllib.parse.parse_qs(qs)
+
+                # Companion off → local dashboard only. Browsers (phone/tablet)
+                # opening the dashboard get a friendly page, not raw JSON.
+                if not inner_self._companion_client_ok():
+                    if path.startswith("/api/") or path == "/ws":
+                        inner_self._send_json({"error": "remote access disabled"}, 403)
+                    else:
+                        inner_self._send_companion_disabled_page()
+                    return
+
+                # ── WebSocket upgrade at /ws ─────────────────────
+                if path == "/ws":
+                    # Token validation for WebSocket
+                    if not inner_self._token_ok():
+                        inner_self._send_json({"error": "invalid token"}, 403)
+                        return
+                    # Check for WebSocket upgrade headers
+                    upgrade = inner_self.headers.get("Upgrade", "").lower()
+                    if upgrade == "websocket":
+                        # A WS connection lives as long as the page does, so it
+                        # takes a slot from the WS budget and hands the HTTP one
+                        # straight back.
+                        if not ws_semaphore.acquire(blocking=False):
+                            inner_self._send_json({"error": "too many websocket clients"}, 503)
+                            return
+                        try:
+                            # Build headers dict for ws manager
+                            ws_headers = {}
+                            for key, val in inner_self.headers.items():
+                                ws_headers[key.lower()] = val
+                            # Perform handshake
+                            client = ws_manager.handle_handshake(
+                                inner_self.request, inner_self.client_address, ws_headers
+                            )
+                            if client is None:
+                                inner_self._send_json({"error": "websocket upgrade failed"}, 400)
+                                return
+                            # Past the handshake this is no longer an HTTP
+                            # request: release the HTTP slot before blocking.
+                            inner_self._release_http_slot()
+                            try:
+                                # Enter read loop — blocks until client disconnects
+                                client.serve()
+                            finally:
+                                ws_manager.remove_client(client)
+                            return
+                        finally:
+                            ws_semaphore.release()
+                    else:
+                        inner_self._send_json({"error": "websocket upgrade required"}, 426)
+                        return
+
+                # ── PWA icons and manifest (no token needed for icons) ─
+                if path == "/icon-192.png":
+                    inner_self.send_response(200)
+                    inner_self.send_header("Content-Type", "image/png")
+                    inner_self.send_header("Content-Length", str(len(icon_192)))
+                    inner_self.send_header("Cache-Control", "public, max-age=86400")
+                    inner_self.send_header("Access-Control-Allow-Origin", "*")
+                    inner_self.end_headers()
+                    with contextlib.suppress(OSError):
+                        inner_self.wfile.write(icon_192)
+                    return
+
+                if path == "/icon-512.png":
+                    inner_self.send_response(200)
+                    inner_self.send_header("Content-Type", "image/png")
+                    inner_self.send_header("Content-Length", str(len(icon_512)))
+                    inner_self.send_header("Cache-Control", "public, max-age=86400")
+                    inner_self.send_header("Access-Control-Allow-Origin", "*")
+                    inner_self.end_headers()
+                    with contextlib.suppress(OSError):
+                        inner_self.wfile.write(icon_512)
+                    return
+
+                # ── Token validation for all other paths ─────────
+                if not inner_self._token_ok():
+                    # A phone page / PWA opened before a token regeneration
+                    # still carries the OLD token.  Give it a friendly
+                    # "re-scan the QR" page instead of raw JSON; the SPA's API
+                    # fetches keep the JSON 403 so they can react in code.
+                    if inner_self._wants_html():
+                        inner_self._send_token_expired_page()
+                    else:
+                        inner_self._send_json({"error": "invalid token"}, 403)
+                    return
+
+                # ── Manifest ─────────────────────────────────────
+                if path == "/manifest.json":
+                    # ``id`` and ``scope`` are deliberately token-independent:
+                    # when the user regenerates the web token the start_url /
+                    # icon URLs change, but the app identity stays the same so
+                    # the OS updates the existing PWA instead of installing a
+                    # duplicate launcher icon.  The maskable-purpose entries
+                    # stop Android launchers cropping the icon.
+                    #
+                    # ``?page=mobile`` produces a variant whose start_url / id
+                    # point at that page, so the phone companion page installs
+                    # as its own standalone app.
+                    page = ""
+                    _page_q = query_params.get("page")
+                    if isinstance(_page_q, list) and _page_q and _page_q[0] == "mobile":
+                        page = _page_q[0]
+                    start_path = f"/{page}.html" if page else "/"
+                    # The token is percent-encoded here for the same reason the
+                    # HTML interpolation encodes it (see `_interpolate_html`):
+                    # `_token_ok` compares against exactly one `token` parameter,
+                    # and a user-set token containing `&` or `+` would otherwise
+                    # arrive split in two or with the `+` read as a space -- a
+                    # 403 on the start_url and on every icon, which is a PWA that
+                    # installs and then cannot open.  The default token is
+                    # URL-safe, which is why this only ever bit a custom one.
+                    token = urllib.parse.quote(cfg.web_token or "", safe="")
+                    manifest = {
+                        "name": "ClipSync Web",
+                        "short_name": "ClipSync",
+                        "id": start_path,
+                        "scope": "/",
+                        "start_url": f"{start_path}?token={token}",
+                        "display": "standalone",
+                        "background_color": "#0A0E1E",
+                        "theme_color": "#05060D",
+                        "icons": [
+                            {
+                                "src": f"/icon-192.png?token={token}",
+                                "sizes": "192x192",
+                                "type": "image/png",
+                                "purpose": "any",
+                            },
+                            {
+                                "src": f"/icon-512.png?token={token}",
+                                "sizes": "512x512",
+                                "type": "image/png",
+                                "purpose": "any",
+                            },
+                            {
+                                "src": f"/icon-192.png?token={token}",
+                                "sizes": "192x192",
+                                "type": "image/png",
+                                "purpose": "maskable",
+                            },
+                            {
+                                "src": f"/icon-512.png?token={token}",
+                                "sizes": "512x512",
+                                "type": "image/png",
+                                "purpose": "maskable",
+                            },
+                        ],
+                    }
+                    inner_self._send_json(manifest)
+                    return
+
+                # ── Index page ───────────────────────────────────
+                if path == "/" or path == "/index.html":
+                    # The phone companion is the only UI now — the legacy web
+                    # panel was removed, and `/index.html` is kept as an alias
+                    # so old bookmarks and a cached service worker fallback
+                    # still land on it.
+                    static_index = os.path.join(static_dir, "mobile.html")
+                    try:
+                        with open(static_index, encoding="utf-8") as f:
+                            html = f.read()
+                        html = inner_self._interpolate_html(html)
+                        inner_self._send_html(html)
+                    except OSError:
+                        # A missing/unreadable companion means a broken install.
+                        inner_self._send_json({"error": "page not found"}, 500)
+                    return
+
+                # ── API routes ───────────────────────────────────
+                if path.startswith("/api/"):
+                    if path == "/api/download":
+                        # File download: handled directly for streaming
+                        fname = (query_params.get("file", [""])[0] or "").strip()
+                        if not fname:
+                            inner_self._send_json({"error": "invalid filename"}, 400)
+                            return
+                        # Only a bare filename is allowed: no path separators
+                        # and no drive-relative names (e.g. "C:evil" on Windows
+                        # is drive-relative and could escape the upload dir).
+                        if os.path.basename(fname) != fname or ":" in fname:
+                            inner_self._send_json({"error": "invalid filename"}, 400)
+                            return
+                        # Defense-in-depth: resolve and re-confine against the
+                        # upload dir (also guards symlinks inside it).
+                        from internal.web.api.security import confine_path
+
+                        safe = confine_path(
+                            os.path.join(_server._upload_dir, fname), _server._upload_dir
+                        )
+                        if safe is None:
+                            inner_self._send_json({"error": "invalid filename"}, 400)
+                            return
+                        inner_self._send_file(str(safe))
+                        return
+
+                    if path == "/api/chat/download":
+                        # Chat file download: stream a received file whose
+                        # saved_path lives inside the chat receive dir.
+                        transfer_id = (query_params.get("transfer_id", [""])[0] or "").strip()
+                        if not transfer_id:
+                            inner_self._send_json({"error": "transfer_id required"}, 400)
+                            return
+                        if chat_mgr is None:
+                            inner_self._send_json({"error": "chat unavailable"}, 503)
+                            return
+                        from internal.web.api.chat import find_saved_path
+
+                        saved_path = find_saved_path(chat_mgr, transfer_id)
+                        if not saved_path:
+                            inner_self._send_json({"error": "not found"}, 404)
+                            return
+                        # Defense-in-depth: confine against the ChatManager's
+                        # actual receive dir — chat files land there, and it
+                        # follows live receive-dir changes independently of the
+                        # web upload dir — so a token holder can never stream a
+                        # file from elsewhere on the host.
+                        from internal.web.api.security import confine_path
+
+                        safe = None
+                        chat_receive_root = getattr(chat_mgr, "_receive_dir", None)
+                        if chat_receive_root is not None:
+                            safe = confine_path(saved_path, chat_receive_root)
+                        if safe is None:
+                            # Fall back to the web upload root(s) for older
+                            # files received before the last receive-dir change
+                            # (still confined to that root).
+                            safe = confine_path(saved_path, _get_upload_dir(cfg))
+                        if safe is None and upload_dir:
+                            safe = confine_path(saved_path, upload_dir)
+                        if safe is None:
+                            inner_self._send_json({"error": "invalid filename"}, 400)
+                            return
+                        inner_self._send_file(str(safe))
+                        return
+
+                    # Delegate to routes module
+                    status, content_type, body_bytes = api_routes.dispatch(
+                        method="GET",
+                        path=path,
+                        query_params=query_params,
+                        body=b"",
+                        cfg=cfg,
+                        history=history,
+                        sync_mgr=sync_mgr,
+                        get_connected_ids=get_connected_ids,
+                        get_discovered=get_discovered_peers,
+                        on_nav_url=on_nav_url,
+                        on_forward_file=on_forward_file,
+                        upload_dir=_server._upload_dir,
+                        dialog_mgr=self._dialog_mgr,
+                        get_overview_data=get_overview_data,
+                        on_device_action=on_device_action,
+                        on_device_test=on_device_test,
+                        on_transfer_action=on_transfer_action,
+                        on_get_transfers=on_get_transfers,
+                        on_speed_test_start=on_speed_test_start,
+                        on_speed_test_poll=on_speed_test_poll,
+                        on_window_close=on_window_close,
+                        on_toggle_discovery=on_toggle_discovery,
+                        on_toggle_visibility=on_toggle_visibility,
+                        get_relay_state=get_relay_state,
+                        get_current_relay_broker=get_current_relay_broker,
+                        get_resolved_hashes=get_resolved_hashes,
+                        get_pending_pairings=get_pending_pairings,
+                        get_reconnect_states=get_reconnect_states,
+                        enc_mgr=enc_mgr,
+                        on_open_file=on_open_file,
+                        on_open_folder=on_open_folder,
+                        on_restart=on_restart,
+                        on_reset_dedup=on_reset_dedup,
+                        get_certs=get_certs,
+                        get_diagnostics=get_diagnostics,
+                        on_diagnostics_request=on_diagnostics_request,
+                        on_update_download=on_update_download,
+                        on_update_status=on_update_status,
+                        on_update_open_folder=on_update_open_folder,
+                        chat_mgr=chat_mgr,
+                        get_chat_devices=get_chat_devices,
+                        chat_send_fn=chat_send_fn,
+                        chat_start_session=chat_start_session,
+                        get_chat_muted=get_chat_muted,
+                        set_chat_muted=set_chat_muted,
+                        on_history_change=on_history_change,
+                        on_favorites_change=on_favorites_change,
+                    )
+                    inner_self.send_response(status)
+                    inner_self.send_header("Content-Type", content_type)
+                    inner_self.send_header("Cache-Control", "no-cache")
+                    inner_self._send_allow_origin()
+                    inner_self.end_headers()
+                    with contextlib.suppress(OSError):
+                        inner_self.wfile.write(body_bytes)
+                    return
+
+                # ── Static file serving ─────────────────────────
+                # /sw.js is served here (correct application/javascript MIME +
+                # Cache-Control from _serve_static), so PWA registration works
+                # in any secure context (https or localhost).  On plain-HTTP
+                # LAN access browsers refuse to register a service worker at
+                # all — that is a platform limitation of the SW API, not a
+                # server one; the manifest + icons are still served with the
+                # right MIME types so install works where secure contexts do.
+                serve_path = path if path != "/" else "/mobile.html"
+                inner_self._serve_static(serve_path)
+
+            def do_POST(inner_self):  # noqa: N805
+                parsed = urllib.parse.urlparse(inner_self.path)
+                path = parsed.path
+                # Mirror do_GET: normalize path aliases before route matching.
+                path = _canonical_request_path(path)
+                qs = parsed.query
+                query_params = urllib.parse.parse_qs(qs)
+
+                # Companion off → local dashboard only (LAN/phones get 403).
+                if not inner_self._companion_client_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "remote access disabled"}, 403)
+                    return
+
+                if not inner_self._write_origin_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "cross-origin request refused"}, 403)
+                    return
+
+                if not inner_self._token_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "invalid token"}, 403)
+                    return
+
+                body = _read_request_body(inner_self)
+
+                # ── File upload: handled directly (multipart) ────
+                if path == "/api/upload":
+                    # Resolve the receive dir at request time so phone uploads
+                    # follow the configured file_receive_dir.  Use a distinct
+                    # local name so the closure `upload_dir` (used by the other
+                    # /api routes below) is not shadowed into an unbound local.
+                    request_upload_dir = _get_upload_dir(cfg)
+                    content_type = inner_self.headers.get("Content-Type", "")
+                    if "multipart" not in content_type:
+                        inner_self._send_json(
+                            {"ok": False, "error": "expect multipart/form-data"}, 400
+                        )
+                        return
+                    # _read_request_body returns b"" for bodies over the cap,
+                    # which would surface as a confusing "no file field".  Check
+                    # the declared size first and reject it explicitly.
+                    try:
+                        content_length = int(inner_self.headers.get("Content-Length") or 0)
+                    except (ValueError, TypeError):
+                        content_length = 0
+                    if content_length > _MAX_BODY_BYTES:
+                        # Body not consumed — close the connection rather than
+                        # leave unread bytes for the next request on this socket.
+                        inner_self.close_connection = True
+                        # 413, and not 200 with ok:false: no caller could tell
+                        # the difference by status code, so a client had to
+                        # parse the body to learn an upload had been refused.
+                        inner_self._send_json(
+                            {
+                                "ok": False,
+                                "error": T(
+                                    "web.upload_too_large", limit=_MAX_BODY_BYTES // (1024 * 1024)
+                                ),
+                            },
+                            413,
+                        )
+                        return
+                    # A short read means the connection dropped mid-upload —
+                    # the buffer below cannot be valid multipart, so reject it
+                    # explicitly instead of parsing garbage into a partial file.
+                    truncated = _check_declared_length(body, content_length)
+                    if truncated:
+                        inner_self.close_connection = True
+                        inner_self._send_json({"ok": False, "error": truncated}, 400)
+                        return
+                    try:
+                        fields = _parse_multipart(body, content_type)
+                    except _MultipartError as exc:
+                        inner_self._send_json({"ok": False, "error": str(exc)}, 400)
+                        return
+                    file_field = fields.get("file")
+                    if not file_field:
+                        inner_self._send_json({"ok": False, "error": "no file field"}, 400)
+                        return
+                    fname, fdata = file_field
+                    if not fname:
+                        fname = "uploaded_file"
+                    target_device = ""
+                    target_field = fields.get("device_id")
+                    if target_field:
+                        target_device = target_field[1].decode("utf-8", errors="replace")
+                    # purpose=chat: a nearby-chat file send.  Stage the file in
+                    # a temp dir (never the received-files dir) and skip the
+                    # receive notification / sound / Files record so a chat
+                    # attachment does not masquerade as an inbound transfer.
+                    purpose = ""
+                    purpose_field = fields.get("purpose")
+                    if purpose_field:
+                        purpose = purpose_field[1].decode("utf-8", errors="replace").strip()
+                    if not purpose:
+                        purpose = (query_params.get("purpose", [""])[0] or "").strip()
+                    is_chat_upload = purpose == "chat"
+                    if is_chat_upload:
+                        upload_target = api_routes._chat_tmp_dir()
+                    else:
+                        upload_target = request_upload_dir
+                    # Sanitize filename
+                    safe_name = _sanitize_upload_filename(fname)
+                    # Create the destination atomically.  The old
+                    # os.path.exists() loop followed by open(dest, "wb") was a
+                    # TOCTOU: two uploads racing on the same filename (phone and
+                    # laptop, or a double-tap on Send) both saw the name as free
+                    # and the second write silently destroyed the first file.
+                    # O_CREAT|O_EXCL makes the kernel arbitrate -- the loser gets
+                    # EEXIST and tries the next candidate name.  O_BINARY (a
+                    # no-op off Windows) keeps os.open from newline-translating.
+                    base, ext = os.path.splitext(safe_name)
+                    _excl_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+                    fd = None
+                    counter = 0
+                    while fd is None:
+                        candidate = safe_name if counter == 0 else f"{base} ({counter}){ext}"
+                        dest = os.path.join(upload_target, candidate)
+                        try:
+                            fd = os.open(dest, _excl_flags, 0o644)
+                        except FileExistsError:
+                            counter += 1
+                            if counter > 999:
+                                logger.warning("Web upload: no free name for %s", safe_name)
+                                inner_self._send_json(
+                                    {"ok": False, "error": "could not save file"}, 400
+                                )
+                                return
+                        except (OSError, ValueError) as exc:
+                            logger.warning("Web upload create failed: %s", exc)
+                            inner_self._send_json(
+                                {"ok": False, "error": "could not save file"}, 400
+                            )
+                            return
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(fdata)
+                    except (OSError, ValueError) as exc:
+                        logger.warning("Web upload write failed: %s", exc)
+                        # Don't leave the empty file we just claimed behind.
+                        with contextlib.suppress(OSError):
+                            os.unlink(dest)
+                        inner_self._send_json({"ok": False, "error": "could not save file"}, 400)
+                        return
+                    logger.info("Web upload: %s (%d bytes) -> %s", safe_name, len(fdata), dest)
+                    if is_chat_upload:
+                        # A chat staging upload must not trigger the received-
+                        # file notification / sound / Files record — and this
+                        # branch is what keeps it out of the `elif` below, so
+                        # it is not a placeholder for code that was never
+                        # written.  Removing it forwards every staged chat
+                        # file to a peer.
+                        pass
+                    elif target_device and target_device != cfg.device_id and on_forward_file:
+                        # The forward callback returns False when the target
+                        # peer is not connected; surface that instead of
+                        # reporting a success the file never reached.
+                        try:
+                            forwarded = on_forward_file(dest, target_device)
+                        except Exception:
+                            logger.debug("on_forward_file callback failed", exc_info=True)
+                            forwarded = False
+                        if not forwarded:
+                            # The upload never reached its target — don't leave
+                            # a stray file the user didn't ask to keep locally.
+                            with contextlib.suppress(OSError):
+                                os.unlink(dest)
+                            inner_self._send_json(
+                                {"ok": False, "error": T("web.upload_peer_offline")},
+                                200,
+                            )
+                            return
+                    else:
+                        # Arrived locally: record it as a received file and let
+                        # the app notify + play a sound.
+                        try:
+                            if on_web_upload is not None:
+                                on_web_upload(os.path.basename(dest), len(fdata), dest)
+                        except Exception:
+                            logger.debug("on_web_upload callback failed", exc_info=True)
+                    if is_chat_upload:
+                        # The temp path is handed straight to /api/chat/file.
+                        inner_self._send_json(
+                            {
+                                "ok": True,
+                                "name": os.path.basename(dest),
+                                "size": len(fdata),
+                                "path": str(dest),
+                            }
+                        )
+                    else:
+                        inner_self._send_json(
+                            {"ok": True, "name": os.path.basename(dest), "size": len(fdata)}
+                        )
+                    return
+
+                # ── Delegate other API routes ────────────────────
+                if path.startswith("/api/"):
+                    status, content_type, body_bytes = api_routes.dispatch(
+                        method="POST",
+                        path=path,
+                        query_params=query_params,
+                        body=body,
+                        cfg=cfg,
+                        history=history,
+                        sync_mgr=sync_mgr,
+                        get_connected_ids=get_connected_ids,
+                        get_discovered=get_discovered_peers,
+                        on_nav_url=on_nav_url,
+                        on_forward_file=on_forward_file,
+                        upload_dir=_server._upload_dir,
+                        dialog_mgr=self._dialog_mgr,
+                        get_overview_data=get_overview_data,
+                        on_device_action=on_device_action,
+                        on_device_test=on_device_test,
+                        on_transfer_action=on_transfer_action,
+                        on_get_transfers=on_get_transfers,
+                        on_speed_test_start=on_speed_test_start,
+                        on_speed_test_poll=on_speed_test_poll,
+                        on_window_close=on_window_close,
+                        on_toggle_discovery=on_toggle_discovery,
+                        on_toggle_visibility=on_toggle_visibility,
+                        on_settings_change=on_settings_change,
+                        on_show_web_qr=on_show_web_qr,
+                        on_send_url=on_send_url,
+                        get_resolved_hashes=get_resolved_hashes,
+                        get_pending_pairings=get_pending_pairings,
+                        get_reconnect_states=get_reconnect_states,
+                        enc_mgr=enc_mgr,
+                        on_open_file=on_open_file,
+                        on_open_folder=on_open_folder,
+                        on_restart=on_restart,
+                        on_reset_dedup=on_reset_dedup,
+                        get_certs=get_certs,
+                        get_diagnostics=get_diagnostics,
+                        on_diagnostics_request=on_diagnostics_request,
+                        on_update_download=on_update_download,
+                        on_update_status=on_update_status,
+                        on_update_open_folder=on_update_open_folder,
+                        chat_mgr=chat_mgr,
+                        get_chat_devices=get_chat_devices,
+                        chat_send_fn=chat_send_fn,
+                        chat_start_session=chat_start_session,
+                        on_history_change=on_history_change,
+                        on_favorites_change=on_favorites_change,
+                        # Chat's mute route is a POST, and the four dispatch
+                        # call sites each spell their own argument list: this
+                        # one left both out, so `set_chat_muted` arrived as
+                        # None and /api/chat/mute answered 503 on every call.
+                        get_chat_muted=get_chat_muted,
+                        set_chat_muted=set_chat_muted,
+                    )
+                    inner_self.send_response(status)
+                    inner_self.send_header("Content-Type", content_type)
+                    inner_self.send_header("Cache-Control", "no-cache")
+                    inner_self._send_allow_origin()
+                    inner_self.end_headers()
+                    with contextlib.suppress(OSError):
+                        inner_self.wfile.write(body_bytes)
+                    return
+
+                inner_self._send_json({"error": "not found"}, 404)
+
+            def do_DELETE(inner_self):  # noqa: N805
+                parsed = urllib.parse.urlparse(inner_self.path)
+                path = parsed.path
+                # Mirror do_GET/do_POST: normalize path aliases before routing.
+                path = _canonical_request_path(path)
+                qs = parsed.query
+                query_params = urllib.parse.parse_qs(qs)
+
+                # Companion off → local dashboard only (mirror do_POST).
+                if not inner_self._companion_client_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "remote access disabled"}, 403)
+                    return
+
+                if not inner_self._write_origin_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "cross-origin request refused"}, 403)
+                    return
+
+                if not inner_self._token_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "invalid token"}, 403)
+                    return
+
+                body = _read_request_body(inner_self)
+
+                if path.startswith("/api/"):
+                    status, content_type, body_bytes = api_routes.dispatch(
+                        method="DELETE",
+                        path=path,
+                        query_params=query_params,
+                        body=body,
+                        cfg=cfg,
+                        history=history,
+                        sync_mgr=sync_mgr,
+                        get_connected_ids=get_connected_ids,
+                        get_discovered=get_discovered_peers,
+                        on_nav_url=on_nav_url,
+                        on_forward_file=on_forward_file,
+                        upload_dir=_server._upload_dir,
+                        dialog_mgr=self._dialog_mgr,
+                        get_overview_data=get_overview_data,
+                        on_device_action=on_device_action,
+                        on_device_test=on_device_test,
+                        on_transfer_action=on_transfer_action,
+                        on_get_transfers=on_get_transfers,
+                        on_speed_test_start=on_speed_test_start,
+                        on_speed_test_poll=on_speed_test_poll,
+                        on_window_close=on_window_close,
+                        on_toggle_discovery=on_toggle_discovery,
+                        on_toggle_visibility=on_toggle_visibility,
+                        on_history_change=on_history_change,
+                        on_favorites_change=on_favorites_change,
+                    )
+                    inner_self.send_response(status)
+                    inner_self.send_header("Content-Type", content_type)
+                    inner_self.send_header("Cache-Control", "no-cache")
+                    inner_self._send_allow_origin()
+                    inner_self.end_headers()
+                    with contextlib.suppress(OSError):
+                        inner_self.wfile.write(body_bytes)
+                    return
+
+                inner_self._send_json({"error": "not found"}, 404)
+
+            def do_PATCH(inner_self):  # noqa: N805
+                parsed = urllib.parse.urlparse(inner_self.path)
+                path = parsed.path
+                # Mirror do_GET/do_POST: normalize path aliases before routing.
+                path = _canonical_request_path(path)
+                qs = parsed.query
+                query_params = urllib.parse.parse_qs(qs)
+
+                # Companion off → local dashboard only (mirror do_POST).
+                if not inner_self._companion_client_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "remote access disabled"}, 403)
+                    return
+
+                if not inner_self._write_origin_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "cross-origin request refused"}, 403)
+                    return
+
+                if not inner_self._token_ok():
+                    inner_self._drain_rejected_body()
+                    inner_self._send_json({"error": "invalid token"}, 403)
+                    return
+
+                body = _read_request_body(inner_self)
+
+                if path.startswith("/api/"):
+                    status, content_type, body_bytes = api_routes.dispatch(
+                        method="PATCH",
+                        path=path,
+                        query_params=query_params,
+                        body=body,
+                        cfg=cfg,
+                        history=history,
+                        sync_mgr=sync_mgr,
+                        get_connected_ids=get_connected_ids,
+                        get_discovered=get_discovered_peers,
+                        on_nav_url=on_nav_url,
+                        on_forward_file=on_forward_file,
+                        upload_dir=_server._upload_dir,
+                        dialog_mgr=self._dialog_mgr,
+                        get_overview_data=get_overview_data,
+                        on_device_action=on_device_action,
+                        on_device_test=on_device_test,
+                        on_transfer_action=on_transfer_action,
+                        on_get_transfers=on_get_transfers,
+                        on_speed_test_start=on_speed_test_start,
+                        on_speed_test_poll=on_speed_test_poll,
+                        on_window_close=on_window_close,
+                        on_toggle_discovery=on_toggle_discovery,
+                        on_toggle_visibility=on_toggle_visibility,
+                        on_history_change=on_history_change,
+                        on_favorites_change=on_favorites_change,
+                    )
+                    inner_self.send_response(status)
+                    inner_self.send_header("Content-Type", content_type)
+                    inner_self.send_header("Cache-Control", "no-cache")
+                    inner_self._send_allow_origin()
+                    inner_self.end_headers()
+                    with contextlib.suppress(OSError):
+                        inner_self.wfile.write(body_bytes)
+                    return
+
+                inner_self._send_json({"error": "not found"}, 404)
+
+            # PUT is the same operation as PATCH for the one route that offers it
+            # (``/api/favorites``, an upsert), and the CORS header has always
+            # advertised it.  ``BaseHTTPRequestHandler`` answers an unimplemented
+            # method with a bare 501 before any of this runs, so clients that
+            # read the advertisement and followed it -- and the route module,
+            # which dispatches on ``("PATCH", "PUT")`` -- were answered by the
+            # HTTP layer instead of by the handler.
+            def do_PUT(inner_self):  # noqa: N805
+                return inner_self.do_PATCH()
+
+        # ── Create and start the HTTP server ──────────────────────
+        try:
+            self._httpd = _CompanionHTTPServer((host, port), _Handler)
+        except OSError as e:
+            logger.warning("Web server failed to bind %s:%d: %s", host, port, e)
+            return False
+
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever, daemon=True, name="web-server"
+        )
+        self._thread.start()
+        self._device_stop.clear()
+        self._device_thread = threading.Thread(
+            target=self._device_broadcast_loop, daemon=True, name="web-devices"
+        )
+        self._device_thread.start()
+        logger.info("Web companion listening on http://%s:%d", self._get_lan_ip(), port)
+        if not getattr(cfg, "web_token", ""):
+            # Intentional, but it has to be visible: with no token every GET
+            # and the WebSocket are open to anything on the LAN that can reach
+            # this port -- clipboard history, the file listing and downloads,
+            # the log.  Writes stay gated on a same-origin, IP-literal browser
+            # source (see ``_empty_token_origin_is_local``); reads do not,
+            # because the phone companion is the reason the token can be
+            # cleared at all.  Saying so is what lets a user who cleared it on
+            # an untrusted network notice.
+            logger.warning(
+                "Web token is empty — read access (history, files, log) and the "
+                "WebSocket are unauthenticated for anyone who can reach port %d",
+                port,
+            )
+        return True
+
+    def _device_broadcast_loop(self) -> None:
+        """Push the device page when its rendered snapshot changes.
+
+        Legacy compared the same fingerprint every few seconds and broadcast
+        ``devices_updated`` on any change, so the phone's device page converged
+        without optimistic client state or a manual refresh.  A broadcast with
+        no attached client is dropped by the WS manager.
+        """
+        previous = ""
+        while not self._device_stop.wait(self.DEVICE_BROADCAST_INTERVAL):
+            if self._httpd is None:
+                return
+            try:
+                fingerprint = self._ws_manager.devices_fingerprint()
+            except Exception:
+                logger.debug("Device snapshot fingerprint failed", exc_info=True)
+                continue
+            if fingerprint and fingerprint != previous:
+                previous = fingerprint
+                try:
+                    self._ws_manager.broadcast_devices()
+                except Exception:
+                    logger.debug("Device broadcast failed", exc_info=True)
+
+    def stop(self) -> None:
+        self._device_stop.set()
+        device_thread = self._device_thread
+        self._device_thread = None
+        if device_thread is not None:
+            device_thread.join(self.DEVICE_BROADCAST_INTERVAL)
+        if self._httpd is not None:
+            logger.info("Stopping web companion")
+            self._ws_manager.shutdown()
+            self._httpd.shutdown()
+            # Release the listening socket now rather than at GC — without
+            # server_close() a restart can hit EADDRINUSE on Linux (or
+            # double-listen on Windows) while lingering handlers hold it.
+            try:
+                self._httpd.server_close()
+            except OSError:
+                logger.debug("Web server server_close failed", exc_info=True)
+            self._httpd = None
+        self._thread = None
+        # A shutdown inside `_FIREWALL_SCRIPT_SWEEP_DELAY` would otherwise let
+        # the daemon timer die with the process and leave an elevated script
+        # on disk.  Run the deferred cleanups now.
+        sweep_pending_removals()
+
+    # ── Network helpers ──────────────────────────────────────────
+
+    @staticmethod
+    def _get_lan_ip() -> str:
+        """Return the best LAN IP reachable from other devices on the local network.
+
+        Prefers 192.168.x.x over 10.x.x.x over 172.16-31.x.x (VPN range).
+        Falls back to the OS-chosen default route if no private IP is found.
+        """
+        all_ips = WebServer.get_all_ips()
+        if not all_ips:
+            return "127.0.0.1"
+
+        def _priority(ip):
+            if ip.startswith("192.168."):
+                return 0
+            if ip.startswith("10."):
+                return 1
+            if ip.startswith("172."):
+                try:
+                    second = int(ip.split(".")[1])
+                    if 16 <= second <= 31:
+                        return 2
+                except ValueError:
+                    pass
+            return 3
+
+        all_ips.sort(key=_priority)
+        return all_ips[0]
+
+    @staticmethod
+    def get_all_ips() -> list[str]:
+        # Single source: discovery.get_all_local_addresses (private-filtered,
+        # deduplicated across UDP-route / hostname / FQDN).  Keep the default-
+        # route UDP fallback so a host with no private address still returns
+        # something reachable instead of an empty list.
+        ips = list(get_all_local_addresses())
+        if not ips:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.settimeout(0)
+                s.connect(("10.254.254.254", 1))
+                default_ip = s.getsockname()[0]
+                s.close()
+                if default_ip and default_ip not in ips:
+                    ips.append(default_ip)
+            except Exception:
+                if "127.0.0.1" not in ips:
+                    ips.append("127.0.0.1")
+        return ips

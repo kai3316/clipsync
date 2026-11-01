@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-device"
+description = "Enables the restore_device command without any pre-configured scope."
+commands.allow = ["restore_device"]
+
+[[permission]]
+identifier = "deny-restore-device"
+description = "Denies the restore_device command without any pre-configured scope."
+commands.deny = ["restore_device"]

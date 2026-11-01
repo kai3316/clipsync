@@ -1,0 +1,1399 @@
+"""Relay send ledger: ACK window, retry budget, triggers and queue caps.
+
+The legacy host tracked every relayed clipboard frame in an in-memory ledger
+(sent → delivered / failed, with the offline queue mirrored in as queued) and
+retried the persisted queue on relay-online, on any frame from that peer and
+on a 60s timer.  These tests pin that behavior on the sidecar runtime: what
+the UI reports, when a frame is retried, and that a tracked send is never
+dropped silently.  The later sections cover chat/file frames riding the same
+ledger, which channel a paired peer is reached on and who may speak on it, and
+the relay secret offered over the LAN.
+"""
+
+
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from internal.application.events import EventJournal
+from internal.clipboard.format import ClipboardContent, ContentType, SyncMessage
+from internal.config.config import Config, PeerInfo
+from internal.infrastructure.persistence.relay_delivery import RelayDeliveryQueue
+from internal.infrastructure.runtime.internet_pairing import InternetPairingService
+from internal.infrastructure.runtime.lan import LanRuntime
+from internal.infrastructure.runtime.relay_delivery import (
+    ACK_WINDOW,
+    MAX_RETRIES,
+    RelayDelivery,
+)
+from internal.protocol.codec import (
+    decode_message,
+    encode_binary_chunk,
+    encode_frame,
+    encode_message,
+)
+from internal.security.keyexchange import generate_keypair
+from internal.sync.nearby_chat import ChatManager
+from internal.transport.relay import (
+    decode_netpair_code,
+    derive_key,
+    derive_topic,
+    frame_limit_for,
+    generate_netpair_code,
+    generate_netpair_secret,
+    netpair_device_tag,
+    netpair_key,
+    netpair_topic,
+    pack_envelope,
+)
+from tests.sidecar.test_lan_runtime import (
+    Clipboard,
+    Discovery,
+    History,
+    Monitor,
+    Transport,
+    events_named,
+    identity,
+)
+
+
+class Clock:
+    """Injectable wall clock so the ACK window and cadences are deterministic."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def delivery_rig(tmp_path):
+    """A ledger over a real (isolated) queue file with a scripted broker."""
+    published: dict[str, list] = {}
+    events: list[tuple] = []
+    state = SimpleNamespace(ok=True, clock=Clock(), events=events, published=published)
+
+    def publish(frame, peer_id):
+        published.setdefault(peer_id, []).append(frame)
+        return state.ok
+
+    def notify(peer_id, msg_id, status, content_hash, kind, session_id):
+        events.append((peer_id, msg_id, status, kind, session_id))
+
+    queue = RelayDeliveryQueue(tmp_path / "relay_pending.json")
+    state.queue = queue
+    state.path = queue.path
+    state.unit = RelayDelivery(queue, publish, notify, clock=state.clock)
+    return state
+
+
+def statuses(unit, peer_id=""):
+    return [row["status"] for row in unit.status(peer_id)["items"]]
+
+
+# ------------------------------------------------------------------ the ledger
+
+
+def test_a_published_send_waits_for_its_ack_then_is_delivered(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.unit.note_sent("peer", "m1", "hash-1", "hello")
+
+    assert statuses(d.unit) == ["sent"]
+    assert d.events == [("peer", "m1", "sent", "clipboard", "")]
+
+    d.unit.note_ack("peer", "m1")
+    assert statuses(d.unit) == ["delivered"]
+    assert d.events[-1] == ("peer", "m1", "delivered", "clipboard", "")
+
+
+def test_a_send_inside_its_window_is_not_failed(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.unit.note_sent("peer", "m1", "hash-1")
+
+    d.clock.advance(ACK_WINDOW - 1)
+    d.unit.scan()
+    assert statuses(d.unit) == ["sent"]
+
+    d.clock.advance(2)
+    d.unit.scan()
+    assert statuses(d.unit) == ["failed"]
+    assert [event[2] for event in d.events] == ["sent", "failed"]
+
+
+def test_content_already_delivered_is_not_reported_failed(tmp_path):
+    """A redelivery of confirmed content is delivered, not failed."""
+    d = delivery_rig(tmp_path)
+    d.unit.note_sent("peer", "m1", "same-hash")
+    d.unit.note_ack("peer", "m1")
+
+    # Same content again: it is delivered on arrival, without waiting.
+    d.unit.note_sent("peer", "m2", "same-hash")
+    assert d.events[-1] == ("peer", "m2", "delivered", "clipboard", "")
+
+    # A second copy that was still in flight when the first one was acked
+    # passes its window as delivered too, instead of being reported failed.
+    d.unit.note_sent("peer", "m3", "other-hash")
+    d.unit.note_sent("peer", "m4", "other-hash")
+    d.unit.note_ack("peer", "m3")
+    d.clock.advance(ACK_WINDOW + 1)
+    d.unit.scan()
+    assert set(statuses(d.unit)) == {"delivered"}
+
+
+# --------------------------------------------------------------- offline queue
+
+
+def test_a_failed_publish_is_queued_on_disk(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.ok = False
+    d.unit.enqueue("peer", "m1", "hash-1", "hello", b"frame-bytes")
+
+    assert statuses(d.unit) == ["queued"]
+    assert d.unit.status()["pending"] == 1
+    assert "m1" in d.path.read_text(encoding="utf-8")
+    assert d.events == [("peer", "m1", "queued", "clipboard", "")]
+
+
+def test_queued_rows_come_back_as_queued_after_a_restart(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.unit.enqueue("peer", "m1", "hash-1", "hello", b"frame")
+
+    reopened = RelayDelivery(
+        RelayDeliveryQueue(d.path), lambda frame, peer_id: True, lambda *args: None
+    )
+    assert statuses(reopened) == ["queued"]
+    assert reopened.status()["items"][0]["content_hash"] == "hash-1"
+
+
+def test_a_successful_retry_moves_the_row_back_to_sent(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.ok = False
+    d.unit.enqueue("peer", "m1", "hash-1", "", b"frame")
+    d.ok = True
+
+    d.unit.retry_peer("peer")
+    assert d.published["peer"] == [b"frame"]
+    assert statuses(d.unit) == ["sent"]
+    assert d.unit.status()["pending"] == 0
+    assert [event[2] for event in d.events] == ["queued", "sent"]
+
+
+def test_the_retry_budget_fails_the_row_once_and_drops_it(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.ok = False
+    d.unit.enqueue("peer", "m1", "hash-1", "", b"frame")
+
+    for _ in range(MAX_RETRIES + 2):
+        d.unit.retry_peer("peer")
+
+    assert len(d.published["peer"]) == MAX_RETRIES
+    assert statuses(d.unit) == ["failed"]
+    assert d.unit.status()["pending"] == 0
+    # A send at its budget is failed once, not re-reported on every sweep.
+    assert [event[2] for event in d.events] == ["queued", "failed"]
+
+
+def test_an_unreadable_payload_is_failed_rather_than_retried_forever(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.ok = False
+    d.unit.enqueue("peer", "m1", "hash-1", "", b"frame")
+    d.queue._peers["peer"]["m1"]["frame_b64"] = "A"  # invalid base64 length
+
+    d.unit.retry_peer("peer")
+    assert statuses(d.unit) == ["failed"]
+    assert d.unit.status()["pending"] == 0
+
+
+def test_the_queue_cap_reports_the_evicted_send_as_failed(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.queue.max_per_peer = 2
+    d.ok = False
+    for index in range(3):
+        d.unit.enqueue("peer", f"m{index}", f"hash-{index}", "", b"frame")
+
+    assert d.unit.status()["pending"] == 2
+    assert ("peer", "m0", "failed", "clipboard", "") in d.events
+
+
+def test_clearing_a_peer_drops_its_sends_and_its_queue(tmp_path):
+    d = delivery_rig(tmp_path)
+    d.ok = False
+    d.unit.enqueue("peer", "m1", "hash-1", "", b"frame")
+    d.ok = True
+    d.unit.note_sent("peer", "m2", "hash-2")
+
+    d.unit.clear_peer("peer")
+    assert d.unit.status() == {"pending": 0, "items": []}
+    assert d.unit.counts() == {"peers": {}}
+    assert "frame" not in d.path.read_text(encoding="utf-8")
+
+
+# ------------------------------------------------- the runtime's delivery path
+
+
+def clipboard_message(msg_id):
+    """A locally captured clipboard message, as the monitor emits it."""
+    return SimpleNamespace(
+        content=ClipboardContent({ContentType.TEXT: b"relayed hello"}), msg_id=msg_id
+    )
+
+
+class FakeRelay:
+    """Stand-in for RelayTransport: records what the runtime handed the broker."""
+
+    def __init__(self):
+        self.published = []
+        self.state = "online"
+        self.ok = True
+
+    def publish(self, frame, topic, key, qos=0):
+        self.published.append((frame, topic, key, qos))
+        return self.ok
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def refresh_channels(self):
+        pass
+
+
+@pytest.fixture
+def relay_rig(tmp_path, monkeypatch):
+    """A started LAN runtime with a fake relay channel to a netpair peer."""
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(
+        device_id="local",
+        device_name="Local",
+        encryption_enabled=False,
+        retry_capture_enabled=False,
+        sync_debounce=0.01,
+    )
+    pairing = identity("local")
+    pairing.add_peer("remote", "Remote", identity("remote").get_identity().certificate_pem,
+                     paired=True)
+    config.peers["remote"] = PeerInfo(device_id="remote", device_name="Remote", paired=True)
+    config.netpair_secrets = {"remote": "netpair-secret"}
+    transport, discovery = Transport(), Discovery()
+    clipboard, history, events, saves = Clipboard(), History(), EventJournal(), []
+    runtime = LanRuntime(
+        config,
+        pairing,
+        None,
+        history,
+        events,
+        lambda: saves.append(None),
+        monitor=Monitor(),
+        reader=clipboard,
+        writer=clipboard,
+        transport=transport,
+        discovery=discovery,
+        open_url=lambda _url: None,
+    )
+    runtime.REFRESH_INTERVAL = 60
+    runtime.start()
+    try:
+        # Attached after start so no real MQTT client is built; the delivery
+        # path only needs publish()/state.
+        config.internet_sync_enabled = True
+        runtime.relay = relay = FakeRelay()
+        yield SimpleNamespace(runtime=runtime, config=config, relay=relay, events=events,
+                              queue=runtime.delivery_queue, transport=transport,
+                              history=history)
+    finally:
+        transport.stop_result = True
+        assert runtime.stop()
+
+
+def test_a_relayed_clipboard_send_is_ledgered_and_acked(relay_rig):
+    runtime, relay = relay_rig.runtime, relay_rig.relay
+    assert runtime._on_local_sync(clipboard_message("m1"))
+    assert len(relay.published) == 1
+    row = runtime.relay_delivery_status()["items"][0]
+    assert (row["msg_id"], row["status"], row["kind"]) == ("m1", "sent", "clipboard")
+
+    # The peer's receipt settles the row and unblocks the device badge.
+    runtime._receive_relay(
+        encode_frame({"msg_type": "relay_ack", "msg_id": "m1"}, source_device="remote")
+    )
+    assert runtime.relay_delivery_status()["items"][0]["status"] == "delivered"
+    assert runtime.delivery_counts() == {"peers": {}}
+
+
+def test_a_failed_relay_publish_is_queued_and_flushed_by_a_peer_frame(relay_rig):
+    runtime, relay, queue = relay_rig.runtime, relay_rig.relay, relay_rig.queue
+    relay.ok = False
+
+    assert runtime._on_local_sync(
+        clipboard_message("m2")
+    )
+    row = runtime.relay_delivery_status()["items"][0]
+    assert row["status"] == "queued"
+    assert runtime.delivery_counts() == {"peers": {"remote": 1}}
+    assert queue.path.exists()
+
+    # Any frame from that peer proves it reachable — the queue flushes.
+    relay.ok = True
+    runtime._receive_relay(
+        encode_frame({"msg_type": "nav_url", "url": "https://example.com"},
+                     source_device="remote")
+    )
+    assert runtime.relay_delivery_status()["items"][0]["status"] == "sent"
+    assert runtime.delivery_counts() == {"peers": {}}
+    assert len(relay.published) == 2
+
+    # The same queue, settled by the receipt the LAN sent.  The receiver emits
+    # one for every frame it accepts on that link, and reading receipts only off
+    # the relay left a row the LAN had already delivered to time out as 未送达
+    # for a clip the peer was holding: the relay copy arrives as a duplicate,
+    # the receiver's dedup drops it, and a dropped frame earns no ack at all.
+    relay.ok = False
+    assert runtime._on_local_sync(clipboard_message("m6"))
+    assert runtime.delivery_counts() == {"peers": {"remote": 1}}
+    runtime._receive(
+        decode_message(
+            encode_frame({"msg_type": "relay_ack", "msg_id": "m6"}, source_device="remote")
+        ),
+        "remote",
+    )
+    assert {row["msg_id"]: row["status"] for row in runtime.relay_delivery_status()["items"]}[
+        "m6"
+    ] == "delivered"
+    assert runtime.delivery_counts() == {"peers": {}}
+
+
+def test_going_online_flushes_every_queued_send(relay_rig):
+    runtime, relay = relay_rig.runtime, relay_rig.relay
+    relay.ok = False
+    assert runtime._on_local_sync(clipboard_message("m3"))
+
+    relay.ok = True
+    runtime._relay_state_changed("online")
+    assert runtime.delivery_counts() == {"peers": {}}
+    assert events_named(relay_rig.events, "relay.state.changed") == [{"state": "online"}]
+    assert events_named(relay_rig.events, "relay.delivery.changed")[-1]["status"] == "sent"
+
+
+def test_a_peer_reachable_over_both_channels_is_published_to_once(relay_rig):
+    """A netpair peer that is also relay-enrolled gets one frame, not two."""
+    relay_rig.config.peer_relay_secrets = {"remote": "enrolled-secret"}
+    runtime, relay = relay_rig.runtime, relay_rig.relay
+
+    assert runtime._on_local_sync(clipboard_message("m4"))
+    assert len(relay.published) == 1
+    assert len(runtime.relay_delivery_status()["items"]) == 1
+
+
+def test_unpairing_a_peer_drops_its_pending_sends(relay_rig):
+    runtime, relay, queue = relay_rig.runtime, relay_rig.relay, relay_rig.queue
+    relay.ok = False
+    assert runtime._on_local_sync(clipboard_message("m5"))
+    assert runtime.delivery_counts() == {"peers": {"remote": 1}}
+
+    runtime.unpair_device("remote")
+    assert runtime.relay_delivery_status() == {"pending": 0, "items": []}
+    assert runtime.delivery_counts() == {"peers": {}}
+    assert "m5" not in queue.path.read_text(encoding="utf-8")
+
+
+def test_a_confirmed_hello_reports_the_peer_paired_and_online(relay_rig):
+    """The hello is the first proof the peer is up, so the panel hears it now."""
+    runtime, events = relay_rig.runtime, relay_rig.events
+    runtime._receive_relay(
+        encode_frame(
+            {
+                "msg_type": "netpair_hello",
+                "peer_id": netpair_device_tag(runtime.config.device_id),
+                "device_name": "Remote",
+                # A confirmed hello with no DH half is refused (see the
+                # identity/key guard tests below), so this one carries a key.
+                "dh_pub": generate_keypair()[1],
+                "ts": time.time(),
+            },
+            source_device="remote",
+        ),
+        netpair_topic("netpair-secret"),
+    )
+
+    rows = events_named(events, "netpair.peer.changed")
+    assert len(rows) == 1
+    assert rows[0]["peer_id"] == "remote"
+    assert rows[0]["name"] == "Remote"
+    assert rows[0]["status"] == "paired"
+    assert rows[0]["online"] is True
+    assert abs(rows[0]["last_seen"] - time.time()) < 30
+
+
+# ----------------------------------------- netpair hello identity/key guards
+#
+# The hello carries the sender's DH public key, and the channel it arrived on
+# proves only that the sender knows the code-derived secret: anyone who cracked
+# the 35-bit code holds that.  These tests pin the guards that stop such a frame
+# from moving a confirmed pair to another source, replacing its pinned key, or
+# stripping the key so the channel falls back to the code-derived one.
+
+
+def netpair_rig(monkeypatch, tmp_path, pinned=True):
+    """A real service over an isolated config with ``remote`` confirmed.
+
+    The service's own X25519 private half is set, so nothing here reaches the
+    disk through ``ensure_netpair_dh_key``; every save the service makes is
+    counted instead.
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    secret = generate_netpair_secret()
+    config.netpair_secrets = {"remote": secret}
+    if pinned:
+        config.netpair_peer_keys = {"remote": generate_keypair()[1]}
+    saves = []
+    service = InternetPairingService(config, lambda: saves.append(None))
+    return SimpleNamespace(
+        config=config,
+        service=service,
+        secret=secret,
+        saves=saves,
+        pinned=config.netpair_peer_keys.get("remote", ""),
+        topic=netpair_topic(secret),
+    )
+
+
+def test_a_confirmed_peer_cannot_replace_its_pinned_dh_key(monkeypatch, tmp_path):
+    rig = netpair_rig(monkeypatch, tmp_path)
+    attacker_public = generate_keypair()[1]
+    assert attacker_public != rig.pinned
+    before = rig.service.netpair_keys_for_topic(rig.topic)
+
+    result = rig.service.handle_hello(
+        "remote", rig.config.device_id, "Remote", rig.topic, dh_pub=attacker_public
+    )
+
+    assert result == {
+        "accepted": False,
+        "role": "",
+        "peer_id": "",
+        "secret": "",
+        "reply": False,
+    }
+    assert rig.config.netpair_peer_keys == {"remote": rig.pinned}
+    assert rig.config.netpair_secrets == {"remote": rig.secret}
+    assert rig.service.topic_identity(rig.topic) == "remote"
+    assert rig.service.netpair_keys_for_topic(rig.topic) == before
+    assert rig.saves == []
+
+
+@pytest.mark.parametrize("dh_pub", ["", "not-a-key"])
+@pytest.mark.parametrize("source_device", ["remote", "somebody-else"])
+def test_an_empty_or_invalid_dh_pub_cannot_downgrade_a_confirmed_channel(
+    monkeypatch, tmp_path, source_device, dh_pub
+):
+    rig = netpair_rig(monkeypatch, tmp_path)
+    before = rig.service.netpair_keys_for_topic(rig.topic)
+    # The agreed key first, the code key after it only so the handshake can be
+    # read; losing the first entry is the downgrade this test refuses.
+    assert len(before) == 2
+
+    result = rig.service.handle_hello(
+        source_device, rig.config.device_id, "Remote", rig.topic, dh_pub=dh_pub
+    )
+
+    assert result["accepted"] is False
+    assert rig.service.netpair_keys_for_topic(rig.topic) == before
+    assert rig.config.netpair_peer_keys == {"remote": rig.pinned}
+    assert rig.config.netpair_secrets == {"remote": rig.secret}
+    assert rig.saves == []
+
+
+def test_a_confirmed_secret_cannot_move_to_a_different_source_device(monkeypatch, tmp_path):
+    rig = netpair_rig(monkeypatch, tmp_path)
+
+    result = rig.service.handle_hello(
+        "somebody-else",
+        rig.config.device_id,
+        "Remote",
+        rig.topic,
+        dh_pub=generate_keypair()[1],
+    )
+
+    assert result["accepted"] is False
+    assert set(rig.config.netpair_secrets) == {"remote"}
+    assert rig.config.netpair_secrets["remote"] == rig.secret
+    assert "somebody-else" not in rig.config.netpair_peer_keys
+    assert rig.service.topic_identity(rig.topic) == "remote"
+    assert rig.saves == []
+
+
+def test_a_duplicate_hello_repeating_the_pinned_key_is_accepted(monkeypatch, tmp_path):
+    """A repeated hello cannot move a channel, and is how a reply is re-sent.
+
+    The confirmation reply is a single best-effort publish, so a repeated
+    hello has to stay a no-op on state while a generator is still allowed to
+    answer it again.  Re-saving the unchanged state is the acceptable part.
+    """
+    rig = netpair_rig(monkeypatch, tmp_path)
+    before = rig.service.netpair_keys_for_topic(rig.topic)
+
+    enterer = rig.service.handle_hello(
+        "remote", rig.config.device_id, "Remote", rig.topic, dh_pub=rig.pinned
+    )
+    generator = rig.service.handle_hello(
+        "remote",
+        netpair_device_tag(rig.config.device_id),
+        "Remote",
+        rig.topic,
+        dh_pub=rig.pinned,
+    )
+
+    assert enterer == {
+        "accepted": True,
+        "role": "enterer",
+        "peer_id": "remote",
+        "secret": rig.secret,
+        "reply": False,
+    }
+    assert generator["accepted"] is True
+    assert generator["role"] == "generator" and generator["reply"] is True
+    assert rig.config.netpair_peer_keys == {"remote": rig.pinned}
+    assert rig.config.netpair_secrets == {"remote": rig.secret}
+    assert rig.service.netpair_keys_for_topic(rig.topic) == before
+    assert len(rig.saves) == 2
+
+
+def test_a_confirmed_pair_without_a_pin_adopts_a_valid_key(monkeypatch, tmp_path):
+    rig = netpair_rig(monkeypatch, tmp_path, pinned=False)
+    new_public = generate_keypair()[1]
+
+    result = rig.service.handle_hello(
+        "remote", rig.config.device_id, "Remote", rig.topic, dh_pub=new_public
+    )
+
+    assert result["accepted"] is True
+    assert rig.config.netpair_peer_keys == {"remote": new_public}
+
+
+def test_a_confirmed_hello_without_a_valid_key_is_rejected(monkeypatch, tmp_path):
+    """A confirmed channel does not fall back to the code key by omission.
+
+    The confirmation reply to a code this machine entered is the one exception
+    (an old build cannot send a key at all); every other hello on a confirmed
+    channel must carry a usable key or the pairing is left as it was.
+    """
+    rig = netpair_rig(monkeypatch, tmp_path, pinned=False)
+    before = rig.service.netpair_keys_for_topic(rig.topic)
+
+    result = rig.service.handle_hello(
+        "remote",
+        netpair_device_tag(rig.config.device_id),
+        "Remote",
+        rig.topic,
+        dh_pub="",
+    )
+
+    assert result["accepted"] is False
+    assert rig.config.netpair_peer_keys == {}
+    assert rig.config.netpair_secrets == {"remote": rig.secret}
+    assert rig.service.netpair_keys_for_topic(rig.topic) == before
+    assert rig.saves == []
+
+
+@pytest.mark.parametrize("dh_pub", ["", "not-a-key"])
+def test_a_generated_code_still_pairs_with_a_legacy_peer(monkeypatch, tmp_path, dh_pub):
+    """Peers that predate the key agreement send no usable ``dh_pub``."""
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    config.internet_sync_enabled = True
+    saves = []
+    service = InternetPairingService(config, lambda: saves.append(None))
+    code = service.generate()["code"]
+    _, secret = decode_netpair_code(code)
+    entering = "b1b2b3b4b5b6"
+
+    result = service.handle_hello(
+        entering,
+        netpair_device_tag(config.device_id),
+        "Enterer",
+        netpair_topic(secret),
+        dh_pub=dh_pub,
+    )
+
+    assert result == {
+        "accepted": True,
+        "role": "generator",
+        "peer_id": entering,
+        "secret": secret,
+        "reply": True,
+    }
+    assert config.netpair_secrets == {entering: secret}
+    assert config.netpair_peer_keys == {}
+    assert service.status()["generated_code"] is None
+
+
+def test_a_waited_entry_still_re_keys_with_a_legacy_peer(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    peer_id = "b1b2b3b4b5b6"
+    secret = generate_netpair_secret()
+    tag = netpair_device_tag(peer_id)
+    config.netpair_secrets = {tag: secret}
+    service = InternetPairingService(config, lambda: None)
+
+    result = service.handle_hello(
+        peer_id, config.device_id, "Generator", netpair_topic(secret), dh_pub=""
+    )
+
+    assert result == {
+        "accepted": True,
+        "role": "enterer",
+        "peer_id": peer_id,
+        "secret": secret,
+        "reply": False,
+    }
+    assert config.netpair_secrets == {peer_id: secret}
+    assert config.netpair_peer_keys == {}
+
+
+def test_a_legacy_confirmation_reply_still_completes_a_waited_pairing(
+    monkeypatch, tmp_path
+):
+    """The reply an old build sends after a code we entered carries no key.
+
+    The runtime re-keys the provisional tag to the sender's real id before the
+    hello reaches this service (``note_relay_source``), so by the time it is
+    handled the owner looks confirmed.  With no pinned key the empty ``dh_pub``
+    is the legacy reply rather than a downgrade: there is no agreed key for it
+    to strip.
+    """
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    generator = "a1a2a3a4a5a6"
+    secret = generate_netpair_secret()
+    tag = netpair_device_tag(generator)
+    config.netpair_secrets = {tag: secret}
+    service = InternetPairingService(config, lambda: None)
+
+    # What the runtime's inbound path does before handing over the hello.
+    moved = service.note_relay_source(generator)
+    result = service.handle_hello(
+        generator, config.device_id, "Generator", netpair_topic(secret), dh_pub=""
+    )
+
+    assert moved is True
+    assert result == {
+        "accepted": True,
+        "role": "enterer",
+        "peer_id": generator,
+        "secret": secret,
+        "reply": False,
+    }
+    assert config.netpair_secrets == {generator: secret}
+    assert config.netpair_peer_keys == {}
+
+
+def test_a_new_code_cannot_silently_replace_an_existing_devices_pinned_key(
+    monkeypatch, tmp_path
+):
+    """A provisional channel must not become a way to re-key a confirmed id."""
+    monkeypatch.setenv("CLIPSYNC_CONFIG_DIR", str(tmp_path))
+    config = Config(device_id="local", device_name="Local", encryption_enabled=False)
+    config.netpair_dh_key = generate_keypair()[0]
+    config.internet_sync_enabled = True
+    pinned = generate_keypair()[1]
+    config.netpair_peer_keys = {"remote": pinned}
+    service = InternetPairingService(config, lambda: None)
+    code = service.generate()["code"]
+    _, secret = decode_netpair_code(code)
+
+    result = service.handle_hello(
+        "remote",
+        netpair_device_tag(config.device_id),
+        "Remote",
+        netpair_topic(secret),
+        dh_pub=generate_keypair()[1],
+    )
+
+    assert result["accepted"] is False
+    assert config.netpair_peer_keys == {"remote": pinned}
+    assert config.netpair_secrets == {}
+
+
+# ------------------------------------------------- chat and files over the relay
+#
+# Legacy mirrored chat frames to the public relay, but only when the LAN send
+# had already failed — chat has no content dedup, so an unconditional mirror
+# would append every message twice to a dual-connected peer.  The receiving end
+# feeds relay frames through the same router LAN frames use, which is what makes
+# a conversation with an internet-only paired device work at all.
+
+
+def chat_frame(kind, msg_id, **payload):
+    return encode_frame({"msg_type": kind, **payload}, msg_id=msg_id, source_device="local")
+
+
+def test_a_clip_the_lan_carried_is_not_mirrored_to_the_broker(relay_rig):
+    """The mirror is a fallback, not a second copy of every clip.
+
+    Every clip used to leave this machine for whatever public broker the peer
+    was enrolled on, whether or not that peer was on the same desk.  The relay
+    now carries only what the LAN could not hand over, which is the rule chat
+    already followed (``test_a_chat_frame_takes_the_relay_only_when_the_lan_send_fails``);
+    ``test_a_relayed_clipboard_send_is_ledgered_and_acked`` is the other
+    direction, a peer the LAN cannot reach at all.
+    """
+    runtime, relay, transport = relay_rig.runtime, relay_rig.relay, relay_rig.transport
+
+    transport.connected.add("remote")
+    assert runtime._on_local_sync(clipboard_message("m7"))
+
+    # The clip went out to the paired peer on the LAN ...
+    carried = [m for _pid, m in transport.sent if getattr(m, "msg_type", "") == "clipboard"]
+    assert [m.msg_id for m in carried] == ["m7"]
+    # ... so the broker was never handed it, and nothing waits on a receipt
+    # that no one is going to send: a clip carried locally is settled by the
+    # transport-level receipt, not by a relay_ack.
+    assert relay.published == []
+    assert runtime.relay_delivery_status()["items"] == []
+
+
+def test_a_chat_frame_takes_the_relay_only_when_the_lan_send_fails(relay_rig):
+    runtime, relay, transport = relay_rig.runtime, relay_rig.relay, relay_rig.transport
+    send = runtime._chat_send_fn("remote")
+    frame_bytes = chat_frame("chat_text", "c1", session_id="s1", text="hi")
+
+    transport.connected.add("remote")
+    assert send(frame_bytes) is True
+    assert relay.published == []  # LAN delivered it — no duplicate mirror
+
+    transport.connected.discard("remote")
+    assert send(frame_bytes) is True  # the relay carried it instead
+    assert [route[3] for route in relay.published] == [0]
+
+
+def test_a_lan_delivered_chat_frame_does_not_wait_for_a_relay_ack(relay_rig):
+    """A frame the local link carried is delivered; there is nothing to ack.
+
+    It used to arm a relay ledger row anyway, on the reasoning that an
+    internet-reachable peer acks every chat frame.  With the relay off (or the
+    peer unreachable over it) that row could never be settled, and the message
+    the peer was reading turned "未送达" when the ledger expired it.
+    """
+    runtime, transport = relay_rig.runtime, relay_rig.transport
+    transport.connected.add("remote")
+    assert runtime._chat_send_fn("remote")(
+        chat_frame("chat_text", "c2", session_id="s1", text="hello there")
+    )
+
+    assert runtime.relay_delivery_status()["items"] == []
+
+
+def test_a_relayed_chat_frame_waits_for_its_relay_ack(relay_rig):
+    """A send that needed the relay is the one the receipt belongs to."""
+    runtime = relay_rig.runtime
+    assert runtime._chat_send_fn("remote")(
+        chat_frame("chat_text", "c3", session_id="s1", text="hello there")
+    )
+
+    row = runtime.relay_delivery_status()["items"][0]
+    assert (row["msg_id"], row["kind"], row["session_id"], row["preview"]) == (
+        "c3", "chat_text", "s1", "hello there"
+    )
+    assert row["status"] == "sent"
+
+    runtime._receive_relay(
+        encode_frame({"msg_type": "relay_ack", "msg_id": "c3"}, source_device="remote")
+    )
+    assert runtime.relay_delivery_status()["items"][0]["status"] == "delivered"
+
+
+def test_an_internet_only_peer_gets_relay_safe_file_chunks(relay_rig):
+    runtime, transport = relay_rig.runtime, relay_rig.transport
+    # Not connected, but paired over the relay: every byte has to fit an
+    # envelope, so chat must chunk relay-safe.  There is no cap on the file
+    # itself — the relay limits one *message*, and chunking already cuts to it.
+    send = runtime._chat_send_fn("remote")
+    # The chunk follows the configured ceiling rather than a constant, and the
+    # shipped ceiling is a 64 KiB relay, so the default chunk is the small one
+    # (RELAY_CHUNK_SIZE is the measured partner of a 256 KiB relay, below).
+    assert send.chunk_size == ChatManager.relay_chunk_for(
+        runtime.config.relay_max_message_bytes
+    )
+    assert send.chunk_size < ChatManager.RELAY_CHUNK_SIZE
+    # An internet transfer also asks the receiver to confirm every chunk -- the
+    # relay drops a burst it has already acknowledged, and nothing on the wire
+    # reports it -- and carries the pace to offer them at.
+    assert send.chunk_ack is True
+    assert send.relay_rate == runtime.config.relay_max_bytes_per_second
+    assert not hasattr(send, "internet_cap")
+
+    # ...and it has to be a number the relay will actually take.  Asserting it
+    # equals the constant does not say that, and did not: it was 224 KiB, every
+    # chunk was dropped at the broker, and this case passed throughout.  The cap
+    # is on the *envelope*, and an envelope is 4/3 of the frame it carries plus
+    # the tag and shell around it, so the check that matters is the one the
+    # sender runs — the frame this chunk size produces, through the packer, at
+    # the limit the configured ceiling gives the transport (relay.py derives
+    # ``_max_frame`` from the same setting).
+    key = derive_key("a-secret", "another-secret")
+    tid = "0123456789abcdef0123456789abcdef"
+    limit = frame_limit_for(runtime.config.relay_max_message_bytes)
+    assert pack_envelope(
+        encode_binary_chunk(tid, 0, 1, b"x" * send.chunk_size), key, time.time(),
+        max_frame=limit,
+    )
+    # And the size that was wrong, on the same path, is refused rather than
+    # published for the broker to drop.
+    with pytest.raises(ValueError):
+        pack_envelope(
+            encode_binary_chunk(tid, 0, 1, b"x" * (224 * 1024)), key, time.time(),
+            max_frame=limit,
+        )
+
+    # A relay with a larger ceiling moves the chunk with it: the size the
+    # setting names is the size the sender has to cut to, and what proves the
+    # cut fits is the same packer the publish path runs.  At the 256 KiB this
+    # pair was measured against, the chunk is the constant itself.
+    relay_rig.config.relay_max_message_bytes = 256 * 1024
+    big = runtime._chat_send_fn("remote")
+    assert big.chunk_size == ChatManager.RELAY_CHUNK_SIZE
+    assert pack_envelope(
+        encode_binary_chunk(tid, 0, 1, b"x" * big.chunk_size), key, time.time(),
+        max_frame=frame_limit_for(256 * 1024),
+    )
+    assert big.chunk_size > send.chunk_size
+
+    # A LAN link coming up does not take the tag away.  The chunk size is fixed
+    # when the offer is made — the receiver slices by the one it was told — and
+    # the route is chosen per frame, so a peer that left the LAN mid-transfer
+    # handed the relay the 256 KiB frames it refuses, failing a transfer that had
+    # already delivered most of itself.  Sizing for the relay from the start
+    # costs a LAN-connected peer a little framing and makes the route change
+    # work.
+    transport.connected.add("remote")
+    assert runtime._chat_send_fn("remote").chunk_size == big.chunk_size
+
+    # A peer with no relay credential is untouched: it has no fallback to size
+    # for, and keeps the LAN wire format peers already speak.
+    assert not hasattr(runtime._chat_send_fn("no-relay-credential"), "chunk_size")
+
+
+def test_a_relayed_file_chunk_rides_at_qos_one(relay_rig):
+    """QoS 1 buys redelivery of a dropped chunk; the receiver dedups by index."""
+    runtime, relay = relay_rig.runtime, relay_rig.relay
+    send = runtime._chat_send_fn("remote")
+
+    assert send(chat_frame("file_chunk", "f1", session_id="s1", index=0, data=""))
+    assert relay.published[-1][3] == 1
+    assert send(chat_frame("chat_text", "c3", session_id="s1", text="after"))
+    assert relay.published[-1][3] == 0
+
+
+def test_a_relayed_chat_invite_reaches_the_chat_layer_and_is_acked(relay_rig):
+    """The invitation opens the conversation, and the peer answers it back.
+
+    Two frames leave this side: the transport-level ``relay_ack`` for the
+    envelope, and -- because a session is now live the moment the invitation
+    lands -- the ``chat_accept`` that tells the opener which id won.  They are
+    separate obligations and the relay carries both.
+    """
+    runtime, relay = relay_rig.runtime, relay_rig.relay
+    runtime._receive_relay(
+        encode_frame(
+            {
+                "msg_type": "chat_invite",
+                "session_id": "abcdef0123456789",
+                "from_name": "Remote",
+                "fingerprint_short": "ABCD-EFGH",
+            },
+            msg_id="i1",
+            source_device="remote",
+        )
+    )
+
+    sessions = runtime.chat_sessions()["sessions"]
+    assert [(session["status"], session["peer_id"]) for session in sessions] == [
+        ("active", "remote")
+    ]
+    out = [decode_message(route[0]) for route in relay.published]
+    assert [message.msg_type for message in out] == ["chat_accept", "relay_ack"]
+    assert out[0]._raw_payload["session_id"] == "abcdef0123456789"
+    assert out[1]._raw_payload["msg_id"] == "i1"
+
+
+def test_a_pairing_frame_over_the_relay_is_refused(relay_rig):
+    """Trust is earned on the pinned LAN handshake, never on a shared secret."""
+    runtime, relay = relay_rig.runtime, relay_rig.relay
+    runtime._receive_relay(
+        encode_frame({"msg_type": "pairing_unpair"}, msg_id="p1", source_device="remote")
+    )
+
+    assert runtime.config.peers["remote"].paired is True
+    assert events_named(relay_rig.events, "pairing.resolved") == []
+    assert relay.published == []
+
+
+# ------------------------------------ the channels, and who may speak on them
+#
+# A relay topic is derived from a secret both ends already hold, so the channel
+# — never a frame's self-declared sender — is what names the peer that may
+# speak on it.  Legacy bound the frame to its channel in the same three cases;
+# the sidecar routed on the claimed source alone, which let one paired peer have
+# everything it sent filed against a second device that holds a pairing it never
+# used.
+
+
+def relay_clip(text, source_device, msg_id="relay-1"):
+    """A clipboard frame as it arrives off the relay: content, and a claimed sender."""
+    return encode_message(
+        SyncMessage(
+            ClipboardContent({ContentType.TEXT: text.encode()}), msg_id, source_device
+        )
+    )
+
+
+def test_a_frame_is_attributed_to_the_owner_of_the_channel_it_arrived_on(relay_rig):
+    runtime, config, history = relay_rig.runtime, relay_rig.config, relay_rig.history
+    # A second device, paired in its own right, so the claim below is one that
+    # would otherwise be believed and reachable both.
+    config.netpair_secrets["d1d2d3d4d5d6"] = "second-secret"
+    config.peers["d1d2d3d4d5d6"] = PeerInfo(
+        device_id="d1d2d3d4d5d6", device_name="Second", paired=True
+    )
+
+    runtime._receive_relay(
+        relay_clip("filed against the wrong device", "d1d2d3d4d5d6"),
+        netpair_topic("netpair-secret"),
+    )
+
+    assert [item.source_device for item in history.items] == ["remote"]
+    assert history.items[-1].transport == "relay"
+
+
+def test_any_frame_from_a_paired_peer_is_what_keeps_it_online(relay_rig):
+    """A hello is not the only frame a peer sends, and not its last.
+
+
+    Only the handshake touched the last-seen stamp, so a peer that synced all
+    afternoon still read 离线 ninety seconds after the hello it happened to have
+    sent — the badge contradicted the traffic arriving under it.
+    """
+    runtime, service = relay_rig.runtime, relay_rig.runtime.internet_pairing
+    assert service.status()["peers"][0]["online"] is False
+
+    runtime._receive_relay(relay_clip("still here", "remote"), netpair_topic("netpair-secret"))
+
+    peer = service.status()["peers"][0]
+    assert (peer["peer_id"], peer["online"]) == ("remote", True)
+
+
+def test_a_frame_on_a_waiting_code_is_only_taken_from_the_device_that_owns_it(relay_rig):
+    """A provisional channel vouches for a 4-char tag, and for nothing else.
+
+
+    The same frame *proves* the pairing when its source does hash to that tag.
+    The confirmation hello is a single best-effort publish, so a lost one used
+    to leave the tag-keyed entry permanent: a phantom "paired" device with no
+    name and no real id, which could be sent to and never answered.
+    """
+    runtime, config, history = relay_rig.runtime, relay_rig.config, relay_rig.history
+    relay = relay_rig.relay
+    service = runtime.internet_pairing
+    # The fixture hands the runtime a relay after start, so the service needs it
+    # too: ``enter`` publishes its hello through its own reference, and refuses
+    # to write a pairing whose hello cannot go out.
+    service.attach_relay(relay)
+    entering = "b1b2b3b4b5b6"
+    secret = generate_netpair_secret()
+    tag = netpair_device_tag(entering)
+    assert service.enter(generate_netpair_code(entering, secret)) == {
+        "peer_id": tag,
+        "waiting": True,
+    }
+    assert [row["peer_id"] for row in service.status()["waiting"]] == [tag]
+    published = len(relay.published)
+
+    # Some other device on that channel.  The code carried the tag and nothing
+    # else, so a source that does not hash to it is not who the code was for.
+    impostor = "c1c2c3c4c5c6"
+    assert netpair_device_tag(impostor) != tag
+    runtime._receive_relay(
+        relay_clip("not from the peer", impostor, msg_id="impostor"),
+        netpair_topic(secret),
+    )
+    assert history.items == []
+    assert config.netpair_secrets[tag] == secret
+    # Nothing answered it either: it is dropped before anything routes, so
+    # no receipt goes back to a device that never held the channel.
+    assert len(relay.published) == published
+
+    # The peer itself, and the wait turns into the device it really is.
+    runtime._receive_relay(
+        relay_clip("from the peer", entering, msg_id="from-peer"),
+        netpair_topic(secret),
+    )
+    assert set(config.netpair_secrets) == {"remote", entering}
+    assert config.netpair_secrets[entering] == secret
+    assert service.status()["waiting"] == []
+    assert [item.source_device for item in history.items] == [entering]
+    # ...and this one earns the receipt, addressed to the frame it came from.
+    receipts = [decode_message(item[0]) for item in relay.published[published:]]
+    assert [frame.msg_type for frame in receipts] == ["relay_ack"]
+    assert receipts[0]._raw_payload["msg_id"] == "from-peer"
+
+
+def test_a_wait_that_outlived_a_restart_is_still_shown_and_still_removable(relay_rig):
+    """The one entry legacy deleted behind the user's back, and this stack does not.
+
+
+    A code entered here whose partner never answered is persisted under the
+    provisional 4-char tag it was addressed to, and legacy swept every such
+    entry when it loaded the config -- ``_netpair_drop_provisional``, on the
+    grounds that the entry is "a few-seconds-long placeholder" the UI "cannot
+    show or remove".  Neither half holds now: the row this stack shows *is* the
+    wait, and Cancel is how it ends.  So a wait that outlives the process is
+    still a wait -- listed, still listening on the channel the code derives,
+    and still removable -- and that is a deliberate divergence, pinned here.
+    """
+    config, service = relay_rig.config, relay_rig.runtime.internet_pairing
+    entering = "b1b2b3b4b5b6"
+    secret = generate_netpair_secret()
+    tag = netpair_device_tag(entering)
+    # What the run before this one left on disk.  The clock it was entered at
+    # and the name it was waiting under went with that process, so the row can
+    # say who it waits for and not how long -- which is why the age is optional.
+    config.netpair_secrets[tag] = secret
+
+    assert [
+        (row["peer_id"], row["name"], row["since"]) for row in service.status()["waiting"]
+    ] == [(tag, "", None)]
+    # ...and it is still not a device: the tag cannot be sent to, and listing
+    # it among the peers showed a phantom that could not be removed either.
+    assert [peer["peer_id"] for peer in service.status()["peers"]] == ["remote"]
+    assert netpair_topic(secret) in service.channels()
+
+    assert service.unpair(tag) == {"ok": True}
+    assert config.netpair_secrets == {"remote": "netpair-secret"}
+    assert service.status()["waiting"] == []
+    assert netpair_topic(secret) not in service.channels()
+
+
+def test_a_hello_still_completes_a_wait_that_outlived_a_restart(relay_rig):
+    """What keeping the entry buys: the answer can still arrive.
+
+
+    Legacy's sweep made this impossible -- a pairing a code began could not be
+    completed after a restart, and the code had to be typed again on both
+    machines.  Here the entry is still on the channel it derives, so the late
+    hello is accepted, the tag is re-keyed to the device that really answered,
+    and the wait becomes the device it was always going to be.
+    """
+    config, runtime = relay_rig.config, relay_rig.runtime
+    service = runtime.internet_pairing
+    entering = "b1b2b3b4b5b6"
+    secret = generate_netpair_secret()
+    tag = netpair_device_tag(entering)
+    config.netpair_secrets[tag] = secret
+
+    runtime._receive_relay(
+        encode_frame(
+            {
+                "msg_type": "netpair_hello",
+                "peer_id": config.device_id,
+                "device_name": "Answered",
+            },
+            source_device=entering,
+        ),
+        netpair_topic(secret),
+    )
+
+    assert set(config.netpair_secrets) == {"remote", entering}
+    assert config.netpair_secrets[entering] == secret
+    assert service.status()["waiting"] == []
+    assert entering in [peer["peer_id"] for peer in service.status()["peers"]]
+
+
+def test_the_relay_channels_cover_both_ways_a_peer_can_be_paired(relay_rig):
+    """Subscribing and publishing are the same list, and it was half of one.
+
+
+    The netpair family was there and the LAN-enrolled family was not, so a
+    device paired over the local network and currently away from it was
+    published *to* and never heard *from*: its frames arrived on a topic this
+    machine had not subscribed to, which reads exactly like a peer that is
+    simply not there.
+    """
+    config, service = relay_rig.config, relay_rig.runtime.internet_pairing
+    config.peer_relay_secrets = {"enrolled": "enrolled-secret"}
+    config.peers["enrolled"] = PeerInfo(
+        device_id="enrolled", device_name="Enrolled", paired=True
+    )
+    config.relay_secret = "our-relay-secret"
+
+    channels = service.channels()
+
+    # A netpair channel carries a *list* of acceptable keys — the agreed one
+    # first, the code-derived one after it — because the handshake hello is
+    # what carries the public halves the agreed key is made from.  With no
+    # peer key stored there is nothing to agree with yet, so the list is the
+    # code-derived key alone.
+    assert channels[netpair_topic("netpair-secret")] == [netpair_key("netpair-secret", "")]
+    assert channels[derive_topic("our-relay-secret", "enrolled-secret")] == derive_key(
+        "our-relay-secret", "enrolled-secret"
+    )
+    # This machine's own secret is what both ends of the derivation need, so it
+    # is one per machine and never regenerated under a live channel.
+    assert service.ensure_relay_secret() == "our-relay-secret"
+
+
+def test_the_relay_secret_is_generated_once_and_persisted(relay_rig):
+    config, service = relay_rig.config, relay_rig.runtime.internet_pairing
+    config.peer_relay_secrets = {"enrolled": "enrolled-secret"}
+    config.peers["enrolled"] = PeerInfo(
+        device_id="enrolled", device_name="Enrolled", paired=True
+    )
+    assert config.relay_secret == ""
+
+    secret = service.ensure_relay_secret()
+
+    assert secret and config.relay_secret == secret
+    assert service.ensure_relay_secret() == secret
+    assert derive_topic(secret, "enrolled-secret") in service.channels()
+
+
+def test_a_peer_reachable_both_ways_is_listened_for_on_one_channel(relay_rig):
+    """The same peer on the same machine is one channel, not two.
+
+
+    A netpair entry wins over the enrolled one, as it does on the publish side:
+    a machine answering on one topic twice would have to dedup its own frames.
+    """
+    config, service = relay_rig.config, relay_rig.runtime.internet_pairing
+    config.peer_relay_secrets = {"remote": "enrolled-secret"}
+    config.relay_secret = "our-relay-secret"
+
+    channels = service.channels()
+
+    assert netpair_topic("netpair-secret") in channels
+    assert derive_topic("our-relay-secret", "enrolled-secret") not in channels
+
+
+def test_the_netpair_key_follows_the_one_password_the_user_sets(relay_rig):
+    """``netpair_password`` is a fallback, never the source of truth.
+
+
+    A config loaded from 1.x carries its passphrase in ``encryption_password``
+    and nothing in ``netpair_password``, so a key derived from the latter alone
+    is the same key only while something has mirrored it.  The two ends of a
+    pairing then derive different keys from the same code and every frame on
+    that channel fails to decrypt: the pairing reports success and nothing ever
+    syncs, with no error anywhere.
+    """
+    config, service = relay_rig.config, relay_rig.runtime.internet_pairing
+
+    config.encryption_password = "the-users-password"
+    config.netpair_password = ""
+    assert service.netpair_password() == "the-users-password"
+    assert service.channels()[netpair_topic("netpair-secret")] == [
+        netpair_key("netpair-secret", "the-users-password")
+    ]
+
+    # The older field is still honoured where there is no encryption password to
+    # prefer, so a passphrase saved before the two were merged keeps working.
+    config.encryption_password = ""
+    config.netpair_password = "legacy-only"
+    assert service.netpair_password() == "legacy-only"
+    assert service.channels()[netpair_topic("netpair-secret")] == [
+        netpair_key("netpair-secret", "legacy-only")
+    ]
+# ------------------------------------------- the secret that opens the channel
+#
+# The enrolled channel is derived from two secrets, one per machine, so neither
+# end can derive it alone: ``relay_enroll`` is the exchange that hands them over.
+# It travels on the LAN link only — the frame decides which public topic this
+# machine listens on, and the LAN link is the one transport where the peer at
+# the far end is pinned by a certificate rather than by a key both ends already
+# share.
+
+
+def enroll_payload(secret):
+    """The body of a ``relay_enroll``: the secret the other end listens on."""
+    return {"msg_type": "relay_enroll", "relay_secret": secret}
+
+
+def enroll_frame(secret, source_device=""):
+    """A ``relay_enroll`` as it arrives off the LAN: decoded, with a sender."""
+    return decode_message(encode_frame(enroll_payload(secret), source_device=source_device))
+
+
+def test_a_relay_secret_is_offered_over_the_lan_and_answered_once(relay_rig):
+    """Both halves of the exchange, and the guard that has to end it.
+
+
+    Legacy answered every enroll unconditionally, so two machines running it
+    answer each other forever: each answer is a frame that provokes another,
+    over a link that is already up, with nothing to make it stop.  Ours answers
+    when the peer's secret is new, or when we have not yet told them ours.
+
+    Counted *relative to what the runtime has already sent*, not from zero.
+    It starts a background refresh loop, and `internet_sync_enabled` is set
+    moments after that, so an enroll of the runtime's own can be in flight --
+    or already sent -- before this test's first line runs.  The old assertions
+    read `transport.sent` absolutely and therefore depended on that loop losing
+    a race; when it won, there were three frames instead of two and the failure
+    read as the ping-pong guard having failed, which is the opposite of what
+    had happened.  What the guard promises is about *additional* frames, so
+    that is what is measured.
+    """
+    runtime, config, transport = relay_rig.runtime, relay_rig.config, relay_rig.transport
+    # The fixture's peer is also a netpair peer, whose own channel wins over the
+    # enrolled one (the one-channel test below pins that); the enrolled family is
+    # what carries a peer that has no netpair secret at all.
+    config.netpair_secrets.pop("remote")
+    transport.connected.add("remote")
+
+    runtime.internet_pairing.enroll_peers()
+    before = len(transport.sent)
+    # Whatever ran before this point, our own enroll is the last frame sent and
+    # it carries this machine's secret.
+    assert (transport.sent[-1][0], transport.sent[-1][1].msg_type) == ("remote", "relay_enroll")
+    assert transport.sent[-1][1]._raw_payload["relay_secret"] == config.relay_secret
+
+    # The peer's own secret arrives, is stored, and is what the channel this
+    # machine listens for it on is derived from.
+    theirs = "a" * 64
+    runtime._receive(enroll_frame(theirs, source_device="remote"), "remote")
+    assert config.peer_relay_secrets == {"remote": theirs}
+    assert derive_topic(config.relay_secret, theirs) in runtime.internet_pairing.channels()
+    # ...and it is answered in turn, because until it is the peer cannot derive
+    # that channel either.
+    #
+    # Asserted on content rather than on a count.  The refresh loop may enroll
+    # again the moment a secret it did not have is stored, which is right -- a
+    # new secret changes what has to be offered -- so the number of frames sent
+    # during this test is not something the test decides.  What the design does
+    # decide is that every offer on this family carries this machine's own
+    # secret, and that is what is checked.
+    answered = transport.sent[before:]
+    assert answered, 'the peer secret arrived and nothing was offered back'
+    assert all(msg.msg_type == "relay_enroll" for _, msg in answered)
+    assert all(
+        msg._raw_payload["relay_secret"] == config.relay_secret for _, msg in answered
+    )
+
+    # A peer that repeats itself is not answered again: we have already offered
+    # ours and its secret has not changed.  This is the frame that would
+    # otherwise ping-pong.  Held as an upper bound rather than an equality, for
+    # the reason above: the loop may have contributed a frame of its own.
+    runtime._receive(enroll_frame(theirs, source_device="remote"), "remote")
+    assert len(transport.sent) <= before + 2
+
+    # A rotated secret is answered, because the channel it replaces is dead.
+    rotated = "b" * 64
+    runtime._receive(enroll_frame(rotated, source_device="remote"), "remote")
+    assert config.peer_relay_secrets == {"remote": rotated}
+    assert derive_topic(config.relay_secret, rotated) in runtime.internet_pairing.channels()
+    # Bounded rather than counted exactly, for the reason the sibling test below
+    # spells out: the runtime offers enrollments on its own schedule -- the relay
+    # coming online is one trigger -- so the total is not this test's to fix.  What
+    # it does own is that the rotation was answered at least once, and that all of
+    # it stayed on this family rather than becoming clipboard traffic.
+    assert len(transport.sent) > before
+    assert all(msg.msg_type == "relay_enroll" for _, msg in transport.sent)
+    # None of this was clipboard traffic, on either side of the exchange.
+    assert relay_rig.history.items == []
+
+
+def test_an_enroll_with_an_unusable_secret_changes_nothing(relay_rig):
+    """A malformed secret is dropped where it arrives.
+
+
+    It comes off a LAN link from a peer, and it becomes the topic this machine
+    subscribes to: a short or non-hex value would be a channel nobody can
+    derive, so the pairing would read enrolled and sync nothing, with no error
+    raised on either side.
+    """
+    runtime, config, transport = relay_rig.runtime, relay_rig.config, relay_rig.transport
+    transport.connected.add("remote")
+    # A paired peer arriving on the LAN is offered this machine's own relay
+    # secret by design (`_refresh` -> `offer_enroll`), and that offer mints one
+    # if there is none yet.  It is asynchronous with respect to this test, so
+    # settle it here rather than after the frames below: when the runtime's
+    # refresh happened to land after the line above, the mint it made was read
+    # as the bad frames having caused it, and this case failed about once in a
+    # full-suite run while passing every time it was run on its own.
+    runtime._refresh()
+    minted = config.relay_secret
+    sent = len(transport.sent)
+
+    for bad in ("", "a" * 63, "a" * 65, "Z" * 64, None, 12345):
+        runtime._receive(enroll_frame(bad, source_device="remote"), "remote")
+
+    assert config.peer_relay_secrets == {}
+    # Not even this machine's own secret was minted for a peer's bad frame...
+    assert config.relay_secret == minted
+    # ...and not one frame went out in answer, which is the other half of the
+    # same claim: a bad secret is not an enrollment.
+    assert len(transport.sent) == sent
+    assert runtime.internet_pairing.channels() == {
+        netpair_topic("netpair-secret"): [netpair_key("netpair-secret", "")]
+    }
+
+
+def test_a_relay_secret_offered_over_the_relay_is_refused(relay_rig):
+    """The broker does not get to choose which topic this machine listens on.
+
+
+    Off the relay a frame has only a claimed sender to vouch for it, and this
+    frame is the one that decides the channel.  A legacy host never publishes
+    one there either — its enroll send has no relay fallback — so refusing costs
+    nothing a real peer does.
+    """
+    runtime, config, transport = relay_rig.runtime, relay_rig.config, relay_rig.transport
+    transport.connected.add("remote")
+
+    runtime._receive_relay(
+        encode_frame(enroll_payload("c" * 64), source_device="remote"),
+        netpair_topic("netpair-secret"),
+    )
+
+    assert config.peer_relay_secrets == {}
+    # This machine offers its OWN relay secret to a peer whose LAN link has just
+    # come up (``_publish_presence``), the test's own ``connected.add`` is what
+    # triggers it, and the offer is made from the maintenance thread — so it
+    # lands on either side of this line and ``transport.sent`` being empty is a
+    # coin toss.  The offer is not a reply to the refused frame and not the
+    # fall-through into the clipboard path that this asserts; nothing else went
+    # out, on either count.
+    assert [m for _pid, m in transport.sent if getattr(m, "msg_type", "") != "relay_enroll"] == []
+    # ...and it did not fall through to the clipboard path on its way out.
+    assert relay_rig.history.items == []
+
+
+def test_a_peer_that_arrives_on_the_lan_is_offered_enrollment_then(relay_rig):
+    """A peer that starts after this machine's relay did is not left out.
+
+
+    Legacy offered once, from the relay-start path, and never retried: a peer
+    that was down at that instant was never enrolled and nothing noticed.  The
+    link coming up is the moment the runtime can see that the peer it was
+    waiting for is reachable.
+    """
+    runtime, transport = relay_rig.runtime, relay_rig.transport
+    assert transport.sent == []
+
+    transport.connected.add("remote")
+    runtime._refresh()
+
+    assert [(pid, msg.msg_type) for pid, msg in transport.sent] == [
+        ("remote", "relay_enroll")
+    ]
+
+

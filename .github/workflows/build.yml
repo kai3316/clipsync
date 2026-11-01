@@ -1,0 +1,134 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Cancel overlapping runs for the same tag (e.g. a re-pushed tag) so the
+# delete-then-create release step can never interleave with a concurrent run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    # Create the release as soon as the tag lands, before any building.
+    #
+    # The Tauri workflow attaches the desktop installers to this same release
+    # and waits for it to appear.  That wait used to be satisfied only by the
+    # `release` job below, which cannot start until all four build legs finish
+    # -- and a macOS runner queue of 28 minutes blew straight past the Tauri
+    # side's 10-minute budget, failing its uploader permanently.  Creating the
+    # release up front means it exists within seconds, so neither uploader can
+    # race the other.
+    #
+    # A draft, not a published release, and the difference is the whole update
+    # check: every installed application reads the newest *published* release,
+    # and the desktop client then reads `latest.json` off it -- a file only the
+    # Tauri build produces, minutes later.  Published here, the release told
+    # every client a new version was out and then 404'd the manifest that makes
+    # it installable, which the card could only read as "install this one by
+    # hand".  It is published by the desktop job that attaches the manifest, or
+    # by `release` below if that never happens (see the timeout there).
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches internal version
+        # Moved here from the deleted PyInstaller job, and it has to stay
+        # somewhere: the uploader writes the tag into the updater manifest as the
+        # version, so a tag that disagrees with `internal/version.py` ships a
+        # manifest whose version is not the one the app reports, and every
+        # client's update check fails silently from then on -- nothing on the
+        # release page shows it.  This job runs first, so a mismatch now stops
+        # the release before it is even created rather than after four builds.
+        shell: bash
+        run: |
+          # github.ref_name is the tag that triggered this run (guaranteed on a
+          # tag push); equivalent to `git describe --tags --exact-match HEAD`.
+          ACTUAL="${{ github.ref_name }}"
+          EXPECTED="v$(python -c 'from internal.version import __version__; print(__version__)')"
+          echo "Expected version tag: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Tag $ACTUAL does not match internal version $EXPECTED"
+            exit 1
+          fi
+
+      - name: Create the release if it is missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          # --repo is not optional here: without a checkout there is no .git in
+          # the workspace, and gh resolves the repository from the working
+          # directory -- it fails with "fatal: not a git repository" otherwise.
+          # Passing it beats checking out a repo just to make one API call.
+          REPO="$GITHUB_REPOSITORY"
+          # Create only when missing; never delete.  A delete here would take
+          # the desktop installers with it.
+          NOTES=$(cat <<'EOF'
+          Automated build of the desktop application for this tag.
+          EOF
+          )
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; leaving it in place."
+          else
+            gh release create "$TAG" --repo "$REPO" --title "ClipSync $TAG" \
+              --notes "$NOTES" --draft
+          fi
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    # `prepare` is named here because the first thing this job does is a
+    # `gh release view` that fails outright when the release is not there yet,
+    # and it is `prepare` that creates it.  Without this the two are ordered
+    # only by `prepare` happening to be quick, which is a coincidence rather
+    # than a guarantee.
+    #
+    # This job no longer waits on a `build` job of its own: the PyInstaller legs
+    # that produced the previous Python application's binaries are gone with that
+    # application, and the desktop installers arrive from `desktop.yml`.  What is
+    # left here is the release itself -- created by `prepare` the moment the tag
+    # lands, published at the end of this job -- which is what the desktop
+    # workflow attaches its installers to and waits for.  The suites run
+    # locally before a tag is pushed; a tagged build only assembles the
+    # release, so a platform-specific test can never hold it up.
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release once it carries its update manifest
+        # The desktop workflow attaches `latest.json` and publishes on the back
+        # of it; this is the backstop for a desktop build that fails or never
+        # finishes.  Waiting first is the point of it: a release whose manifest
+        # is missing is visible to every installed application, and tells them
+        # there is a new version and then fails to give them one to install.
+        # Bounded at 30 minutes, the order of the worst runner queue seen here,
+        # and published anyway when the wait runs out -- a broken desktop build
+        # must not be able to hide a release the previous application installs.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          REPO="$GITHUB_REPOSITORY"
+          has_manifest() {
+            gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' \
+              | grep -qx latest.json
+          }
+          for _ in $(seq 1 90); do
+            if has_manifest; then break; fi
+            sleep 20
+          done
+          if ! has_manifest; then
+            echo "::warning::No latest.json on $TAG after 30 minutes; publishing without a desktop update manifest."
+          fi
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest

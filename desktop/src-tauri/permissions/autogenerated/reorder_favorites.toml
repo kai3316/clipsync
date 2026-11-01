@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reorder-favorites"
+description = "Enables the reorder_favorites command without any pre-configured scope."
+commands.allow = ["reorder_favorites"]
+
+[[permission]]
+identifier = "deny-reorder-favorites"
+description = "Denies the reorder_favorites command without any pre-configured scope."
+commands.deny = ["reorder_favorites"]

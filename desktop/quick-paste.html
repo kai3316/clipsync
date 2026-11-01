@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>ClipSync</title>
+    <!-- The quick-paste overlay's own document.  It is a second window rather
+         than a route in `index.html`: the host creates it frameless, always on
+         top and outside the taskbar, and loads `/quick-paste.html` into it —
+         see `desktop/src-tauri`'s `quick-paste` window.  A blank first frame is
+         all it needs, because the window is shown by the host only after it is
+         created; the overlay paints its list as soon as the host answers. -->
+    <style>
+      html {
+        color-scheme: light dark;
+        background: #fff;
+      }
+      @media (prefers-color-scheme: dark) {
+        html { background: #202423; }
+      }
+      body { margin: 0; }
+      #app { height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/quick-paste/main.ts"></script>
+  </body>
+</html>

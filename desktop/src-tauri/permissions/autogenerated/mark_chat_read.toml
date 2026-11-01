@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mark-chat-read"
+description = "Enables the mark_chat_read command without any pre-configured scope."
+commands.allow = ["mark_chat_read"]
+
+[[permission]]
+identifier = "deny-mark-chat-read"
+description = "Denies the mark_chat_read command without any pre-configured scope."
+commands.deny = ["mark_chat_read"]

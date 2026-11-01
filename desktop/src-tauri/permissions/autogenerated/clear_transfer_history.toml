@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-transfer-history"
+description = "Enables the clear_transfer_history command without any pre-configured scope."
+commands.allow = ["clear_transfer_history"]
+
+[[permission]]
+identifier = "deny-clear-transfer-history"
+description = "Denies the clear_transfer_history command without any pre-configured scope."
+commands.deny = ["clear_transfer_history"]

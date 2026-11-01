@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-quick-paste"
+description = "Enables the open_quick_paste command without any pre-configured scope."
+commands.allow = ["open_quick_paste"]
+
+[[permission]]
+identifier = "deny-open-quick-paste"
+description = "Denies the open_quick_paste command without any pre-configured scope."
+commands.deny = ["open_quick_paste"]

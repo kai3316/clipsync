@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-favorite-group"
+description = "Enables the delete_favorite_group command without any pre-configured scope."
+commands.allow = ["delete_favorite_group"]
+
+[[permission]]
+identifier = "deny-delete-favorite-group"
+description = "Denies the delete_favorite_group command without any pre-configured scope."
+commands.deny = ["delete_favorite_group"]

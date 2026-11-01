@@ -1,0 +1,148 @@
+"""Devices page — the backend facts the web panel is built on.
+
+The rest of this file used to be static wiring assertions over the shipped
+JavaScript (markup, CSS, class names, locale keys); those are gone.  What
+remains is what the page actually reads: `get_devices`'s payload — a
+forgotten device still broadcasting on the LAN stays in the Removed archive
+and is not re-surfaced under Discovered, and the local device's `os` field is
+already a friendly brand name — plus the cross-OS mapping that produces it.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+class _Peer:
+    def __init__(self, device_id, name, paired=True):
+        self.device_id = device_id
+        self.device_name = name
+        self.paired = paired
+        self.os = ""
+        self.notes = ""
+
+
+class _DevCfg:
+    device_id = "self1"
+    device_name = "Self"
+
+    def __init__(self, peers=None):
+        self.peers = peers or {}
+        self.removed_peers = {}
+
+
+def _removed_peer(device_id, name, removed_at=100.0):
+    p = _Peer(device_id, name)
+    p.removed_at = removed_at
+    p.last_ip = None
+    p.last_port = None
+    return p
+
+
+def test_discovered_skips_removed_archive():
+    from internal.web.api.devices import get_devices
+
+    cfg = _DevCfg()
+    cfg.removed_peers = {"gone": _removed_peer("gone", "Forgotten")}
+
+    # The forgotten device is still broadcasting on the LAN — it must NOT be
+    # listed under "Discovered" (that would double-list it against the Removed
+    # archive), only in the archive for Restore/Purge.
+    data, status = get_devices(
+        cfg,
+        lambda: [],
+        get_discovered=lambda: {"gone": {"name": "Forgotten"}},
+    )
+    assert status == 200
+    ids = [d["device_id"] for d in data["devices"]]
+    assert "gone" not in ids
+    assert any(r["device_id"] == "gone" for r in data["removed"])
+
+
+def test_the_archive_carries_the_name_the_user_gave_the_device():
+    """The web's archive and the desktop's archived row are the same list.
+
+    Measured on the reporting install, a device held `notes = "试试"` while its
+    owner published `Kais-MacBook`: the desktop's archived row showed 试试 (its
+    rows carry `note`) and this payload carried only `device_name`, so the same
+    list named the device differently on the two fronts.
+    """
+    from internal.web.api.devices import get_devices
+
+    cfg = _DevCfg()
+    archived = _removed_peer("gone", "Kais-MacBook")
+    archived.notes = "试试"
+    cfg.removed_peers = {"gone": archived}
+
+    data, _ = get_devices(cfg, lambda: [], get_discovered=lambda: {})
+    entry = next(r for r in data["removed"] if r["device_id"] == "gone")
+    assert entry["note"] == "试试"
+    # And the rule the page applies to it — `note or device_name` — reads it as
+    # the user's name, which is what the desktop's archived row shows.
+    assert (entry["note"] or entry["device_name"]) == "试试"
+
+
+def test_pending_pairings_snapshot_drops_ended_requests():
+    """中-29 coordination: an ended request is resolved, never a live card.
+
+    The runtime queues a terminal status for ``drain_terminal_statuses`` and
+    publishes ``pairing.resolved``; the snapshot must not also keep drawing a
+    confirmation card for it.  The manager already excludes expired entries from
+    ``get_pending_pairings`` — this is the belt-and-braces half, so a caller that
+    hands over a stale row cannot resurrect a card nobody can answer.
+    """
+    from internal.web.api.devices import get_devices
+
+    cfg = _DevCfg()
+    pending = [
+        ("live", "12345678", "Phone", "pending", "3A2F-91C4"),
+        ("gone", "87654321", "Old Phone", "expired", ""),
+        ("turned-down", "11112222", "Tablet", "cancelled", ""),
+    ]
+    data, status = get_devices(cfg, lambda: [], get_pending_pairings=lambda: pending)
+    assert status == 200
+    assert [row["peer_id"] for row in data["pending_pairings"]] == ["live"]
+    assert data["pending_pairings"][0]["status"] == "pending"
+
+
+def test_pending_pairings_snapshot_drops_ended_dicts():
+    """The dict shape a caller may pass goes through the same gate."""
+    from internal.web.api.devices import get_devices
+
+    cfg = _DevCfg()
+    pending = [
+        {"peer_id": "gone", "peer_name": "Old Phone", "code": "1", "status": "expired"},
+        {"peer_id": "live", "peer_name": "Phone", "code": "2", "status": "confirmed_waiting"},
+    ]
+    data, _ = get_devices(cfg, lambda: [], get_pending_pairings=lambda: pending)
+    assert [row["peer_id"] for row in data["pending_pairings"]] == ["live"]
+
+
+def test_local_device_os_is_friendly_name():
+    from internal.web.api.devices import get_devices
+
+    cfg = _DevCfg()
+    data, status = get_devices(cfg, lambda: [])
+    assert status == 200
+    local = data["devices"][0]
+    # platform.system() ("Darwin") is mapped to the brand ("macOS") so the
+    # backend value is already display-ready for the card icon + label.
+    assert local["os"] in ("macOS", "Windows", "Linux", "Android", "iOS")
+    assert local["os"] != "Darwin"
+
+
+def test_friendly_platform_name_maps_known_systems():
+    """The mapping the payload above depends on — and the only place the
+    macOS / Linux / iOS brands are pinned on a Windows-only machine."""
+    from internal.platform import friendly_platform_name
+
+    assert friendly_platform_name("Darwin") == "macOS"
+    assert friendly_platform_name("darwin") == "macOS"
+    assert friendly_platform_name("Mac OS X") == "macOS"
+    assert friendly_platform_name("Windows") == "Windows"
+    assert friendly_platform_name("Linux") == "Linux"
+    assert friendly_platform_name("Android") == "Android"
+    assert friendly_platform_name("iOS") == "iOS"
+    # Unknown systems fall through to the raw kernel name.
+    assert friendly_platform_name("FreeBSD") == "freebsd"
