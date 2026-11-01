@@ -41,6 +41,24 @@ There is no account to create. It fits when you want to:
 
 The first time two devices connect, both show the same 8-digit number. Check that they match and confirm; after that ClipSync reconnects on its own.
 
+## What makes it different
+
+- **Cross-network sync**: works beyond one Wi-Fi. Devices connect directly on the LAN, and across networks content is end-to-end encrypted and relayed; office, home and a phone hotspot all stay on the same clipboard.
+- **Multi-platform**: Windows, macOS and Linux desktop apps sync with each other. A phone needs no app: scan a QR code and use it from the browser.
+- **AI config sync**: built-in profiles for Claude Code, Codex, Cursor, Gemini CLI, Windsurf and Continue. Compare configuration across devices, then overwrite, keep a copy or merge.
+- **File and folder transfer**: drop files or folders on the window to send them. Folders are packed automatically and unpacked on paste at the receiver; large files are fetched on demand instead of occupying disk up front.
+- **Paste panel**: press `Ctrl+Shift+V`, type to search, pick with the arrow keys and press Enter to paste into the active app. Plain text, images, files and favorites are all supported.
+- **One clipboard**: text, pictures, links, HTML and files all sync; history is searchable, filterable and pinnable, and copying back and forth between two machines does not duplicate entries.
+
+<p align="center">
+  <img src="docs/assets/en-devices.png" alt="Devices: LAN devices, pairing state, manual connection and per-direction switches" width="49%">
+  <img src="docs/assets/en-transfers.png" alt="File transfer: progress, history and target devices" width="49%">
+</p>
+<p align="center">
+  <img src="docs/assets/en-chat.png" alt="Nearby chat: session list and messages" width="49%">
+  <img src="docs/assets/en-settings.png" alt="Settings: section rail and keyboard shortcuts" width="49%">
+</p>
+
 ## Download
 
 Get the installer for your system from [Releases](https://github.com/kai3316/clipsync/releases/latest):

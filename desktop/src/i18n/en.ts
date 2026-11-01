@@ -370,7 +370,7 @@ export const EN: Record<string, string> = {
   "{name} 没有共享日志": "{name} is not sharing its log",
   "{name} 的日志没能保存到本机": "The log from {name} could not be saved here",
   "手机 Companion": "Phone Companion",
-  "跨网手机伴侣": "Cross-network Phone Companion",
+  "跨网手机伴侣": "Remote Phone",
   "手机不在同一网络时用远程访问；同一网络扫码在下方。":
     "Use remote access when the phone is on another network; same-network scanning is below.",
   "工具": "Tools",
@@ -2080,7 +2080,7 @@ export const EN: Record<string, string> = {
   "快捷键设置": "Keyboard shortcuts",
   "去处理": "Review",
   "手机网页访问": "Phone web page",
-  "跨网手机伴侣未启用": "The cross-network phone companion is not running",
+  "跨网手机伴侣未启用": "Remote Phone is not running",
   "去开启": "Turn it on",
   "查看更新": "View update",
   "重试": "Retry",

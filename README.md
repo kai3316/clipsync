@@ -41,6 +41,24 @@ ClipSync 让你在几台电脑之间自然地复制粘贴：一边复制，另�
 
 第一次连接时，两台设备会显示同一个 8 位数字；确认一致后就能开始同步。以后打开 ClipSync 会自动连上。
 
+## 核心能力
+
+- **跨网同步**：不在同一网络也能用。局域网内直接连接，跨网络时内容端到端加密后经中继转发；公司、家里、手机热点都能接上。
+- **多平台**：Windows、macOS、Linux 桌面端互相同步；手机不用装 App，浏览器扫码就能用。
+- **AI 配置同步**：内置 Claude Code、Codex、Cursor、Gemini CLI、Windsurf、Continue 等工具的配置管理，可跨设备对比，选择覆盖、另存或合并。
+- **文件与文件夹传输**：文件、文件夹拖进窗口就能发送；发送端自动打包，接收端粘贴时解压成文件夹。大文件按需取回，不提前占磁盘。
+- **粘贴面板**：`Ctrl+Shift+V` 呼出，输入即搜索，方向键选择，回车直接粘到当前应用；支持纯文本、图片、文件和收藏。
+- **一块剪贴板**：文字、图片、链接、HTML、文件都能同步；历史可搜索、筛选、收藏，来回复制不会重复。
+
+<p align="center">
+  <img src="docs/assets/zh-devices.png" alt="设备页：局域网设备、配对状态、手动连接和发送/接收开关" width="49%">
+  <img src="docs/assets/zh-transfers.png" alt="文件传输：进度、历史和目标设备" width="49%">
+</p>
+<p align="center">
+  <img src="docs/assets/zh-chat.png" alt="附近聊天：会话列表与消息" width="49%">
+  <img src="docs/assets/zh-settings.png" alt="设置页：分组导航和快捷键" width="49%">
+</p>
+
 ## 下载
 
 到 [Releases](https://github.com/kai3316/clipsync/releases/latest) 下载对应系统的安装包：
