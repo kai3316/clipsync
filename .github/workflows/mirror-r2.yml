@@ -55,23 +55,21 @@ jobs:
         run: |
           python3 -m pip install --quiet awscli
 
-      - name: Mirror installers and updater payloads
+      - name: Mirror only the current installers and updater payloads
         run: |
           set -euo pipefail
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          # Assets first, manifest last.  A client that reads a new latest.json
-          # before its installer exists would ask for a 404.
-          for file in dist/*; do
-            name="$(basename "$file")"
-            [ "$name" = "latest.json" ] && continue
-            aws s3 cp "$file" "s3://${R2_BUCKET}/releases/${TAG}/${name}" \
-              --endpoint-url "$ENDPOINT" \
-              --cache-control "public, max-age=31536000, immutable"
-            aws s3 cp "s3://${R2_BUCKET}/releases/${TAG}/${name}" \
-              "s3://${R2_BUCKET}/latest/${name}" \
-              --endpoint-url "$ENDPOINT" \
-              --cache-control "public, max-age=3600"
-          done
+          # One stable `latest/` prefix, no per-version history.  `--delete`
+          # removes assets from the previous release, including a filename that
+          # changed between versions, so storage stays at one build.
+          aws s3 sync dist/ "s3://${R2_BUCKET}/latest/" \
+            --endpoint-url "$ENDPOINT" \
+            --delete \
+            --exclude "latest.json" \
+            --cache-control "public, max-age=3600"
+          # Remove the old `releases/<tag>/` layout once and forever.
+          aws s3 rm "s3://${R2_BUCKET}/releases/" \
+            --endpoint-url "$ENDPOINT" --recursive
 
       - name: Point the update manifest at R2
         run: |
@@ -87,7 +85,7 @@ jobs:
               url = platform.get("url") or ""
               name = url.rsplit("/", 1)[-1]
               if name:
-                  platform["url"] = f"{base}/releases/{tag}/{name}"
+                  platform["url"] = f"{base}/latest/{name}"
           path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
           print(path.read_text(encoding="utf-8"))
           PY
