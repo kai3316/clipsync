@@ -1,0 +1,108 @@
+name: Mirror release to Cloudflare R2
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to mirror"
+        required: true
+        default: "v1.3.2"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-mirror-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_PUBLIC_BASE: ${{ secrets.R2_PUBLIC_BASE }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the configuration is present
+        run: |
+          set -euo pipefail
+          for name in R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET R2_PUBLIC_BASE; do
+            value="${!name:-}"
+            if [ -z "$value" ]; then
+              echo "::error::Missing repository secret $name"
+              exit 1
+            fi
+          done
+          echo "Mirroring $TAG to $R2_PUBLIC_BASE"
+
+      - name: Download the published release assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist
+          ls -lh dist
+
+      - name: Install the S3 client
+        run: |
+          python3 -m pip install --quiet awscli
+
+      - name: Mirror installers and updater payloads
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # Assets first, manifest last.  A client that reads a new latest.json
+          # before its installer exists would ask for a 404.
+          for file in dist/*; do
+            name="$(basename "$file")"
+            [ "$name" = "latest.json" ] && continue
+            aws s3 cp "$file" "s3://${R2_BUCKET}/releases/${TAG}/${name}" \
+              --endpoint-url "$ENDPOINT" \
+              --cache-control "public, max-age=31536000, immutable"
+            aws s3 cp "s3://${R2_BUCKET}/releases/${TAG}/${name}" \
+              "s3://${R2_BUCKET}/latest/${name}" \
+              --endpoint-url "$ENDPOINT" \
+              --cache-control "public, max-age=3600"
+          done
+
+      - name: Point the update manifest at R2
+        run: |
+          set -euo pipefail
+          python3 - "$TAG" "$R2_PUBLIC_BASE" <<'PY'
+          import json
+          import pathlib
+          import sys
+          tag, base = sys.argv[1], sys.argv[2].rstrip("/")
+          path = pathlib.Path("dist/latest.json")
+          manifest = json.loads(path.read_text(encoding="utf-8"))
+          for platform in (manifest.get("platforms") or {}).values():
+              url = platform.get("url") or ""
+              name = url.rsplit("/", 1)[-1]
+              if name:
+                  platform["url"] = f"{base}/releases/{tag}/{name}"
+          path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print(path.read_text(encoding="utf-8"))
+          PY
+
+      - name: Upload the update manifest last
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp dist/latest.json "s3://${R2_BUCKET}/latest.json" \
+            --endpoint-url "$ENDPOINT" \
+            --content-type "application/json" \
+            --cache-control "no-cache, max-age=0"
+
+      - name: Verify the public domain serves the mirrored manifest
+        run: |
+          set -euo pipefail
+          echo "HEAD $R2_PUBLIC_BASE/latest.json"
+          curl -fsSI "$R2_PUBLIC_BASE/latest.json" | sed -n '1,6p'
