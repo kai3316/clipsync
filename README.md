@@ -211,8 +211,8 @@ ClipSync 让你在几台电脑之间自然地复制粘贴：一边复制，另�
 
 - [Releases](https://github.com/kai3316/clipsync/releases)：版本更新和安装包
 - [Issues](https://github.com/kai3316/clipsync/issues)：问题反馈
-- [官网](https://kai3316.github.io/clipsync/)：功能介绍和界面截图
-- [赞助](https://kai3316.github.io/clipsync/sponsor/)：支持项目继续维护
+- [官网](https://kai3316.dpdns.org/)：功能介绍和界面截图
+- [赞助](https://kai3316.dpdns.org/sponsor/)：支持项目继续维护
 
 ## 开发者
 
