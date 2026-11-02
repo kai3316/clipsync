@@ -1337,7 +1337,7 @@ button.danger-outline:hover:not(:disabled),
 /* What the query found inside a card.  The mark goes on the element whose own
    text matched, so a row's name lights up rather than the whole row. */
 .settings-hit { color: var(--accent-text); }
-.settings-form { display: grid; gap: 16px; min-width: 0; }
+.settings-form { display: grid; gap: 16px; min-width: 0; max-width: 900px; }
 /* Phone Companion: two jobs in one card — the same-network service and the
    relay for a phone that is elsewhere.  They used to be one column of controls
    with no seam between starting a port, clearing a token and turning on a
@@ -1928,7 +1928,7 @@ button.danger-outline:hover:not(:disabled),
 .settings-panel fieldset + .setting { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 9px; }
 /* The save bar rides the bottom of the scrolling area: the form is long enough
    that a button at the end of it is a button nobody scrolls to find. */
-.settings-save { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 13px 22px; background: var(--page); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-soft); }
+.settings-save { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; justify-self: start; max-width: 100%; padding: 13px 22px; background: var(--page); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-soft); }
 /* What the bar has to say about the form: that something is pending, or that
    nothing is.  It sits after the button, so the bar reads "save — and by the
    way, there is something to save". */
