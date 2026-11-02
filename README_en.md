@@ -72,7 +72,7 @@ Get the installer for your system from [Releases](https://github.com/kai3316/cli
 | Linux (ARM64) | `ClipSync_<version>_arm64.deb` or `.AppImage` |
 
 Download, install and open. If macOS cannot verify ClipSync on first launch, right-click it in Finder and choose Open.
-A Cloudflare mirror is also available: [Windows](https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_x64-setup.exe) · [macOS Apple silicon](https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_aarch64.dmg) · [macOS Intel](https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_x64.dmg) · [Linux AppImage](https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_amd64.AppImage)
+A Cloudflare mirror is also available: [Windows](https://dl.kai3316.dpdns.org/download/windows-x64.exe) · [macOS Apple silicon](https://dl.kai3316.dpdns.org/download/macos-arm64.dmg) · [macOS Intel](https://dl.kai3316.dpdns.org/download/macos-x64.dmg) · [Linux x86_64](https://dl.kai3316.dpdns.org/download/linux-x64.AppImage) · [Linux ARM64](https://dl.kai3316.dpdns.org/download/linux-arm64.AppImage)
 
 ## First time
 

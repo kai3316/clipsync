@@ -1183,42 +1183,136 @@ tbody th {
 
 /* ------------------------------------------------------------- downloads -- */
 
-.downloads {
+.download-panel {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(224px, 1fr));
-  gap: 14px;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
+  gap: 18px;
   margin-top: 30px;
+  align-items: stretch;
 }
 
-.dl {
-  border: 1px solid var(--line);
+.download-primary {
+  border: 1px solid var(--accent-line);
   border-radius: var(--radius);
-  background: var(--raised);
-  padding: 18px;
+  background: linear-gradient(135deg, var(--accent-soft), var(--raised) 64%);
+  padding: 26px;
   display: grid;
-  gap: 4px;
+  gap: 7px;
   align-content: start;
 }
 
-.dl h3 {
-  font-size: 15px;
+.download-kicker {
+  margin: 0;
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
 }
 
-.dl .file {
+.download-primary h3 {
+  font-size: clamp(25px, 3vw, 32px);
+  letter-spacing: -0.025em;
+}
+
+.download-file {
+  margin: 0;
+  color: var(--muted);
   font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.download-button {
+  margin-top: 14px;
+  justify-self: start;
+}
+
+.download-version {
+  margin: 2px 0 0;
+  color: var(--muted);
   font-size: 11.5px;
+}
+
+.download-alternatives {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  padding: 16px 20px;
+}
+
+.download-alternatives h4 {
+  margin: 0 0 4px;
   color: var(--muted);
-  word-break: break-all;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
 }
 
-.dl .btn {
-  margin-top: 12px;
-  justify-content: center;
+.download-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  color: inherit;
+  text-decoration: none;
 }
 
-.dl-note {
+.download-row:first-of-type {
+  border-top: 0;
+}
+
+.download-row:hover {
+  color: var(--accent-text);
+}
+
+.download-row > span:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.download-row b {
   font-size: 13px;
+  font-weight: 600;
+}
+
+.download-row small {
   color: var(--muted);
+  font-size: 12px;
+}
+
+.download-row-action {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  color: var(--accent-text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.download-row:hover .download-row-action {
+  background: var(--accent-soft);
+}
+
+.download-row.is-preferred .download-row-action {
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
+  color: var(--accent-contrast, #fff);
+}
+
+@media (max-width: 860px) {
+  .download-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .download-primary {
+    padding: 22px;
+  }
 }
 
 .elsewhere {

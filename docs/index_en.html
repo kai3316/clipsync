@@ -60,7 +60,7 @@
         <code>Ctrl+Shift+V</code>. A phone needs no app: scan and use it.
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/kai3316/clipsync/releases/latest">Download free</a>
+        <a class="btn btn-primary" href="#download">Download free</a>
         <a class="btn" href="#start">See how it works</a>
       </div>
       <div class="spec">
@@ -448,41 +448,58 @@
 
 <section class="band" id="download">
   <div class="wrap">
-    <p class="eyebrow">Download · current version 1.3.2</p>
+    <p class="eyebrow">Download · latest version</p>
     <h2>Choose your system</h2>
     <p class="lede">Download, install and open. Windows, macOS and Linux all work together.</p>
 
-    <div class="downloads">
-      <div class="dl">
-        <h3>Windows</h3>
-        <span class="file">ClipSync_1.3.2_x64-setup.exe</span>
-        <a class="btn btn-primary" href="https://github.com/kai3316/clipsync/releases/latest">Download</a>
-        <span class="dl-note">Windows 10 / 11, 64-bit</span>
+    <div class="download-panel">
+      <div class="download-primary">
+        <p class="download-kicker" data-download-detect>Recommended for your system</p>
+        <h3 data-download-title>Windows</h3>
+        <p class="download-file" data-download-file>Windows 10 / 11 · 64-bit</p>
+        <a class="btn btn-primary download-button" data-download-primary
+          href="https://dl.kai3316.dpdns.org/download/windows-x64.exe">Download for Windows</a>
+        <p class="download-version">Latest version · download hosted by Cloudflare</p>
       </div>
-      <div class="dl">
-        <h3>macOS</h3>
-        <span class="file">ClipSync_1.3.2_aarch64.dmg</span>
-        <span class="file">ClipSync_1.3.2_x64.dmg</span>
-        <a class="btn btn-primary" href="https://github.com/kai3316/clipsync/releases/latest">Download</a>
-        <span class="dl-note">For Apple Silicon and Intel; if macOS cannot verify it on first launch, right-click and choose Open</span>
-      </div>
-      <div class="dl">
-        <h3>Linux</h3>
-        <span class="file">ClipSync_1.3.2_amd64.deb</span>
-        <span class="file">ClipSync_1.3.2_amd64.AppImage</span>
-        <span class="file">ClipSync_1.3.2_arm64.deb</span>
-        <span class="file">ClipSync_1.3.2_aarch64.AppImage</span>
-        <a class="btn btn-primary" href="https://github.com/kai3316/clipsync/releases/latest">Download</a>
-        <span class="dl-note">x86_64 and ARM64; use .deb for a normal install or run the .AppImage directly</span>
+      <div class="download-alternatives">
+        <h4>All platforms</h4>
+        <a class="download-row" data-download="windows-x64"
+          href="https://dl.kai3316.dpdns.org/download/windows-x64.exe">
+          <span><b>Windows</b><small>Windows 10 / 11 · 64-bit</small></span>
+          <span class="download-row-action">Download</span>
+        </a>
+        <a class="download-row" data-download="macos-arm64"
+          href="https://dl.kai3316.dpdns.org/download/macos-arm64.dmg">
+          <span><b>macOS</b><small>Apple silicon · aarch64</small></span>
+          <span class="download-row-action">Download</span>
+        </a>
+        <a class="download-row" data-download="macos-x64"
+          href="https://dl.kai3316.dpdns.org/download/macos-x64.dmg">
+          <span><b>macOS</b><small>Intel · x64</small></span>
+          <span class="download-row-action">Download</span>
+        </a>
+        <a class="download-row" data-download="linux-x64-appimage"
+          href="https://dl.kai3316.dpdns.org/download/linux-x64.AppImage">
+          <span><b>Linux</b><small>x86_64 · AppImage</small></span>
+          <span class="download-row-action">Download</span>
+        </a>
+        <a class="download-row" data-download="linux-x64-deb"
+          href="https://dl.kai3316.dpdns.org/download/linux-x64.deb">
+          <span><b>Linux</b><small>x86_64 · .deb</small></span>
+          <span class="download-row-action">Download</span>
+        </a>
+        <a class="download-row" data-download="linux-arm64-appimage"
+          href="https://dl.kai3316.dpdns.org/download/linux-arm64.AppImage">
+          <span><b>Linux</b><small>ARM64 · AppImage</small></span>
+          <span class="download-row-action">Download</span>
+        </a>
+        <a class="download-row" data-download="linux-arm64-deb"
+          href="https://dl.kai3316.dpdns.org/download/linux-arm64.deb">
+          <span><b>Linux</b><small>ARM64 · .deb</small></span>
+          <span class="download-row-action">Download</span>
+        </a>
       </div>
     </div>
-
-    <p class="note">Cloudflare mirror:
-      <a href="https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_x64-setup.exe">Windows</a> ·
-      <a href="https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_aarch64.dmg">macOS Apple silicon</a> ·
-      <a href="https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_x64.dmg">macOS Intel</a> ·
-      <a href="https://dl.kai3316.dpdns.org/latest/ClipSync_1.3.2_amd64.AppImage">Linux</a>
-    </p>
 
     <p class="elsewhere">
       The desktop app checks for updates in Settings and asks before installing. If another
@@ -611,5 +628,6 @@
 })();
 </script>
 
+  <script src="downloads.js" defer></script>
 </body>
 </html>

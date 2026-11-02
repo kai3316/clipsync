@@ -95,6 +95,39 @@ jobs:
             --content-type "application/json" \
             --cache-control "no-cache, max-age=0"
 
+      - name: Publish stable download names
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          # The documentation links must not carry a version.  Publish one
+          # readable name per platform and architecture under `download/`; the
+          # browser sees the current filename through Content-Disposition.  The
+          # versioned files under `latest/` stay as the updater's payloads.
+          mappings=(
+            "windows-x64.exe|dist/ClipSync_*_x64-setup.exe"
+            "macos-arm64.dmg|dist/ClipSync_*_aarch64.dmg"
+            "macos-x64.dmg|dist/ClipSync_*_x64.dmg"
+            "linux-x64.AppImage|dist/ClipSync_*_amd64.AppImage"
+            "linux-x64.deb|dist/ClipSync_*_amd64.deb"
+            "linux-arm64.AppImage|dist/ClipSync_*_aarch64.AppImage"
+            "linux-arm64.deb|dist/ClipSync_*_arm64.deb"
+          )
+          for mapping in "${mappings[@]}"; do
+            alias="${mapping%%|*}"
+            pattern="${mapping#*|}"
+            files=( $pattern )
+            if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
+              echo "::error::Expected exactly one file for $alias, got: ${files[*]:-none}"
+              exit 1
+            fi
+            source="${files[0]}"
+            filename="$(basename "$source")"
+            aws s3 cp "$source" "s3://${R2_BUCKET}/download/${alias}" \
+              --endpoint-url "$ENDPOINT" \
+              --content-disposition "attachment; filename=\"${filename}\"" \
+              --cache-control "public, max-age=3600"
+          done
+
       - name: Remove files from the previous release
         run: |
           set -euo pipefail
