@@ -171,14 +171,56 @@
     </div>
   </section>
 
-  <figure class="shot">
-    <div class="shot-bar">
-      <i></i><i></i><i></i>
-      <span>ClipSync — 概览</span>
-    </div>
-    <img src="assets/zh-overview.png" alt="ClipSync 概览页：同步状态、本机信息、扫码访问、快速设置与快捷操作" width="1280">
-  </figure>
+  <section class="band preview-band" id="screens">
+    <div class="wrap">
+      <p class="eyebrow">界面</p>
 
+      <div class="app-preview" id="appPreview">
+      <div class="preview-head">
+        <div class="preview-steps" aria-label="切换页面">
+          <button type="button" data-preview-prev aria-label="上一页">←</button>
+          <button type="button" data-preview-next aria-label="下一页">→</button>
+        </div>
+<div class="preview-caption" aria-live="polite">
+          <span class="page-n" data-preview-number>01</span>
+          <div>
+            <h3 data-preview-heading>概览</h3>
+            <p data-preview-desc>同步状态、本机信息、手机扫码、快速设置和快捷操作。</p>
+          </div>
+        </div>
+                <div class="preview-tabs" role="tablist" aria-label="界面">
+        <button type="button" role="tab" data-page-target="overview" aria-selected="true"><span>01</span>概览</button>
+        <button type="button" role="tab" data-page-target="history" aria-selected="false"><span>02</span>剪贴板历史</button>
+        <button type="button" role="tab" data-page-target="devices" aria-selected="false"><span>03</span>设备</button>
+        <button type="button" role="tab" data-page-target="favorites" aria-selected="false"><span>04</span>收藏库</button>
+        <button type="button" role="tab" data-page-target="transfers" aria-selected="false"><span>05</span>文件传输</button>
+        <button type="button" role="tab" data-page-target="chat" aria-selected="false"><span>06</span>附近聊天</button>
+        <button type="button" role="tab" data-page-target="companion" aria-selected="false"><span>07</span>跨网手机伴侣</button>
+        <button type="button" role="tab" data-page-target="internet" aria-selected="false"><span>08</span>互联网同步</button>
+        <button type="button" role="tab" data-page-target="ai" aria-selected="false"><span>09</span>AI 配置</button>
+        <button type="button" role="tab" data-page-target="settings" aria-selected="false"><span>10</span>设置</button>
+        </div>
+      </div>
+
+<div class="preview-shell">
+          <div class="shot-bar"><i></i><i></i><i></i><span data-preview-title>概览</span></div>
+          <div class="preview-stage">
+        <img class="preview-shot is-on" data-page="overview" src="assets/zh-overview.png" alt="概览：同步状态、本机信息、手机扫码、快速设置和快捷操作。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="history" src="assets/zh-history.png" alt="剪贴板历史：搜索、类型筛选、逐条复制 / 收藏 / 翻译 / 删除，也支持多选批量操作。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="devices" src="assets/zh-devices.png" alt="设备：配对、手动连接、发现诊断、发送/接收开关，也可以在这里设置跨网手机伴侣。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="favorites" src="assets/zh-favorites.png" alt="收藏库：值得保留的内容单独存一份：分组、编辑、拖拽排序、一键复制回剪贴板。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="transfers" src="assets/zh-transfers.png" alt="文件传输：发送文件或文件夹；断了可以续传，失败可以重试，还能测两台电脑之间的速度。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="chat" src="assets/zh-chat.png" alt="附近聊天：和同一局域网里的设备聊天，不需要先配对；消息和文件直接送达。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="companion" src="assets/zh-companion.png" alt="跨网手机伴侣：手机不在同一网络时用远程访问；同一网络扫码就能打开网页版。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="internet" src="assets/zh-internet.png" alt="互联网同步：用配对码建立跨网连接；设备、中继状态和待投递消息都在这页。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="ai" src="assets/zh-ai.png" alt="AI 配置：内置 Claude Code、Codex、Cursor、Gemini CLI、Windsurf、Continue 六套配置，可先比较再同步。" width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="settings" src="assets/zh-settings.png" alt="设置：通用、快捷键、粘贴与录制、文件、同步、网络、翻译、安全、数据恢复都在左侧分区。" width="1280" height="900" decoding="async">
+            <button type="button" class="preview-sidebar" aria-label="切换页面"></button>
+          </div>
+        </div>
+              </div>
+    </div>
+  </section>
 </main>
 
 <section class="band" id="features">
@@ -278,122 +320,8 @@
   </div>
 </section>
 
-<section class="band" id="screens">
-  <div class="wrap">
-    <p class="eyebrow">界面</p>
-    <h2>常用界面，一眼就懂</h2>
-    <p class="lede">
-      所有页面都在左侧栏，点一下就能切换。下面挑几个最常用的给你看看。
-    </p>
-
-    <div class="viewer" id="pages">
-      <nav class="vnav" aria-label="八个页面">
-        <a class="vn" href="assets/zh-overview.png" aria-controls="pg-overview" aria-current="true"><span class="vn-n">01</span>概览</a>
-        <a class="vn" href="assets/zh-history.png" aria-controls="pg-history"><span class="vn-n">02</span>剪贴板历史</a>
-        <a class="vn" href="assets/zh-devices.png" aria-controls="pg-devices"><span class="vn-n">03</span>设备</a>
-        <a class="vn" href="assets/zh-favorites.png" aria-controls="pg-favorites"><span class="vn-n">04</span>收藏库</a>
-        <a class="vn" href="assets/zh-transfers.png" aria-controls="pg-transfers"><span class="vn-n">05</span>文件传输</a>
-        <a class="vn" href="assets/zh-chat.png" aria-controls="pg-chat"><span class="vn-n">06</span>附近聊天</a>
-        <a class="vn" href="assets/zh-ai.png" aria-controls="pg-ai"><span class="vn-n">07</span>AI 配置</a>
-        <a class="vn" href="assets/zh-settings.png" aria-controls="pg-settings"><span class="vn-n">08</span>设置</a>
-      </nav>
-      <div class="stage" id="pageStage">
-        <figure class="page" id="pg-overview">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>概览</span></div>
-            <img src="assets/zh-overview.png" alt="概览页：同步状态、本机信息、扫码访问、快速设置与快捷操作" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">01</span>
-            <h3>概览</h3>
-            <p>同步状态、本机信息、手机扫码、快速设置和快捷操作。</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-history">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>剪贴板历史</span></div>
-            <img src="assets/zh-history.png" alt="剪贴板历史：搜索框、类型筛选与逐条操作按钮" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">02</span>
-            <h3>剪贴板历史</h3>
-            <p>搜索、按类型筛选、逐条复制 / 收藏 / 翻译 / 删除，支持多选批量操作。两台机器来回复制不会重复同步。</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-devices">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>设备</span></div>
-            <img src="assets/zh-devices.png" alt="设备页：配对状态、手动连接、发现诊断与发送/接收开关" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">03</span>
-            <h3>设备</h3>
-            <p>配对、手动连接、发现诊断、发送/接收开关，也可以在这里设置跨网手机伴侣。</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-favorites">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>收藏库</span></div>
-            <img src="assets/zh-favorites.png" alt="收藏库：分组侧栏、收藏条目与编辑器入口" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">04</span>
-            <h3>收藏库</h3>
-            <p>值得保留的内容单独存一份：分组、编辑、拖拽排序、一键复制回剪贴板、导出 Markdown。图片收藏也会直接显示缩略图。</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-transfers">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>文件传输</span></div>
-            <img src="assets/zh-transfers.png" alt="文件传输：进行中的进度条与带成功 / 失败状态的传输历史" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">05</span>
-            <h3>文件传输</h3>
-            <p>发送文件或文件夹，拖到窗口上即可。传到一半断了可以接着传，失败可以重试，也可以测一下两台电脑之间的速度。同一个 Wi-Fi 下发现到的电脑都能直接发，不需要先配对。</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-chat">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>附近聊天</span></div>
-            <img src="assets/zh-chat.png" alt="附近聊天：会话列表、消息气泡与文件附件" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">06</span>
-            <h3>附近聊天</h3>
-            <p>和同一局域网里的设备聊天，不需要先配对，消息和文件直接送达。</p>
-            <p>想改成逐个确认，在<b>设置 → 局域网发现</b>里关掉「任何人可直接发来消息和文件」和「任何人可直接向我发送文件」这两个开关：之后每条消息、每个文件都要你点「接受」，会先显示对方的设备名称和标识，你确认后再接收。</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-ai">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>AI 配置</span></div>
-            <img src="assets/zh-ai.png" alt="AI 配置：读取到的配置文件与 skill 目录" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">07</span>
-            <h3>AI 配置</h3>
-            <p>内置 Claude Code、Codex、Cursor、Gemini CLI、Windsurf、Continue 六套配置。可以先比对差异，再选择覆盖、另存副本或合并。</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-settings">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>设置</span></div>
-            <img src="assets/zh-settings.png" alt="设置页：左侧分区导航、搜索框和快捷键设置" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">08</span>
-            <h3>设置</h3>
-            <p>左侧分区导航，通用、连接、数据、系统一眼切换，顶部搜索直接定位设置项。「快捷键」是独立分区，概览页的快捷入口会直接跳到那里；语言和主题、过滤规则、保留上限、备份恢复、诊断与更新也都在这里。</p>
-          </figcaption>
-        </figure>
-      </div>
-    </div>
-  </div>
-</section>
-
 <section class="band" id="security">
-  <div class="wrap split">
+  <div class="wrap">
     <div>
       <p class="eyebrow">隐私</p>
       <h2>你的内容，优先留在你的设备之间</h2>
@@ -408,14 +336,7 @@
         <li><span><b>历史和设置都归你管。</b>保留多少、什么时候清理、是否加密保存，都可以在设置里调整。</span></li>
       </ul>
     </div>
-    <figure class="shot" style="margin-top:0">
-      <div class="shot-bar">
-        <i></i><i></i><i></i>
-        <span>设备</span>
       </div>
-      <img src="assets/zh-devices.png" alt="设备页：局域网设备、配对状态与手动连接" width="1280">
-    </figure>
-  </div>
 </section>
 
 <section class="band" id="phone">
@@ -561,53 +482,7 @@
   </div>
 </footer>
 
-<script>
-/* The eight pages on the landing page, one at a time.
-
-   The names above the stage are links to the screenshots, so a reader without
-   scripting still has every page one click away at full size.  With scripting
-   they swap the stage instead, which is the point of the section: eight
-   windows side by side render too small to read, and being able to read them
-   is why they are there.
-
-   Written out rather than pulled in: it is the only script on the page, and a
-   landing page that fetches a file to run twenty lines has spent a request to
-   save nothing. */
-(function () {
-  var viewer = document.getElementById("pages");
-  var stage = document.getElementById("pageStage");
-  if (!viewer || !stage) return;
-
-  var pages = stage.querySelectorAll(".page");
-  var names = viewer.querySelectorAll(".vn");
-  if (!pages.length || !names.length) return;
-
-  function show(id) {
-    var i;
-    for (i = 0; i < pages.length; i++) {
-      pages[i].classList.toggle("is-on", pages[i].id === id);
-    }
-    for (i = 0; i < names.length; i++) {
-      var on = names[i].getAttribute("aria-controls") === id;
-      names[i].setAttribute("aria-current", on ? "true" : "false");
-    }
-  }
-
-  for (var i = 0; i < names.length; i++) {
-    names[i].addEventListener("click", function (e) {
-      // A modified click is a reader asking for the file, not for the stage.
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
-        return;
-      }
-      e.preventDefault();
-      show(this.getAttribute("aria-controls"));
-    });
-  }
-
-  viewer.classList.add("is-live");
-  show(pages[0].id);
-})();
-</script>
+<script src="preview.js" defer></script>
 
   <script src="downloads.js" defer></script>
 </body>

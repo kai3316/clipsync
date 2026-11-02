@@ -171,14 +171,56 @@
     </div>
   </section>
 
-  <figure class="shot">
-    <div class="shot-bar">
-      <i></i><i></i><i></i>
-      <span>ClipSync — Overview</span>
-    </div>
-    <img src="assets/en-overview.png" alt="The ClipSync overview: sync state, this machine, phone scan, quick settings and quick actions" width="1280">
-  </figure>
+  <section class="band preview-band" id="screens">
+    <div class="wrap">
+      <p class="eyebrow">Interface</p>
 
+      <div class="app-preview" id="appPreview">
+      <div class="preview-head">
+        <div class="preview-steps" aria-label="Switch page">
+          <button type="button" data-preview-prev aria-label="Previous page">←</button>
+          <button type="button" data-preview-next aria-label="Next page">→</button>
+        </div>
+<div class="preview-caption" aria-live="polite">
+          <span class="page-n" data-preview-number>01</span>
+          <div>
+            <h3 data-preview-heading>Overview</h3>
+            <p data-preview-desc>Sync state, this machine, phone scanning, quick settings and quick actions.</p>
+          </div>
+        </div>
+                <div class="preview-tabs" role="tablist" aria-label="Interface">
+        <button type="button" role="tab" data-page-target="overview" aria-selected="true"><span>01</span>Overview</button>
+        <button type="button" role="tab" data-page-target="history" aria-selected="false"><span>02</span>Clipboard History</button>
+        <button type="button" role="tab" data-page-target="devices" aria-selected="false"><span>03</span>Devices</button>
+        <button type="button" role="tab" data-page-target="favorites" aria-selected="false"><span>04</span>Favorites</button>
+        <button type="button" role="tab" data-page-target="transfers" aria-selected="false"><span>05</span>File Transfer</button>
+        <button type="button" role="tab" data-page-target="chat" aria-selected="false"><span>06</span>Nearby Chat</button>
+        <button type="button" role="tab" data-page-target="companion" aria-selected="false"><span>07</span>Remote Phone</button>
+        <button type="button" role="tab" data-page-target="internet" aria-selected="false"><span>08</span>Internet sync</button>
+        <button type="button" role="tab" data-page-target="ai" aria-selected="false"><span>09</span>AI config</button>
+        <button type="button" role="tab" data-page-target="settings" aria-selected="false"><span>10</span>Settings</button>
+        </div>
+      </div>
+
+<div class="preview-shell">
+          <div class="shot-bar"><i></i><i></i><i></i><span data-preview-title>Overview</span></div>
+          <div class="preview-stage">
+        <img class="preview-shot is-on" data-page="overview" src="assets/en-overview.png" alt="Overview：Sync state, this machine, phone scanning, quick settings and quick actions." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="history" src="assets/en-history.png" alt="Clipboard History：Search, filter, copy, favorite, translate or delete a row; batch actions too." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="devices" src="assets/en-devices.png" alt="Devices：Pairing, manual connection, discovery diagnostics and per-device send/receive switches." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="favorites" src="assets/en-favorites.png" alt="Favorites：Keep what matters: groups, editing, drag ordering and copy back to the clipboard." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="transfers" src="assets/en-transfers.png" alt="File Transfer：Send files or folders; resume a broken transfer, retry a failed one, or measure speed." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="chat" src="assets/en-chat.png" alt="Nearby Chat：Talk to devices on the same LAN without pairing first; messages and files arrive directly." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="companion" src="assets/en-companion.png" alt="Remote Phone：Reach the phone on another network; scan on the same network for the browser version." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="internet" src="assets/en-internet.png" alt="Internet sync：Pair with a code across networks; devices, relay state and pending deliveries live here." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="ai" src="assets/en-ai.png" alt="AI config：Six built-in tools — Claude Code, Codex, Cursor, Gemini CLI, Windsurf and Continue." width="1280" height="900" decoding="async">
+        <img class="preview-shot" data-page="settings" src="assets/en-settings.png" alt="Settings：General, shortcuts, recording, files, sync, network, translation, security and recovery." width="1280" height="900" decoding="async">
+            <button type="button" class="preview-sidebar" aria-label="切换页面"></button>
+          </div>
+        </div>
+              </div>
+    </div>
+  </section>
 </main>
 
 <section class="band" id="features">
@@ -278,122 +320,8 @@
   </div>
 </section>
 
-<section class="band" id="screens">
-  <div class="wrap">
-    <p class="eyebrow">Screens</p>
-    <h2>A window that makes sense at a glance</h2>
-    <p class="lede">
-      Every page lives in the sidebar, one click away. Here are the ones you will use most.
-    </p>
-
-    <div class="viewer" id="pages">
-      <nav class="vnav" aria-label="The eight pages">
-        <a class="vn" href="assets/en-overview.png" aria-controls="pg-overview" aria-current="true"><span class="vn-n">01</span>Overview</a>
-        <a class="vn" href="assets/en-history.png" aria-controls="pg-history"><span class="vn-n">02</span>Clipboard History</a>
-        <a class="vn" href="assets/en-devices.png" aria-controls="pg-devices"><span class="vn-n">03</span>Devices</a>
-        <a class="vn" href="assets/en-favorites.png" aria-controls="pg-favorites"><span class="vn-n">04</span>Favorites</a>
-        <a class="vn" href="assets/en-transfers.png" aria-controls="pg-transfers"><span class="vn-n">05</span>File Transfer</a>
-        <a class="vn" href="assets/en-chat.png" aria-controls="pg-chat"><span class="vn-n">06</span>Nearby Chat</a>
-        <a class="vn" href="assets/en-ai.png" aria-controls="pg-ai"><span class="vn-n">07</span>AI config</a>
-        <a class="vn" href="assets/en-settings.png" aria-controls="pg-settings"><span class="vn-n">08</span>Settings</a>
-      </nav>
-      <div class="stage" id="pageStage">
-        <figure class="page" id="pg-overview">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>Overview</span></div>
-            <img src="assets/en-overview.png" alt="The overview page: sync state, this machine, phone scan, quick settings and quick actions" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">01</span>
-            <h3>Overview</h3>
-            <p>Sync state, this machine, phone scan, quick settings and quick actions.</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-history">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>Clipboard History</span></div>
-            <img src="assets/en-history.png" alt="Clipboard history: the search box, the type filter and the per-row actions" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">02</span>
-            <h3>Clipboard History</h3>
-            <p>Search, filter by type, copy / favourite / translate / delete per row, with multi-select batch actions. Two machines copying back and forth do not sync the same item twice.</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-devices">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>Devices</span></div>
-            <img src="assets/en-devices.png" alt="The devices page: pairing state, manual connection, discovery diagnostics and send/receive switches" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">03</span>
-            <h3>Devices</h3>
-            <p>Pairing, manual connection, discovery diagnostics and send/receive switches, plus the cross-network phone companion.</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-favorites">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>Favorites</span></div>
-            <img src="assets/en-favorites.png" alt="Favorites: the group sidebar, the saved clips and the editor's entry point" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">04</span>
-            <h3>Favorites</h3>
-            <p>The clips worth keeping, on their own shelf: groups, editing, drag-to-reorder, one-click copy back, Markdown export.</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-transfers">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>File Transfer</span></div>
-            <img src="assets/en-transfers.png" alt="File transfer: an in-flight progress bar and a transfer history with succeeded and failed states" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">05</span>
-            <h3>File Transfer</h3>
-            <p>Send files or folders by dropping them on the window. If a transfer is interrupted it continues where it stopped, a failed send can be retried, and there is a speed test. Computers found on the same Wi-Fi can be sent to without pairing first.</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-chat">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>Nearby Chat</span></div>
-            <img src="assets/en-chat.png" alt="Nearby chat: the conversation list, message bubbles and a file attachment" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">06</span>
-            <h3>Nearby Chat</h3>
-            <p>Talk to devices on the same network without pairing first; messages and files are delivered straight away.</p>
-            <p>To confirm each one, turn off both <b>Anyone nearby can send messages and files</b> and <b>Anyone nearby can send me a file</b> in <b>Settings → LAN discovery</b>: every message and file then waits for your Accept, and the sender's device name and identifier are shown first.</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-ai">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>AI config</span></div>
-            <img src="assets/en-ai.png" alt="AI config: the configuration files and skill directories that were read" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">07</span>
-            <h3>AI config</h3>
-            <p>Built-in profiles for Claude Code, Codex, Cursor, Gemini CLI, Windsurf and Continue. Compare the differences, then choose overwrite, copy alongside, or merge.</p>
-          </figcaption>
-        </figure>
-        <figure class="page" id="pg-settings">
-          <div class="page-win">
-            <div class="shot-bar"><i></i><i></i><i></i><span>Settings</span></div>
-            <img src="assets/en-settings.png" alt="Settings: section rail, search and keyboard shortcuts" width="1280" height="900" loading="lazy" decoding="async">
-          </div>
-          <figcaption>
-            <span class="page-n">08</span>
-            <h3>Settings</h3>
-            <p>A section rail for General, Connection, Data and System, with search at the top. Keyboard shortcuts are their own section and the overview tile jumps straight there; languages and themes, filters, retention limits, backup and restore, diagnostics and updates are here too.</p>
-          </figcaption>
-        </figure>
-      </div>
-    </div>
-  </div>
-</section>
-
 <section class="band" id="security">
-  <div class="wrap split">
+  <div class="wrap">
     <div>
       <p class="eyebrow">Privacy</p>
       <h2>Your content stays close to your devices</h2>
@@ -409,14 +337,7 @@
         <li><span><b>Your history, your rules.</b> How long it is kept, when it is cleared and whether it is saved with a password are all under your control.</span></li>
       </ul>
     </div>
-    <figure class="shot" style="margin-top:0">
-      <div class="shot-bar">
-        <i></i><i></i><i></i>
-        <span>Devices</span>
       </div>
-      <img src="assets/en-devices.png" alt="The devices page: LAN devices, pairing state and manual connection" width="1280">
-    </figure>
-  </div>
 </section>
 
 <section class="band" id="phone">
@@ -563,53 +484,7 @@
   </div>
 </footer>
 
-<script>
-/* The eight pages on the landing page, one at a time.
-
-   The names above the stage are links to the screenshots, so a reader without
-   scripting still has every page one click away at full size.  With scripting
-   they swap the stage instead, which is the point of the section: eight
-   windows side by side render too small to read, and being able to read them
-   is why they are there.
-
-   Written out rather than pulled in: it is the only script on the page, and a
-   landing page that fetches a file to run twenty lines has spent a request to
-   save nothing. */
-(function () {
-  var viewer = document.getElementById("pages");
-  var stage = document.getElementById("pageStage");
-  if (!viewer || !stage) return;
-
-  var pages = stage.querySelectorAll(".page");
-  var names = viewer.querySelectorAll(".vn");
-  if (!pages.length || !names.length) return;
-
-  function show(id) {
-    var i;
-    for (i = 0; i < pages.length; i++) {
-      pages[i].classList.toggle("is-on", pages[i].id === id);
-    }
-    for (i = 0; i < names.length; i++) {
-      var on = names[i].getAttribute("aria-controls") === id;
-      names[i].setAttribute("aria-current", on ? "true" : "false");
-    }
-  }
-
-  for (var i = 0; i < names.length; i++) {
-    names[i].addEventListener("click", function (e) {
-      // A modified click is a reader asking for the file, not for the stage.
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
-        return;
-      }
-      e.preventDefault();
-      show(this.getAttribute("aria-controls"));
-    });
-  }
-
-  viewer.classList.add("is-live");
-  show(pages[0].id);
-})();
-</script>
+<script src="preview.js" defer></script>
 
   <script src="downloads.js" defer></script>
 </body>

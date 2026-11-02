@@ -901,6 +901,199 @@ h3 {
   color: var(--muted);
 }
 
+/* ---------------------------------------------------- interactive preview -- */
+
+.app-preview {
+  margin-top: 32px;
+}
+
+.preview-head {
+  position: relative;
+  padding: 14px 112px 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+}
+
+.preview-steps {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  display: flex;
+  gap: 6px;
+}
+
+.preview-steps button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--page);
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.preview-steps button:hover {
+  border-color: var(--accent-line);
+  color: var(--accent-text);
+}
+
+.preview-steps button:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+.preview-shell {
+  max-width: 900px;
+  margin: 14px auto 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--raised);
+  box-shadow: var(--shadow);
+}
+
+.preview-stage {
+  position: relative;
+  aspect-ratio: 1280 / 900;
+  overflow: hidden;
+  background: var(--chrome);
+}
+
+.preview-shot {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.24s ease;
+  pointer-events: none;
+}
+
+.preview-shot.is-on {
+  opacity: 1;
+  z-index: 1;
+}
+
+/* The sidebar is the control: one transparent hit area over the column, with
+   the click mapped to the nearest row by the viewer script.  Ten tiny hot
+   rectangles were brittle at every window size, and a row a reader could not
+   tap was worse than no affordance at all. */
+.preview-sidebar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 15%;
+  z-index: 3;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.preview-sidebar:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: -2px;
+}
+
+.preview-caption {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+  padding: 0;
+  align-items: baseline;
+}
+
+.preview-caption .page-n {
+  color: var(--accent-text);
+}
+
+.preview-caption h3 {
+  margin: 0;
+  font-size: 19px;
+}
+
+.preview-caption p {
+  grid-column: 2;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14.5px;
+}
+
+.preview-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+
+.preview-tabs button {
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.preview-tabs button span {
+  margin-right: 6px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.preview-tabs button:hover {
+  border-color: var(--accent-line);
+}
+
+.preview-tabs button[aria-selected="true"] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+@media (max-width: 860px) {
+  .preview-head {
+    padding-right: 96px;
+  }
+
+  .preview-sidebar {
+    display: none;
+  }
+
+  .preview-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+
+  .preview-tabs button {
+    flex: 0 0 auto;
+  }
+
+  .preview-caption h3 {
+    font-size: 17px;
+  }
+
+  /* A 1280-wide window cannot be read at phone width.  Keep the whole window
+     rather than a crop, but let the frame scroll sideways: the tabs above are
+     still the fast way to change pages, and the screenshot stays legible. */
+  .preview-shell {
+    overflow-x: auto;
+  }
+
+  .preview-stage {
+    min-width: 640px;
+  }
+}
+
 /* --------------------------------------------------------------- tables --- */
 
 .scroller {
