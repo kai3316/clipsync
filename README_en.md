@@ -16,6 +16,7 @@
 
 <p align="center">
   <a href="https://github.com/kai3316/clipsync/releases"><img src="https://img.shields.io/github/v/release/kai3316/clipsync?color=087c6b" alt="Release"></a>
+  <a href="https://kai3316.dpdns.org/"><img src="https://img.shields.io/badge/website-kai3316.dpdns.org-087c6b" alt="Website"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platforms">
 </p>
 
@@ -213,6 +214,7 @@ ClipSync checks for a new version in Settings → Software update and asks befor
 - [Releases](https://github.com/kai3316/clipsync/releases): versions and installers
 - [Issues](https://github.com/kai3316/clipsync/issues): bug reports
 - [Website](https://kai3316.dpdns.org/index_en.html): screenshots and a fuller introduction
+- [Downloads](https://kai3316.dpdns.org/#download): Windows / macOS / Linux installers
 - [Support](https://kai3316.dpdns.org/sponsor/?lang=en): help keep the project maintained
 
 ## Development

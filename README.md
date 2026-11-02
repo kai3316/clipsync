@@ -16,6 +16,7 @@
 
 <p align="center">
   <a href="https://github.com/kai3316/clipsync/releases"><img src="https://img.shields.io/github/v/release/kai3316/clipsync?color=087c6b" alt="Release"></a>
+  <a href="https://kai3316.dpdns.org/"><img src="https://img.shields.io/badge/website-kai3316.dpdns.org-087c6b" alt="Website"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platforms">
 </p>
 
@@ -213,6 +214,7 @@ ClipSync 让你在几台电脑之间自然地复制粘贴：一边复制，另�
 - [Releases](https://github.com/kai3316/clipsync/releases)：版本更新和安装包
 - [Issues](https://github.com/kai3316/clipsync/issues)：问题反馈
 - [官网](https://kai3316.dpdns.org/)：功能介绍和界面截图
+- [下载](https://kai3316.dpdns.org/#download)：Windows / macOS / Linux 安装包
 - [赞助](https://kai3316.dpdns.org/sponsor/)：支持项目继续维护
 
 ## 开发者
