@@ -451,57 +451,41 @@
     <p class="lede">下载安装后打开就能用。Windows、macOS、Linux 都支持，互相之间也能同步。</p>
 
     <div class="download-panel">
-      <div class="download-primary">
-        <p class="download-kicker" data-download-detect>为你的系统推荐</p>
-        <h3 data-download-title>Windows</h3>
-        <p class="download-file" data-download-file>Windows 10 / 11 · 64 位</p>
-        <a class="btn btn-primary download-button" data-download-primary
-          href="https://dl.kai3316.dpdns.org/download/windows-x64.exe">下载 Windows 安装包</a>
-        <p class="download-version">最新版本 · 由 Cloudflare 提供下载</p>
-      </div>
-      <div class="download-alternatives">
-        <h4>所有平台</h4>
-        <a class="download-row" data-download="windows-x64"
-          href="https://dl.kai3316.dpdns.org/download/windows-x64.exe">
-          <span><b>Windows</b><small>Windows 10 / 11 · 64 位</small></span>
-          <span class="download-row-action">下载</span>
-        </a>
-        <a class="download-row" data-download="macos-arm64"
-          href="https://dl.kai3316.dpdns.org/download/macos-arm64.dmg">
-          <span><b>macOS</b><small>Apple 芯片 · aarch64</small></span>
-          <span class="download-row-action">下载</span>
-        </a>
-        <a class="download-row" data-download="macos-x64"
-          href="https://dl.kai3316.dpdns.org/download/macos-x64.dmg">
-          <span><b>macOS</b><small>Intel 芯片 · x64</small></span>
-          <span class="download-row-action">下载</span>
-        </a>
-        <a class="download-row" data-download="linux-x64-appimage"
-          href="https://dl.kai3316.dpdns.org/download/linux-x64.AppImage">
-          <span><b>Linux</b><small>x86_64 · AppImage</small></span>
-          <span class="download-row-action">下载</span>
-        </a>
-        <a class="download-row" data-download="linux-x64-deb"
-          href="https://dl.kai3316.dpdns.org/download/linux-x64.deb">
-          <span><b>Linux</b><small>x86_64 · .deb</small></span>
-          <span class="download-row-action">下载</span>
-        </a>
-        <a class="download-row" data-download="linux-arm64-appimage"
-          href="https://dl.kai3316.dpdns.org/download/linux-arm64.AppImage">
-          <span><b>Linux</b><small>ARM64 · AppImage</small></span>
-          <span class="download-row-action">下载</span>
-        </a>
-        <a class="download-row" data-download="linux-arm64-deb"
-          href="https://dl.kai3316.dpdns.org/download/linux-arm64.deb">
-          <span><b>Linux</b><small>ARM64 · .deb</small></span>
-          <span class="download-row-action">下载</span>
-        </a>
-      </div>
+      <article class="download-card" data-platform="windows">
+        <div class="download-card-head"><h3>Windows</h3><span class="download-badge" data-download-badge>推荐</span></div>
+        <p class="download-file">Windows 10 / 11 · 64 位</p>
+        <div class="download-actions">
+          <a class="btn btn-primary" data-download="windows-x64"
+            href="https://dl.kai3316.dpdns.org/download/windows-x64.exe">下载 Windows 版</a>
+        </div>
+      </article>
+      <article class="download-card" data-platform="macos">
+        <div class="download-card-head"><h3>macOS</h3><span class="download-badge" data-download-badge>推荐</span></div>
+        <p class="download-file">Apple 芯片 / Intel</p>
+        <div class="download-actions download-actions--pair">
+          <a class="btn" data-download="macos-arm64"
+            href="https://dl.kai3316.dpdns.org/download/macos-arm64.dmg">Apple 芯片</a>
+          <a class="btn" data-download="macos-x64"
+            href="https://dl.kai3316.dpdns.org/download/macos-x64.dmg">Intel</a>
+        </div>
+      </article>
+      <article class="download-card" data-platform="linux">
+        <div class="download-card-head"><h3>Linux</h3><span class="download-badge" data-download-badge>推荐</span></div>
+        <p class="download-file">x86_64 / ARM64</p>
+        <div class="download-actions download-actions--grid">
+          <a class="btn" data-download="linux-x64-appimage"
+            href="https://dl.kai3316.dpdns.org/download/linux-x64.AppImage">x86_64 AppImage</a>
+          <a class="btn" data-download="linux-x64-deb"
+            href="https://dl.kai3316.dpdns.org/download/linux-x64.deb">x86_64 .deb</a>
+          <a class="btn" data-download="linux-arm64-appimage"
+            href="https://dl.kai3316.dpdns.org/download/linux-arm64.AppImage">ARM64 AppImage</a>
+          <a class="btn" data-download="linux-arm64-deb"
+            href="https://dl.kai3316.dpdns.org/download/linux-arm64.deb">ARM64 .deb</a>
+        </div>
+      </article>
     </div>
 
-    <p class="elsewhere">
-      桌面版会在设置里检查新版本，提示后由你决定是否更新。局域网里另一台电脑升级后，也可以直接从它那里更新。
-    </p>
+    <p class="download-note" data-download-detect>选择适合你的版本，全部由 Cloudflare 提供下载。</p>
   </div>
 </section>
 

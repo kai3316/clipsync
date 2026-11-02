@@ -1,30 +1,27 @@
-/* Pick the download that fits the reader's machine.
+/* Mark the build that fits the reader's machine.
  *
- * The links themselves are stable, versionless names under the Cloudflare
- * bucket's /download/ prefix, so this file only chooses which one to put in
- * front.  With JavaScript unavailable the primary card still downloads a
- * working Windows build and every other platform is a visible link.
+ * The links are stable, versionless names under Cloudflare's /download/
+ * prefix; this file only adds the recommendation.  Without JavaScript every
+ * link is still a working download.
  */
 (() => {
   const zh = (document.documentElement.lang || "").toLowerCase().startsWith("zh");
   const text = zh
     ? {
-        detected: (name) => `检测到 ${name}，已为你选中`,
-        choose: "选择最适合你的版本",
-        download: (name) => `下载 ${name} 版`,
+        detected: (name, arch) => `检测到 ${name}（${arch}），推荐版本已标出。`,
+        choose: "选择适合你的版本，全部由 Cloudflare 提供下载。",
+        badge: "推荐",
       }
     : {
-        detected: (name) => `${name} detected — selected for you`,
-        choose: "Choose the build that fits",
-        download: (name) => `Download for ${name}`,
+        detected: (name, arch) => `${name} (${arch}) detected — the recommended build is marked.`,
+        choose: "Pick the build that fits your machine. All downloads are hosted by Cloudflare.",
+        badge: "Recommended",
       };
 
-  const primary = document.querySelector("[data-download-primary]");
-  const titleEl = document.querySelector("[data-download-title]");
-  const fileEl = document.querySelector("[data-download-file]");
-  const detectEl = document.querySelector("[data-download-detect]");
-  const rows = Array.from(document.querySelectorAll("[data-download]"));
-  if (!primary || !rows.length) return;
+  const links = Array.from(document.querySelectorAll("[data-download]"));
+  const cards = Array.from(document.querySelectorAll("[data-platform]"));
+  const note = document.querySelector("[data-download-detect]");
+  if (!links.length || !cards.length) return;
 
   const platform = /Windows/i.test(navigator.userAgent)
     ? "windows"
@@ -36,15 +33,12 @@
 
   async function architecture() {
     if (platform === "macos") {
-      // Intel Macs still exist, but every browser that exposes the hint can
-      // answer this; the ones that cannot are most likely on Apple silicon,
-      // and the Intel row is one click away when that guess is wrong.
       try {
         const values = await navigator.userAgentData?.getHighEntropyValues?.(["architecture"]);
         if (values?.architecture === "x86") return "x64";
         if (values?.architecture === "arm") return "arm64";
       } catch {
-        /* fall through to the default */
+        /* fall through to the common case */
       }
       return "arm64";
     }
@@ -69,19 +63,21 @@
             ? `linux-${arch}-appimage`
             : "";
 
-    const row = rows.find((item) => item.dataset.download === key);
-    if (!row) {
-      if (detectEl) detectEl.textContent = text.choose;
+    const link = links.find((item) => item.dataset.download === key);
+    if (!link) {
+      if (note) note.textContent = text.choose;
       return;
     }
 
-    const name = row.querySelector("b")?.textContent?.trim() || "";
-    const detail = row.querySelector("small")?.textContent?.trim() || "";
-    primary.href = row.getAttribute("href") || primary.href;
-    if (titleEl) titleEl.textContent = name;
-    if (fileEl) fileEl.textContent = detail;
-    primary.textContent = text.download(name);
-    if (detectEl) detectEl.textContent = text.detected(name);
-    for (const item of rows) item.classList.toggle("is-preferred", item === row);
+    const card = link.closest("[data-platform]");
+    if (!card) return;
+    for (const item of links) item.classList.toggle("is-preferred", item === link);
+    for (const item of cards) item.classList.toggle("is-preferred", item === card);
+    const badge = card.querySelector("[data-download-badge]");
+    if (badge) badge.textContent = text.badge;
+    if (note) {
+      const name = card.querySelector("h3")?.textContent?.trim() || "";
+      note.textContent = text.detected(name, arch === "arm64" ? "ARM64" : "x64");
+    }
   });
 })();

@@ -453,58 +453,41 @@
     <p class="lede">Download, install and open. Windows, macOS and Linux all work together.</p>
 
     <div class="download-panel">
-      <div class="download-primary">
-        <p class="download-kicker" data-download-detect>Recommended for your system</p>
-        <h3 data-download-title>Windows</h3>
-        <p class="download-file" data-download-file>Windows 10 / 11 · 64-bit</p>
-        <a class="btn btn-primary download-button" data-download-primary
-          href="https://dl.kai3316.dpdns.org/download/windows-x64.exe">Download for Windows</a>
-        <p class="download-version">Latest version · download hosted by Cloudflare</p>
-      </div>
-      <div class="download-alternatives">
-        <h4>All platforms</h4>
-        <a class="download-row" data-download="windows-x64"
-          href="https://dl.kai3316.dpdns.org/download/windows-x64.exe">
-          <span><b>Windows</b><small>Windows 10 / 11 · 64-bit</small></span>
-          <span class="download-row-action">Download</span>
-        </a>
-        <a class="download-row" data-download="macos-arm64"
-          href="https://dl.kai3316.dpdns.org/download/macos-arm64.dmg">
-          <span><b>macOS</b><small>Apple silicon · aarch64</small></span>
-          <span class="download-row-action">Download</span>
-        </a>
-        <a class="download-row" data-download="macos-x64"
-          href="https://dl.kai3316.dpdns.org/download/macos-x64.dmg">
-          <span><b>macOS</b><small>Intel · x64</small></span>
-          <span class="download-row-action">Download</span>
-        </a>
-        <a class="download-row" data-download="linux-x64-appimage"
-          href="https://dl.kai3316.dpdns.org/download/linux-x64.AppImage">
-          <span><b>Linux</b><small>x86_64 · AppImage</small></span>
-          <span class="download-row-action">Download</span>
-        </a>
-        <a class="download-row" data-download="linux-x64-deb"
-          href="https://dl.kai3316.dpdns.org/download/linux-x64.deb">
-          <span><b>Linux</b><small>x86_64 · .deb</small></span>
-          <span class="download-row-action">Download</span>
-        </a>
-        <a class="download-row" data-download="linux-arm64-appimage"
-          href="https://dl.kai3316.dpdns.org/download/linux-arm64.AppImage">
-          <span><b>Linux</b><small>ARM64 · AppImage</small></span>
-          <span class="download-row-action">Download</span>
-        </a>
-        <a class="download-row" data-download="linux-arm64-deb"
-          href="https://dl.kai3316.dpdns.org/download/linux-arm64.deb">
-          <span><b>Linux</b><small>ARM64 · .deb</small></span>
-          <span class="download-row-action">Download</span>
-        </a>
-      </div>
+      <article class="download-card" data-platform="windows">
+        <div class="download-card-head"><h3>Windows</h3><span class="download-badge" data-download-badge>Recommended</span></div>
+        <p class="download-file">Windows 10 / 11 · 64-bit</p>
+        <div class="download-actions">
+          <a class="btn btn-primary" data-download="windows-x64"
+            href="https://dl.kai3316.dpdns.org/download/windows-x64.exe">Download for Windows</a>
+        </div>
+      </article>
+      <article class="download-card" data-platform="macos">
+        <div class="download-card-head"><h3>macOS</h3><span class="download-badge" data-download-badge>Recommended</span></div>
+        <p class="download-file">Apple silicon / Intel</p>
+        <div class="download-actions download-actions--pair">
+          <a class="btn" data-download="macos-arm64"
+            href="https://dl.kai3316.dpdns.org/download/macos-arm64.dmg">Apple silicon</a>
+          <a class="btn" data-download="macos-x64"
+            href="https://dl.kai3316.dpdns.org/download/macos-x64.dmg">Intel</a>
+        </div>
+      </article>
+      <article class="download-card" data-platform="linux">
+        <div class="download-card-head"><h3>Linux</h3><span class="download-badge" data-download-badge>Recommended</span></div>
+        <p class="download-file">x86_64 / ARM64</p>
+        <div class="download-actions download-actions--grid">
+          <a class="btn" data-download="linux-x64-appimage"
+            href="https://dl.kai3316.dpdns.org/download/linux-x64.AppImage">x86_64 AppImage</a>
+          <a class="btn" data-download="linux-x64-deb"
+            href="https://dl.kai3316.dpdns.org/download/linux-x64.deb">x86_64 .deb</a>
+          <a class="btn" data-download="linux-arm64-appimage"
+            href="https://dl.kai3316.dpdns.org/download/linux-arm64.AppImage">ARM64 AppImage</a>
+          <a class="btn" data-download="linux-arm64-deb"
+            href="https://dl.kai3316.dpdns.org/download/linux-arm64.deb">ARM64 .deb</a>
+        </div>
+      </article>
     </div>
 
-    <p class="elsewhere">
-      The desktop app checks for updates in Settings and asks before installing. If another
-      computer on the same network has already updated, it can update from that one too.
-    </p>
+    <p class="download-note" data-download-detect>Pick the build that fits your machine. All downloads are hosted by Cloudflare.</p>
   </div>
 </section>
 
