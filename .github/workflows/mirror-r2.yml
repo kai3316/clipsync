@@ -3,25 +3,36 @@ name: Mirror release to Cloudflare R2
 on:
   release:
     types: [published]
+  # The desktop release is published inside its own workflow with the Actions
+  # token, and GitHub does not deliver a `release` event for that publication.
+  # Wait for the workflow itself instead: it is the one that creates the
+  # release, uploads every asset and publishes it.
+  workflow_run:
+    workflows: ["Tauri Desktop"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
         description: "Release tag to mirror"
         required: true
-        default: "v1.3.2"
+        default: "v1.3.3"
 
 permissions:
   contents: read
 
 concurrency:
-  group: r2-mirror-${{ github.event.release.tag_name || inputs.tag }}
+  group: r2-mirror-${{ github.event.workflow_run.head_branch || github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   mirror:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v'))
     runs-on: ubuntu-latest
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ github.event.workflow_run.head_branch || github.event.release.tag_name || inputs.tag }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
