@@ -17,7 +17,7 @@ is what drops the old secret and its pin.
 
 from __future__ import annotations
 
-from internal.config.config import Config
+from internal.config.config import Config, PeerInfo
 from internal.infrastructure.runtime.internet_pairing import InternetPairingService
 from internal.security.keyexchange import generate_keypair
 from internal.transport.relay import (
@@ -234,4 +234,37 @@ def test_unpair_keeps_the_lan_fallback_from_rebuilding_the_relay_route():
     assert config.peer_relay_secrets == {}
     assert service.channels() == {}
     assert saves  # unpair persisted the tombstone
+
+
+def test_a_lan_paired_peer_is_not_offered_enrollment_after_an_unpair():
+    """The other half of the fallback: we must not offer our secret either."""
+    config, service, saves = a_service(
+        internet_sync_enabled=True,
+        peers={"remote": PeerInfo("remote", "Remote", paired=True)},
+        relay_unpaired_peers=["remote"],
+    )
+    sent = []
+    service.send_enroll = lambda peer_id, payload: sent.append(peer_id) or True
+
+    assert service.offer_enroll("remote") is False
+    assert sent == []
+
+
+def test_a_confirmed_code_pairing_clears_the_unpair_tombstone():
+    """Pairing the device again is the user's new grant, so enrollment resumes."""
+    secret = "K7Q2M9Z"
+    pinned = generate_keypair()[1]
+    config, service, saves = a_service(
+        netpair_secrets={"remote": secret},
+        netpair_peer_keys={"remote": pinned},
+        relay_unpaired_peers=["remote"],
+    )
+
+    result = service.handle_hello(
+        "remote", config.device_id, "Remote", netpair_topic(secret), dh_pub=pinned
+    )
+
+    assert result["accepted"] is True
+    assert config.relay_unpaired_peers == []
+
 
