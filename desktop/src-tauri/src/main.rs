@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+#[cfg(windows)]
 mod confine;
 mod error;
 mod i18n;
@@ -2552,6 +2553,9 @@ fn updater_pubkey(app: &tauri::AppHandle) -> Option<String> {
 /// `file:` name -- and the version read out of it -- is as protected as the
 /// payload.  That is what lets an offline host say "this is a newer release"
 /// without a manifest.
+/// The offline path keeps this stricter variant: only the signature is
+/// available there, so the signed filename has to name a version itself.
+#[allow(dead_code)]
 fn verify_signed_release(
     bytes: &[u8],
     release_signature: &str,
@@ -2972,7 +2976,7 @@ fn is_runnable_installer(path: &str) -> bool {
     cfg!(target_os = "windows") && path.to_ascii_lowercase().ends_with("-setup.exe")
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code, unused_variables))]
 /// Run the installer the sidecar staged, on the one platform where that is a
 /// thing this process may do on the reader's behalf.
 ///

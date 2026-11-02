@@ -237,8 +237,6 @@ mod platform {
         unsafe extern "C" fn(*mut c_void, *mut c_void, i32) -> *mut c_void;
     type SendBoolFromOptions =
         unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> i8;
-    type SendI8 = unsafe extern "C" fn(*mut c_void, *mut c_void, i8) -> i8;
-    type SendVoidFromObj = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
     type SendVoidSelObjBool =
         unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, i8);
 
@@ -285,18 +283,6 @@ mod platform {
     unsafe fn send_options(obj: *mut c_void, name: &str, options: usize) -> i8 {
         let send: SendBoolFromOptions = std::mem::transmute(objc_msgSend as *const ());
         send(obj, selector(name), options)
-    }
-
-    unsafe fn send_void(obj: *mut c_void, name: &str, arg: *mut c_void) {
-        let send: SendVoidFromObj = std::mem::transmute(objc_msgSend as *const ());
-        send(obj, selector(name), arg)
-    }
-
-    /// A BOOL parameter is one byte, not an NSUInteger; mixing the two ABI
-    /// signatures works by accident on some arm64 builds and not others.
-    unsafe fn send_i8(obj: *mut c_void, name: &str, value: i8) -> i8 {
-        let send: SendI8 = std::mem::transmute(objc_msgSend as *const ());
-        send(obj, selector(name), value)
     }
 
     /// Run one selector on the AppKit main thread, synchronously.
