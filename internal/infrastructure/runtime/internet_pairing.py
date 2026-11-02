@@ -487,6 +487,7 @@ class InternetPairingService:
             # (the netpair one wins, as the mirror does), so it is not
             # subscribed to twice either.
             and pid not in (self.config.netpair_secrets or {})
+            and pid not in (getattr(self.config, "relay_unpaired_peers", None) or ())
             and getattr((getattr(self.config, "peers", {}) or {}).get(pid), "paired", False)
         ]
         if enrolled:
@@ -715,6 +716,12 @@ class InternetPairingService:
             self.config, "internet_sync_enabled", False
         ):
             return False
+        if peer_id in (getattr(self.config, "relay_unpaired_peers", None) or ()):
+            # The user ended this device's internet pairing.  Its LAN pairing
+            # may still be live, but re-offering the relay secret would rebuild
+            # the route that removal just took down, and the device list would
+            # be honest while clipboard frames kept crossing the relay.
+            return False
         peer = (getattr(self.config, "peers", {}) or {}).get(peer_id)
         if peer is None or not bool(getattr(peer, "paired", False)):
             return False
@@ -743,6 +750,11 @@ class InternetPairingService:
         side learns OUR secret"); the guard is what makes it end.
         """
         if not isinstance(peer_id, str) or not peer_id or not isinstance(payload, dict):
+            return False
+        if peer_id in (getattr(self.config, "relay_unpaired_peers", None) or ()):
+            # Do not let the peer re-enroll us after the user unpaired the
+            # internet route.  The LAN link can still be paired; that is a
+            # separate trust, and the person asked for the relay one to end.
             return False
         secret = payload.get("relay_secret")
         if (
@@ -1300,6 +1312,11 @@ class InternetPairingService:
             ]:
                 self.config.netpair_secrets.pop(key, None)
         self.config.netpair_secrets[source_device] = secret
+        # A confirmed code pairing is a new grant of internet trust; the
+        # user's earlier unpair no longer applies to this device.
+        muted = getattr(self.config, "relay_unpaired_peers", None) or []
+        if source_device in muted:
+            muted.remove(source_device)
         self._waiting_since.pop(source_device, None)
         if is_provisional_owner(owner) and owner != source_device:
             # This hello is the answer the tag was waiting for: the wait and its
@@ -1622,6 +1639,20 @@ class InternetPairingService:
         # unpair coming undone, and the device row still shows the LAN pairing
         # that owns it.
         (getattr(self.config, "peer_relay_secrets", {}) or {}).pop(peer_id, None)
+        # A device can be paired over the LAN at the same moment its internet
+        # pairing ends.  Dropping the enrolled secret by itself lasted exactly
+        # until the peer's next ``relay_enroll``; the row was gone from the
+        # internet card while frames still crossed the relay, and "test
+        # connection" still answered with relay latency.  Remember the user's
+        # decision instead, so the automatic LAN fallback cannot undo it.
+        # A confirmed code pairing is what clears this again.
+        if not is_provisional_key(peer_id):
+            muted = getattr(self.config, "relay_unpaired_peers", None)
+            if muted is None:
+                muted = []
+                self.config.relay_unpaired_peers = muted
+            if peer_id not in muted:
+                muted.append(peer_id)
         self._enrolled.discard(peer_id)
         self._names.pop(peer_id, None)
         self._last_seen.pop(peer_id, None)

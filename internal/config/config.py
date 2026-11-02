@@ -488,6 +488,11 @@ class Config:
     # was labelled with the raw peer id.  Reported as "升级完以后，它的名字显示也会
     # 不太对".  A user-assigned alias outranks it; see `known_device_names`.
     netpair_names: dict[str, str] = field(default_factory=dict)
+    # Peers whose internet pairing the user ended explicitly.  Their LAN
+    # pairing may still stand, so the LAN link keeps working, but the automatic
+    # relay enrollment must not quietly rebuild the internet route they just
+    # removed.  Cleared when a code pairing with the device is confirmed again.
+    relay_unpaired_peers: list[str] = field(default_factory=list)
     # Round 22: optional user-set pairing passphrase.  When set, netpair
     # channel keys are derived from the passphrase (with the 35-bit code secret
     # as a salt) instead of the code alone, closing the code's brute-force
@@ -818,6 +823,7 @@ FIELD_RULES: dict[str, tuple] = {
     "netpair_secrets": ("strdict",),
     "netpair_aliases": ("strdict",),
     "netpair_names": ("strdict",),
+    "relay_unpaired_peers": ("strlist_nonnull",),
     "netpair_dh_key": ("str",),
     "netpair_peer_keys": ("strdict",),
     # code → {"secret": str, "created_at": float}; validated to that shape so a
@@ -1211,6 +1217,7 @@ def load() -> Config:
                 "netpair_secrets",
                 "netpair_aliases",
                 "netpair_names",
+                "relay_unpaired_peers",
                 "netpair_dh_key",
                 "netpair_peer_keys",
                 "netpair_pending",
@@ -1458,6 +1465,7 @@ def save(cfg: Config, enc_mgr: "EncryptionManager | None" = None):
             "netpair_secrets": cfg.netpair_secrets,
             "netpair_aliases": cfg.netpair_aliases,
             "netpair_names": cfg.netpair_names,
+            "relay_unpaired_peers": list(cfg.relay_unpaired_peers),
             "netpair_dh_key": cfg.netpair_dh_key,
             "netpair_peer_keys": cfg.netpair_peer_keys,
             "netpair_pending": cfg.netpair_pending,

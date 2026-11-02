@@ -205,3 +205,33 @@ def test_a_hello_repeating_a_confirmed_channel_is_still_idempotent():
     assert config.netpair_secrets == {"remote": secret}
     assert config.netpair_peer_keys == {"remote": pinned}
     assert service.netpair_keys_for_topic(netpair_topic(secret)) == before
+
+
+def test_unpair_keeps_the_lan_fallback_from_rebuilding_the_relay_route():
+    """Ending the internet pairing must outlast the peer's next enroll offer.
+
+    The device can still be paired over the LAN, and that pairing sends
+    ``relay_enroll`` whenever its link comes up.  Removing only the saved
+    secrets therefore lasted until the next offer: the internet card was empty
+    while the relay channel came straight back, sync continued, and "test
+    connection" still reported relay latency.
+    """
+    secret = "K7Q2M9Z"
+    config, service, saves = a_service(
+        internet_sync_enabled=True,
+        netpair_secrets={"remote": secret},
+        peer_relay_secrets={"remote": "a" * 64},
+    )
+
+    assert service.unpair("remote") == {"ok": True}
+    assert config.netpair_secrets == {}
+    assert config.peer_relay_secrets == {}
+    assert config.relay_unpaired_peers == ["remote"]
+
+    # The peer's next LAN offer is not a new grant.  It must not restore the
+    # enrolled secret, and it must not be answered.
+    assert service.handle_enroll("remote", {"relay_secret": "b" * 64}) is False
+    assert config.peer_relay_secrets == {}
+    assert service.channels() == {}
+    assert saves  # unpair persisted the tombstone
+

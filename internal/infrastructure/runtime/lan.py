@@ -7205,6 +7205,10 @@ class LanRuntime:
         # machine clipboard content, chat and files.
         if pid in (getattr(self.config, "removed_peers", {}) or {}):
             return False
+        if pid in (getattr(self.config, "relay_unpaired_peers", None) or ()):
+            # The user unpaired the internet route.  A stale enrolled secret
+            # must not make the relay, or "test connection", claim otherwise.
+            return False
         if pid in (getattr(self.config, "netpair_secrets", {}) or {}):
             return True
         if pid in (getattr(self.config, "peer_relay_secrets", {}) or {}):
@@ -7971,8 +7975,11 @@ class LanRuntime:
         # this machine's clipboard from being mirrored to a device the user
         # took away.
         removed = set(getattr(self.config, "removed_peers", {}) or {})
+        relay_unpaired = set(getattr(self.config, "relay_unpaired_peers", None) or ())
         for peer_id, peer_secret in (self.config.peer_relay_secrets or {}).items():
             if not peer_secret or peer_id in netpair_secrets or peer_id in removed:
+                continue
+            if peer_id in relay_unpaired:
                 continue
             if peer_id in lan_delivered:
                 continue

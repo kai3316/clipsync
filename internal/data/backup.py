@@ -256,6 +256,11 @@ def backup_config_dict(cfg: Config) -> dict:
             for k, v in (cfg.netpair_names or {}).items()
             if isinstance(k, str) and isinstance(v, str)
         },
+        # A restore that forgot which internet pairings the user ended would
+        # let the LAN fallback enroll those peers again on the first refresh.
+        "relay_unpaired_peers": [
+            peer for peer in (cfg.relay_unpaired_peers or []) if isinstance(peer, str)
+        ],
         # ---- security posture ----
         # The fields a restore that left them out would reset to their
         # defaults, two of which are the permissive ones (``file_open_to_all``,
