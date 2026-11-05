@@ -62,6 +62,21 @@ pub fn inject_paste(delay: Duration) -> Result<(), String> {
     platform::inject()
 }
 
+/// Whether this process currently holds macOS Accessibility permission.
+///
+/// A pure read: unlike the paste path, this never asks macOS to show its
+/// permission prompt.  Always false on other platforms.
+pub fn accessibility_granted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        platform::accessibility_granted()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// Give the focus back to *foreground*, wait for it to settle, then paste.
 ///
 /// A missing `foreground` is not a hard failure: hiding our window is usually
@@ -324,11 +339,40 @@ mod platform {
         result
     }
 
+    /// Read the current Accessibility grant without showing a prompt.
+    ///
+    /// The diagnostics card uses this to report what macOS believes about
+    /// this exact build; asking `AXIsProcessTrusted` is deliberately separate
+    /// from [`accessibility_trusted`] so opening diagnostics can never itself
+    /// put a system dialog on screen.
+    pub fn accessibility_granted() -> bool {
+        unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    fn macos_major_version() -> u64 {
+        std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|version| version.trim().split('.').next()?.parse().ok())
+            .unwrap_or(0)
+    }
+
     fn permission_hint() -> String {
-        "自动粘贴需要 macOS「辅助功能」权限：请打开「系统设置 → 隐私与安全性 → 辅助功能」，\
-         把 ClipSync 的开关打开。第一次触发粘贴时系统会弹出授权提示并把它列进这个列表；\
-         如果刚才没有看到提示，再触发一次粘贴即可，打开开关后重试。"
-            .to_string()
+        // macOS 27 Golden Gate renamed this pane, but the grant itself and the
+        // settings URL did not change.  The sentence has to name what the user
+        // will actually see in System Settings.
+        let name = if macos_major_version() >= 27 {
+            "设备控制与数据访问"
+        } else {
+            "辅助功能"
+        };
+        format!(
+            "自动粘贴需要 macOS「{name}」权限：请打开「系统设置 → 隐私与安全性 → {name}」，\
+             把 ClipSync 的开关打开。第一次触发粘贴时系统会弹出授权提示并把它列进这个列表；\
+             如果刚才没有看到提示，再触发一次粘贴即可，打开开关后重试。"
+        )
     }
 
     /// Ask macOS for Accessibility once (the option dictionary is what makes it

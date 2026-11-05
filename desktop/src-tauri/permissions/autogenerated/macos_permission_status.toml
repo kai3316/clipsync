@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-macos-permission-status"
+description = "Enables the macos_permission_status command without any pre-configured scope."
+commands.allow = ["macos_permission_status"]
+
+[[permission]]
+identifier = "deny-macos-permission-status"
+description = "Denies the macos_permission_status command without any pre-configured scope."
+commands.deny = ["macos_permission_status"]

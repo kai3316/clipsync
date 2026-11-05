@@ -120,6 +120,7 @@ _EN: dict[str, str] = {
     "diagnostics.action.firewall_manual": "Allow the ports manually as root: {script}",
     "diagnostics.action.firewall_unsupported": "Firewall settings are not supported on this OS.",
     "diagnostics.action.local_network_pane_failed": "Could not open the macOS Local Network permission settings.",  # noqa: E501
+    "diagnostics.action.permission_pane_failed": "Could not open the macOS privacy permission settings.",  # noqa: E501
     "diagnostics.action.windows_settings_failed": "Could not open the Windows network/firewall settings.",  # noqa: E501
     "diagnostics.action.permission_unsupported": "Permission settings are not supported here.",
     "diagnostics.action.unknown": "Unknown action: {action}",
@@ -1098,6 +1099,7 @@ _ZH: dict[str, str] = {
     "diagnostics.action.firewall_manual": "请以 root 身份手动放行端口：{script}",
     "diagnostics.action.firewall_unsupported": "本系统不支持防火墙设置。",
     "diagnostics.action.local_network_pane_failed": "无法打开 macOS 的本地网络权限设置。",
+    "diagnostics.action.permission_pane_failed": "无法打开 macOS 的权限设置。",
     "diagnostics.action.windows_settings_failed": "无法打开 Windows 的网络/防火墙设置。",
     "diagnostics.action.permission_unsupported": "本系统不支持权限设置。",
     "diagnostics.action.unknown": "未知操作：{action}",

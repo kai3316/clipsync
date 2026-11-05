@@ -120,6 +120,7 @@ fn main() {
             "factory_reset",
             "diagnostics_report",
             "diagnostics_request",
+            "macos_permission_status",
             "update_check",
             "update_status",
             "update_download",

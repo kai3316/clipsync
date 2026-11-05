@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { t } from "../i18n";
-import type { AppStatus, ChatMessagesPage, ChatSessionsPage, Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticsReport, Favorite, FavoritesPage, HistoryPage, HistoryPreview, InternetPairingStatus, Overview, QuickPasteChooseResult, QuickPasteSettings, RelayTestResult, Settings, SidecarEvent, TransfersPage, UpdateCheckResult, UpdateDownloadResult, UpdateInstallResult, UpdateOpenFolderResult, UpdateStatusResult } from "./types";
+import type { AppStatus, ChatMessagesPage, ChatSessionsPage, Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticsReport, Favorite, FavoritesPage, HistoryPage, HistoryPreview, InternetPairingStatus, MacosPermissions, Overview, QuickPasteChooseResult, QuickPasteSettings, RelayTestResult, Settings, SidecarEvent, TransfersPage, UpdateCheckResult, UpdateDownloadResult, UpdateInstallResult, UpdateOpenFolderResult, UpdateStatusResult } from "./types";
 
 export function inDesktop(): boolean {
   return isTauri();
@@ -488,6 +488,7 @@ export const bridge = {
   diagnosticsReport: () => command<DiagnosticsReport>("diagnostics_report"),
   diagnosticsRequest: (action: DiagnosticAction) =>
     command<{ ok: boolean; error?: string }>("diagnostics_request", { action }),
+  macosPermissionStatus: () => command<MacosPermissions>("macos_permission_status"),
   updateCheck: () => command<UpdateCheckResult>("update_check"),
   updateStatus: () => command<UpdateStatusResult>("update_status"),
   updateDownload: () => command<UpdateDownloadResult>("update_download"),

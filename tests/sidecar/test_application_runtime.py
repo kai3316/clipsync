@@ -351,6 +351,14 @@ def test_diagnostics_request_rejects_invalid_actions(runtime_app):
     assert error.value.code == "VALIDATION_ERROR"
 
 
+def test_diagnostics_request_accepts_the_macos_permission_actions(runtime_app):
+    # The action is macOS-only at the repair layer, but the RPC schema must know
+    # it on every platform or a macOS window could not ask for it.
+    for action in ("accessibility", "full_disk_access"):
+        result = Dispatcher(runtime_app).call("diagnostics.request", {"action": action})
+        assert "ok" in result
+
+
 def test_update_download_still_starts_when_the_peer_request_fails(runtime_app, monkeypatch):
     app = runtime_app
     monkeypatch.setattr(

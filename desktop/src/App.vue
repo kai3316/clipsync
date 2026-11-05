@@ -6,7 +6,7 @@ import {
 } from "@lucide/vue";
 import logo from "../../assets/icon.svg";
 import { bridge, inDesktop } from "./api/bridge";
-import type { Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticCheck, DiagnosticItem, DiagnosticsReport, HistoryItem, HistoryPreview, HistoryPreviewFile, RelayTestResult } from "./api/types";
+import type { Device, DeviceCertificate, DeviceProbeResult, DiagnosticAction, DiagnosticCheck, DiagnosticItem, DiagnosticsReport, HistoryItem, HistoryPreview, HistoryPreviewFile, MacosPermissions, RelayTestResult } from "./api/types";
 import { LOCALES, LOCALE_NAMES, currentLocale, setLocale, t } from "./i18n";
 import { dateTime, dayLabel, isPlaceholderPreview, previewText, shortTime, size } from "./i18n/format";
 import { createApplicationStore } from "./stores/application";
@@ -2238,6 +2238,7 @@ const transferPreselect = ref("");
 const restartOpen = ref(false);
 const diagnosticsOpen = ref(false);
 const diagnosticsReport = ref<DiagnosticsReport | null>(null);
+const macosPermissionStatus = ref<MacosPermissions | null>(null);
 const diagnosticsBusy = ref(false);
 const diagnosticsRepairBusy = ref(false);
 const updateChecking = ref(false);
@@ -2617,6 +2618,24 @@ const diagnosticsOverview = computed(() => {
 // off the flat `permissions` check, exactly as the legacy panel's flat list does.
 const permissionsRepairCheck = computed(() =>
   diagnosticsReport.value?.checks?.find((check) => check.id === "permissions" && !check.ok) || null);
+/** macOS only: the two privacy grants that decide paste, file and AI access.
+ *
+ * Names move with the OS: macOS 27 calls Accessibility "Device Control and
+ * Data Access".  The status comes from the native host, because only the app
+ * itself can answer `AXIsProcessTrusted` without asking macOS to prompt.
+ */
+const macosPermissions = computed(() =>
+  macosPermissionStatus.value?.supported ? macosPermissionStatus.value : null);
+const macosAccessibilityName = computed(() =>
+  (macosPermissionStatus.value?.os_major || 0) >= 27
+    ? t("设备控制与数据访问")
+    : t("辅助功能"));
+const macosFullDiskStatusLabel = computed(() => {
+  const status = macosPermissionStatus.value?.full_disk_access.status;
+  if (status === "granted") return t("已授权");
+  if (status === "denied") return t("未授权");
+  return t("无法检测");
+});
 /** The once-only note about what the window's × does.
  *
  * `CloseRequested` hides the window to the tray and keeps syncing — which is the
@@ -3646,6 +3665,11 @@ function diagnosticsText(): string {
     `${t("总体状态")}：${diagnosticsSummaryLabel(report.summary)}`,
     `${t("概览")}：${diagnosticsOverview.value}`,
   ];
+  if (macosPermissions.value) {
+    lines.push("", t("macOS 权限"));
+    lines.push(`${macosAccessibilityName.value}：${macosPermissions.value.accessibility.granted ? t("已授权") : t("未授权")}`);
+    lines.push(`${t("完全磁盘访问权限")}：${macosFullDiskStatusLabel.value}`);
+  }
   for (const group of diagnosticGroups.value) {
     lines.push("", `${group.label} — ${diagnosticVerdictLabel(diagnosticVerdict(group))}`);
     for (const item of group.items) {
@@ -3660,6 +3684,16 @@ function diagnosticsText(): string {
 async function copyDiagnostics() {
   const copied = await copyText(diagnosticsText());
   diagnosticsCopied.value = copied ? t("诊断结果已复制，可以直接粘贴到反馈里。") : "";
+}
+async function loadMacosPermissions() {
+  if (!inDesktop()) return;
+  try {
+    macosPermissionStatus.value = await bridge.macosPermissionStatus();
+  } catch {
+    // A host too old to answer this is not a diagnostics failure; the macOS
+    // block simply stays hidden.
+    macosPermissionStatus.value = null;
+  }
 }
 async function refreshDiagnostics(force = false) {
   if (diagnosticsBusy.value) return;
@@ -3677,8 +3711,9 @@ async function openDiagnostics() {
   if (!diagnosticsAvailable.value) return;
   diagnosticsOpen.value = true;
   diagnosticsReport.value = null;
+  macosPermissionStatus.value = null;
   diagnosticsCopied.value = "";
-  await refreshDiagnostics();
+  await Promise.all([refreshDiagnostics(), loadMacosPermissions()]);
 }
 /** 重新检测, which reports itself.
  *
@@ -3686,7 +3721,7 @@ async function openDiagnostics() {
  * the scan is worth a word — including the count, because how many of the
  * checks passed is the answer the button was pressed for. */
 async function rerunDiagnostics() {
-  await refreshDiagnostics(true);
+  await Promise.all([refreshDiagnostics(true), loadMacosPermissions()]);
   const checks = diagnosticsReport.value?.checks || [];
   // A pending check has not had its chance yet, so it is neither a pass nor a
   // failure and is left out of both halves of the count — the same reading
@@ -3707,7 +3742,14 @@ async function repairDiagnostics(kind: DiagnosticAction) {
       store.setError({ code: "DIAG_REPAIR_FAILED", message: result.error || t("无法打开系统设置"), retryable: false });
       return;
     }
-    store.toast("ui.settings", kind === "firewall" ? t("已请求修复防火墙规则") : t("已打开本地网络权限设置"));
+    store.toast("ui.settings",
+      kind === "firewall"
+        ? t("已请求修复防火墙规则")
+        : kind === "accessibility"
+          ? t("已打开辅助功能设置")
+          : kind === "full_disk_access"
+            ? t("已打开完全磁盘访问设置")
+            : t("已打开本地网络权限设置"));
     // The elevated rule may land a moment later, so re-scan after a pause.
     if (kind === "firewall") setTimeout(() => { if (diagnosticsOpen.value) void refreshDiagnostics(); }, 2500);
   } finally { diagnosticsRepairBusy.value = false; }
@@ -7673,6 +7715,21 @@ async function translateText() {
             </ul>
           </li>
         </ul>
+        <section v-if="macosPermissions" class="diag-permissions">
+          <h3>{{ t("macOS 权限") }}</h3>
+          <ul>
+            <li :class="macosPermissions.accessibility.granted ? 'diag-ok' : 'diag-fail'">
+              <span class="diag-item"><span class="diag-mark" aria-hidden="true">{{ macosPermissions.accessibility.granted ? "✓" : "✕" }}</span><span class="diag-label">{{ macosAccessibilityName }}</span>{{ macosPermissions.accessibility.granted ? t("已授权") : t("未授权") }}</span>
+              <span v-if="!macosPermissions.accessibility.granted" class="note">{{ t("如果系统设置里的开关是开的，但这里仍未授权，通常是旧版本留下了同名条目；删掉旧的 ClipSync 条目，再打开当前应用的权限。") }}</span>
+              <button v-if="!macosPermissions.accessibility.granted" type="button" class="status-action" :disabled="diagnosticsRepairBusy" @click="repairDiagnostics('accessibility')"><Wrench :size="14" />{{ t("打开设置") }}</button>
+            </li>
+            <li :class="macosPermissions.full_disk_access.status === 'granted' ? 'diag-ok' : macosPermissions.full_disk_access.status === 'denied' ? 'diag-fail' : 'diag-warn'">
+              <span class="diag-item"><span class="diag-mark" aria-hidden="true">{{ macosPermissions.full_disk_access.status === "granted" ? "✓" : macosPermissions.full_disk_access.status === "denied" ? "✕" : "!" }}</span><span class="diag-label">{{ t("完全磁盘访问权限") }}</span>{{ macosFullDiskStatusLabel }}</span>
+              <span class="note">{{ t("只有读取其他应用数据或受保护目录时才需要完全磁盘访问；普通剪贴板同步和手动选择文件不需要。") }}</span>
+              <button v-if="macosPermissions.full_disk_access.status !== 'granted'" type="button" class="status-action" :disabled="diagnosticsRepairBusy" @click="repairDiagnostics('full_disk_access')"><Wrench :size="14" />{{ t("打开设置") }}</button>
+            </li>
+          </ul>
+        </section>
         <template v-if="permissionsRepairCheck">
           <p class="note">{{ diagnosticsCheckText(permissionsRepairCheck) }}</p>
           <p v-if="permissionsRepairCheck.guidance_text || permissionsRepairCheck.guidance" class="note">{{ permissionsRepairCheck.guidance_text || permissionsRepairCheck.guidance }}</p>

@@ -1,6 +1,6 @@
 """OS repair actions the diagnostics report's hints point at.
 
-Two actions exist, matching the legacy ``/api/diagnostics/request`` contract:
+Four actions exist, matching the legacy ``/api/diagnostics/request`` contract:
 
 ``firewall``
     Windows: re-apply the allow rule for the TCP sync port and the web
@@ -12,6 +12,11 @@ Two actions exist, matching the legacy ``/api/diagnostics/request`` contract:
     macOS 15+ Local Network permission: open the exact System Settings pane.
     Windows has no dedicated page, so the firewall/network page is the closest
     target; Linux has no such permission.
+``accessibility`` / ``full_disk_access``
+    macOS-only privacy panes.  The Accessibility pane is called "Device
+    Control and Data Access" on macOS 27 and later, but the URL is unchanged;
+    Full Disk Access has no API that can request it, so opening its pane is the
+    only repair.
 
 The platform work lives here, not in a caller, so the legacy web panel and the
 native desktop request exactly the same repair.
@@ -26,6 +31,15 @@ from internal.i18n import T
 FIREWALL_PANE = "x-apple.systempreferences:com.apple.preference.security?Firewall"
 LOCAL_NETWORK_PANE = (
     "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
+)
+# macOS 27 renamed the pane to "Device Control and Data Access", but the URL
+# below is the same setting.  Full Disk Access has its own pane and no API that
+# can request it; the only honest repair is to open it.
+ACCESSIBILITY_PANE = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+)
+FULL_DISK_ACCESS_PANE = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
 )
 WINDOWS_FIREWALL_URI = "ms-settings:network-firewall"
 
@@ -175,6 +189,18 @@ def request(action: str, cfg) -> dict:
                 # No local-network permission exists on Linux — nothing to do.
                 return {"ok": True}
             return {"ok": False, "error": T("diagnostics.action.permission_unsupported")}
+
+        if action in ("accessibility", "full_disk_access"):
+            if system != "Darwin":
+                return {"ok": False, "error": T("diagnostics.action.permission_unsupported")}
+            pane = (
+                ACCESSIBILITY_PANE
+                if action == "accessibility"
+                else FULL_DISK_ACCESS_PANE
+            )
+            if macos_open_settings(pane):
+                return {"ok": True}
+            return {"ok": False, "error": T("diagnostics.action.permission_pane_failed")}
 
         return {"ok": False, "error": T("diagnostics.action.unknown", action=action)}
     except Exception as exc:

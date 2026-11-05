@@ -633,7 +633,18 @@ export interface DiagnosticsReport {
   version: string;
 }
 
-export type DiagnosticAction = "firewall" | "local_network";
+export type DiagnosticAction =
+  | "firewall"
+  | "local_network"
+  | "accessibility"
+  | "full_disk_access";
+
+export interface MacosPermissions {
+  supported: boolean;
+  os_major: number;
+  accessibility: { granted: boolean; pane: string };
+  full_disk_access: { status: "granted" | "denied" | "unknown"; pane: string };
+}
 
 // The update lifecycle is owned by the sidecar; this client only mirrors it.
 // `fraction` is 0–1 and `downloaded`/`total` are bytes (0 when unknown).

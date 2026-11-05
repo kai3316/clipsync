@@ -667,7 +667,9 @@ class Dispatcher:
             return self.app.diagnostics()
         if method == "diagnostics.request":
             validate_params(params, {
-                "action": (str, lambda v: v in ("firewall", "local_network")),
+                "action": (str, lambda v: v in (
+                "firewall", "local_network", "accessibility", "full_disk_access",
+            )),
             }, ("action",))
             return self.app.diagnostics_request(params["action"])
         if method == "update.check":

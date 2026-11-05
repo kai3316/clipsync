@@ -600,6 +600,78 @@ async fn autostart_status(window: WebviewWindow, app: tauri::AppHandle) -> Resul
         .map_err(|_| BridgeError::new("AUTOSTART_FAILED", "Could not query auto-start"))
 }
 
+/// The macOS privacy panes the diagnostics card can point at.
+///
+/// macOS 27 Golden Gate renamed the Accessibility pane to "Device Control and
+/// Data Access"; the settings URL is kept in one place so the card and the
+/// sidecar's repair action cannot disagree about it.
+const MACOS_ACCESSIBILITY_PANE: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+const MACOS_FULL_DISK_ACCESS_PANE: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+
+#[cfg(target_os = "macos")]
+fn macos_major_version() -> u64 {
+    std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|version| version.trim().split('.').next()?.parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_major_version() -> u64 {
+    0
+}
+
+/// Probe Full Disk Access without reading the protected database.
+///
+/// macOS exposes no "is Full Disk Access granted" API.  Opening the user's TCC
+/// database is the standard probe: it is unreadable without that grant, and
+/// opening the handle without reading a byte is enough to distinguish granted
+/// from denied.  Anything unexpected (missing file, moved database in a future
+/// macOS) is reported as unknown rather than as a denial.
+#[cfg(target_os = "macos")]
+fn macos_full_disk_access_status() -> &'static str {
+    let Ok(home) = std::env::var("HOME") else {
+        return "unknown";
+    };
+    let path = std::path::Path::new(&home)
+        .join("Library/Application Support/com.apple.TCC/TCC.db");
+    match std::fs::File::open(path) {
+        Ok(_) => "granted",
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => "denied",
+        Err(_) => "unknown",
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_full_disk_access_status() -> &'static str {
+    "unknown"
+}
+
+/// What macOS currently thinks about this exact build's privacy grants.
+///
+/// A pure read: opening diagnostics must never show an authorization prompt.
+/// `os_major` lets the window choose the pane name macOS 27 renamed.
+#[tauri::command]
+fn macos_permission_status() -> Value {
+    json!({
+        "supported": cfg!(target_os = "macos"),
+        "os_major": macos_major_version(),
+        "accessibility": {
+            "granted": paste::accessibility_granted(),
+            "pane": MACOS_ACCESSIBILITY_PANE,
+        },
+        "full_disk_access": {
+            "status": macos_full_disk_access_status(),
+            "pane": MACOS_FULL_DISK_ACCESS_PANE,
+        },
+    })
+}
+
 #[tauri::command]
 async fn translate_text(window: WebviewWindow, host: State<'_, Host>, text: String, target_lang: Option<String>, source_lang: Option<String>) -> Result<Value, BridgeError> {
     authorize(&window)?;
@@ -4272,6 +4344,8 @@ fn main() {
             recover_data_dir,
             factory_reset,
             diagnostics_report,
+            diagnostics_request,
+            macos_permission_status,
             diagnostics_request,
             update_check,
             update_status,

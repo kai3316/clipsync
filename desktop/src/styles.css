@@ -1099,6 +1099,17 @@ button.primary { background: var(--accent-solid); color: var(--on-accent); }
 .diag-ok .diag-mark { color: var(--accent-text); }
 .diag-warn .diag-mark { color: var(--warn-text); }
 .diag-fail .diag-mark { color: var(--danger-text); }
+/* macOS privacy grants, kept separate from the sidecar's checks: only the
+   native app can answer AXIsProcessTrusted without asking macOS to prompt. */
+.diag-permissions { margin: 18px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
+.diag-permissions h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.diag-permissions ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.diag-permissions li { display: grid; gap: 3px; padding-left: 10px; border-left: 3px solid var(--line); line-height: 1.55; overflow-wrap: anywhere; }
+.diag-permissions li.diag-ok { border-left-color: var(--accent); }
+.diag-permissions li.diag-warn { border-left-color: var(--warn); }
+.diag-permissions li.diag-fail { border-left-color: var(--danger); }
+.diag-permissions li > .status-action { justify-self: start; }
+.diag-permissions .diag-label { margin-right: 8px; font-weight: 600; }
 button.danger { color: #fff; background: var(--danger); border-color: var(--danger); }
 /* A destructive control that stands on a page or a row rather than in a dialog.
    The fill belongs to the button that actually commits the deletion, and a page

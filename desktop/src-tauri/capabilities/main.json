@@ -127,6 +127,7 @@
     "allow-factory-reset",
     "allow-diagnostics-report",
     "allow-diagnostics-request",
+    "allow-macos-permission-status",
     "allow-update-check",
     "allow-update-status",
     "allow-update-download",
