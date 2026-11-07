@@ -214,7 +214,7 @@ ClipSync checks for a new version in Settings → Software update and asks befor
 - [Releases](https://github.com/kai3316/clipsync/releases): versions and installers
 - [Issues](https://github.com/kai3316/clipsync/issues): bug reports
 - [Website](https://kai3316.dpdns.org/index_en.html): screenshots and a fuller introduction
-- [Downloads](https://kai3316.dpdns.org/#download): Windows / macOS / Linux installers
+- [Downloads](https://kai3316.dpdns.org/index_en.html#download): Windows / macOS / Linux installers
 - [Support](https://kai3316.dpdns.org/sponsor/?lang=en): help keep the project maintained
 
 ## Development

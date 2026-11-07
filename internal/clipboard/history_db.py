@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import threading
 import time
 from pathlib import Path
@@ -548,7 +549,16 @@ class ClipboardHistoryDB:
             logger.warning("Failed to migrate history schema: %s", exc)
 
     def _secure_db_files(self) -> None:
-        """Restrict DB/WAL/SHM permissions to the owner (0600)."""
+        """Restrict DB/WAL/SHM permissions to the owner (0600).
+
+        Called on every connection checkout and again after every write, so
+        the common case is three files that are already 0600.  ``chmod`` is an
+        inode write even when the mode does not change (on a journalling
+        filesystem, one per file per call); a cached ``stat`` is not.  Asking
+        first keeps the guarantee -- WAL/SHM files created by the write that
+        just ran are still corrected -- without making every history write do
+        six metadata writes.
+        """
         if os.name != "posix":
             return
         for path in (
@@ -557,7 +567,8 @@ class ClipboardHistoryDB:
             Path(str(self._db_path) + "-shm"),
         ):
             with contextlib.suppress(OSError):
-                os.chmod(path, 0o600)
+                if stat.S_IMODE(os.stat(path).st_mode) != 0o600:
+                    os.chmod(path, 0o600)
 
     @staticmethod
     def _parse_types_json(raw) -> dict:

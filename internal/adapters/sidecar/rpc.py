@@ -16,6 +16,7 @@ from internal.application.bootstrap import SidecarApplication
 from internal.application.errors import ApplicationError
 from internal.application.use_cases.history import KINDS, SORTS
 from internal.config.config import FIELD_RANGES, PRIVILEGED_PORT_FLOOR, valid_service_type
+from internal.diagnostics.actions import ACTIONS as DIAGNOSTIC_ACTIONS
 from internal.sync.ai_config import MAX_ENTRIES as AI_MAX_ENTRIES
 from internal.transport.peer_id import id_forms
 
@@ -667,9 +668,7 @@ class Dispatcher:
             return self.app.diagnostics()
         if method == "diagnostics.request":
             validate_params(params, {
-                "action": (str, lambda v: v in (
-                "firewall", "local_network", "accessibility", "full_disk_access",
-            )),
+                "action": (str, lambda v: v in DIAGNOSTIC_ACTIONS),
             }, ("action",))
             return self.app.diagnostics_request(params["action"])
         if method == "update.check":

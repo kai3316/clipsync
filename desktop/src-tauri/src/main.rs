@@ -610,22 +610,6 @@ const MACOS_ACCESSIBILITY_PANE: &str =
 const MACOS_FULL_DISK_ACCESS_PANE: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
 
-#[cfg(target_os = "macos")]
-fn macos_major_version() -> u64 {
-    std::process::Command::new("sw_vers")
-        .arg("-productVersion")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|version| version.trim().split('.').next()?.parse().ok())
-        .unwrap_or(0)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_major_version() -> u64 {
-    0
-}
-
 /// Probe Full Disk Access without reading the protected database.
 ///
 /// macOS exposes no "is Full Disk Access granted" API.  Opening the user's TCC
@@ -656,17 +640,32 @@ fn macos_full_disk_access_status() -> &'static str {
 ///
 /// A pure read: opening diagnostics must never show an authorization prompt.
 /// `os_major` lets the window choose the pane name macOS 27 renamed.
+///
+/// Off the main thread twice over.  A synchronous Tauri command runs on the
+/// main thread, and an async one still runs its body on an async worker: all
+/// three probes here are synchronous OS calls (a cached `sw_vers` spawn, an
+/// AX API call and a file open), so they go to the blocking pool.  The invoke
+/// contract is unchanged -- the WebView already awaits every command.
 #[tauri::command]
-fn macos_permission_status() -> Value {
+async fn macos_permission_status() -> Value {
+    let (os_major, granted, full_disk) = tauri::async_runtime::spawn_blocking(|| {
+        (
+            paste::macos_major_version(),
+            paste::accessibility_granted(),
+            macos_full_disk_access_status(),
+        )
+    })
+    .await
+    .unwrap_or((0, false, "unknown"));
     json!({
         "supported": cfg!(target_os = "macos"),
-        "os_major": macos_major_version(),
+        "os_major": os_major,
         "accessibility": {
-            "granted": paste::accessibility_granted(),
+            "granted": granted,
             "pane": MACOS_ACCESSIBILITY_PANE,
         },
         "full_disk_access": {
-            "status": macos_full_disk_access_status(),
+            "status": full_disk,
             "pane": MACOS_FULL_DISK_ACCESS_PANE,
         },
     })
@@ -1268,10 +1267,22 @@ fn validate_log_lines(lines: u32) -> Result<(), BridgeError> {
     Ok(())
 }
 
-/// The two OS repairs the diagnostics report's hints point at. Anything else is
+/// The OS repairs the diagnostics report's hints point at. Anything else is
 /// refused here rather than forwarded to the sidecar.
+///
+/// Kept as one list rather than a chain of `!=`: the window's `DiagnosticAction`
+/// union, the sidecar's `diagnostics.request` validator and the repair actions
+/// themselves all name the same four values, and a chain that forgets one is
+/// only found by a user clicking a dead button.
+const DIAGNOSTIC_ACTIONS: [&str; 4] = [
+    "firewall",
+    "local_network",
+    "accessibility",
+    "full_disk_access",
+];
+
 fn validate_diagnostic_action(action: &str) -> Result<(), BridgeError> {
-    if action != "firewall" && action != "local_network" {
+    if !DIAGNOSTIC_ACTIONS.contains(&action) {
         return Err(BridgeError::new(
             "VALIDATION_ERROR",
             "Invalid diagnostics action",
@@ -4346,7 +4357,6 @@ fn main() {
             diagnostics_report,
             diagnostics_request,
             macos_permission_status,
-            diagnostics_request,
             update_check,
             update_status,
             update_download,
@@ -4981,9 +4991,23 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_actions_are_limited_to_the_two_os_repairs() {
-        for action in ["firewall", "local_network"] {
+    fn diagnostic_actions_match_the_window_and_the_sidecar() {
+        // The window can only send what types.ts declares, and the sidecar
+        // only accepts what rpc.py validates.  Both are parsed here so adding
+        // a repair on one side without the other fails this test instead of
+        // leaving a button that answers VALIDATION_ERROR.
+        for action in DIAGNOSTIC_ACTIONS {
             assert!(validate_diagnostic_action(action).is_ok());
+            let contract = include_str!("../../src/api/types.ts");
+            assert!(
+                contract.contains(&format!("\"{action}\"")),
+                "{action} is missing from the window's DiagnosticAction union"
+            );
+            let sidecar = include_str!("../../../internal/diagnostics/actions.py");
+            assert!(
+                sidecar.contains(&format!("\"{action}\"")),
+                "{action} is missing from the sidecar's repair actions"
+            );
         }
         for action in ["", "Firewall", "permissions", "quit", "../firewall"] {
             assert_eq!(
@@ -5003,6 +5027,19 @@ mod tests {
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .filter(|token| !token.is_empty())
             .collect()
+    }
+
+    #[test]
+    fn the_handler_registers_each_command_once() {
+        // generate_handler! expands into a match on the command name.  A name
+        // listed twice is an unreachable arm at best, and the second copy is
+        // easy to read as a second command when the list changes.  The build
+        // stays green either way, so this has to be asserted here.
+        let commands = handler_commands();
+        let mut seen = std::collections::HashSet::new();
+        for command in &commands {
+            assert!(seen.insert(command), "{command} is registered more than once");
+        }
     }
 
     #[test]

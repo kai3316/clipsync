@@ -1483,6 +1483,10 @@ class Discovery:
             try:
                 current = frozenset(get_all_local_addresses())
             except Exception:
+                # A read that fails once on a machine with no usable adapter
+                # used to be indistinguishable from "nothing changed".  The
+                # monitor kept going either way; now the reason is recorded.
+                logger.warning("Could not read local addresses", exc_info=True)
                 continue
             if not current or current == self._advertised_ips:
                 # An empty set is a transient disconnection — keep the old

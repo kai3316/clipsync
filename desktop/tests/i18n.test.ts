@@ -2,6 +2,7 @@ import { computed } from "vue";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_LOCALE, LOCALES, LOCALE_NAMES, currentLocale, normalizeLocale, setLocale, t } from "../src/i18n";
 import { EN } from "../src/i18n/en";
+import { TW } from "../src/i18n/zh-TW";
 
 afterEach(() => setLocale(DEFAULT_LOCALE));
 
@@ -151,6 +152,17 @@ describe("catalog coverage", () => {
   it("has an English entry for every string the shell translates", () => {
     const missing = [...translatedKeys()]
       .filter(([source]) => !(source in EN))
+      .map(([source, where]) => `${where}: ${source}`);
+    expect(missing).toEqual([]);
+  });
+
+  it("has a Traditional Chinese entry for every string the shell translates", () => {
+    // zh-TW is a real locale the picker offers, not a fallback to the
+    // Simplified source.  Coverage used to be asserted for EN only, so a key
+    // added with an English translation but no 繁體 one read as 简体 on a
+    // Traditional Chinese desktop with no failing test.
+    const missing = [...translatedKeys()]
+      .filter(([source]) => !(source in TW))
       .map(([source, where]) => `${where}: ${source}`);
     expect(missing).toEqual([]);
   });

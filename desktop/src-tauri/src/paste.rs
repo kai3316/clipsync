@@ -77,6 +77,32 @@ pub fn accessibility_granted() -> bool {
     }
 }
 
+/// The macOS major version, or 0 when it cannot be read.
+///
+/// `sw_vers` is a process spawn, and the answer cannot change while this
+/// process is alive.  Both the diagnostics card and the permission hint ask
+/// for it, so cache the first answer instead of spawning on every prompt and
+/// every paste failure.  Lives here rather than in a caller because every
+/// platform's paste code needs the same number.
+#[cfg(target_os = "macos")]
+pub fn macos_major_version() -> u64 {
+    static VERSION: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|version| version.trim().split('.').next()?.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn macos_major_version() -> u64 {
+    0
+}
+
 /// Give the focus back to *foreground*, wait for it to settle, then paste.
 ///
 /// A missing `foreground` is not a hard failure: hiding our window is usually
@@ -349,21 +375,11 @@ mod platform {
         unsafe { AXIsProcessTrusted() != 0 }
     }
 
-    fn macos_major_version() -> u64 {
-        std::process::Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-            .ok()
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|version| version.trim().split('.').next()?.parse().ok())
-            .unwrap_or(0)
-    }
-
     fn permission_hint() -> String {
         // macOS 27 Golden Gate renamed this pane, but the grant itself and the
         // settings URL did not change.  The sentence has to name what the user
         // will actually see in System Settings.
-        let name = if macos_major_version() >= 27 {
+        let name = if super::macos_major_version() >= 27 {
             "设备控制与数据访问"
         } else {
             "辅助功能"

@@ -46,6 +46,10 @@ REMOTE_RATE_MAX = 5
 # The sender's delivery budget republishes an unacked frame well inside this,
 # so the redelivery applies the clipboard without stacking a second row.
 HISTORY_ONLY_TTL = 300.0
+# See _history_only_remember: the ring that keeps a failed/crossed clipboard
+# write from stacking a second history row has its own bound, independent of
+# the loop-prevention ring above.
+HISTORY_ONLY_RING_SIZE = 64
 
 # Which per-type sync switch governs which content type.  Two facts are in this
 # table rather than in the filter: an image is one switch whether it is a bitmap
@@ -645,11 +649,11 @@ class SyncManager:
                     )
             else:
                 recorded = already
-            if recorded:
-                self._history_only_remember(content_hash)
             # Remembered even when the clipboard write is still owed: the
             # redelivery carries the same content and must apply the clipboard,
-            # not stack a second row.
+            # not stack a second row.  One unconditional call covers both the
+            # recorded and the retryable path; the guarded duplicate used to
+            # rebuild and scan the ring twice for every received clip.
             self._history_only_remember(content_hash)
             if not retryable:
                 # A retryable drop is coming back for the clipboard write, so it
@@ -682,8 +686,8 @@ class SyncManager:
         ]
         if not any(h == content_hash for h, _ in self._history_only):
             self._history_only.append((content_hash, now))
-            if len(self._history_only) > 64:
-                self._history_only = self._history_only[-64:]
+            if len(self._history_only) > HISTORY_ONLY_RING_SIZE:
+                self._history_only = self._history_only[-HISTORY_ONLY_RING_SIZE:]
 
     def _on_clipboard_change(self):
         """Called by the clipboard monitor when local clipboard changes.

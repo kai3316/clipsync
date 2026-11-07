@@ -680,7 +680,13 @@ class LinuxClipboardMonitor(ClipboardMonitor):
                         self.last_concealed = _password_manager_hint()
                         self._callback()
                     except Exception:
-                        pass
+                        # A failing callback used to leave the poll loop alive
+                        # but the sync silently dead: last_full_hash was already
+                        # advanced, so no later clipboard event could retrigger
+                        # it.  Say so, matching the macOS and Windows monitors.
+                        logger.warning(
+                            "Clipboard change callback failed", exc_info=True
+                        )
             elif not current:
                 # Clipboard was cleared — reset so the next copy (even of
                 # previously-seen content) is treated as a change.

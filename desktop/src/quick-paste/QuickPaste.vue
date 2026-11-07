@@ -884,6 +884,9 @@ onMounted(() => {
 onUnmounted(() => {
   clearTimeout(timer);
   clearTimeout(rowClickTimer);
+  // The hover preview is a 160 ms timer too.  Leaving it armed lets it fire
+  // after unmount and repopulate hoverItem on a component that is gone.
+  clearTimeout(hoverTimer);
   fetchRun?.stop();
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("blur", onWindowBlur);

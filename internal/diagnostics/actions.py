@@ -43,6 +43,17 @@ FULL_DISK_ACCESS_PANE = (
 )
 WINDOWS_FIREWALL_URI = "ms-settings:network-firewall"
 
+# The one list of repairs.  ``rpc.py`` validates against it and the desktop
+# host has its own copy that a test keeps in step; writing the members out in
+# the validator is how the macOS panes came to be accepted by the sidecar but
+# refused one layer earlier.
+ACTIONS = (
+    "firewall",
+    "local_network",
+    "accessibility",
+    "full_disk_access",
+)
+
 
 def macos_open_settings(uri: str) -> bool:
     """Open a macOS System Settings pane (best-effort)."""

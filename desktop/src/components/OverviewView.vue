@@ -106,21 +106,30 @@ function announceReady() {
   emit("ready");
 }
 
+/** Only the newest read may write this page.  The five-second poll and an
+ *  immediate `load()` after a settings change can overlap, and a slow older
+ *  answer used to land last and put the counters back to what they were
+ *  before the click.  The QR read below uses the same guard. */
+let overviewGeneration = 0;
+
 async function load() {
   if (!props.enabled || disposed) return;
+  const mine = ++overviewGeneration;
+  const current = () => !disposed && mine === overviewGeneration;
   loading.value = true;
   try {
     const data = await bridge.overview();
-    if (disposed) return;
+    if (!current()) return;
     overview.value = data;
     failed.value = "";
   } catch (error: any) {
-    if (!disposed) failed.value = error?.message || t("读取概览失败");
+    if (current()) failed.value = error?.message || t("读取概览失败");
   } finally {
-    if (!disposed) loading.value = false;
+    if (current()) loading.value = false;
     // Success or failure, the first frame is what the boot frame was waiting
-    // for; a page that reports a failed read is still a page.
-    if (!disposed) announceReady();
+    // for; a page that reports a failed read is still a page.  A superseded
+    // read leaves this to the newer one that replaced it.
+    if (current()) announceReady();
   }
 }
 

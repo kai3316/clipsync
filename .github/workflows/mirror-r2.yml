@@ -15,7 +15,7 @@ on:
       tag:
         description: "Release tag to mirror"
         required: true
-        default: "v1.3.3"
+        default: "v1.3.4"
 
 permissions:
   contents: read
